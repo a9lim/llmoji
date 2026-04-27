@@ -101,8 +101,6 @@ def iter_journal(
             had_thinking=False,
             assistant_text=str(row.get("assistant_text") or ""),
             first_word=match.first_word,
-            kaomoji=match.kaomoji,
-            kaomoji_label=match.label,
             surrounding_user=str(row.get("user_text") or ""),
         )
         turn += 1

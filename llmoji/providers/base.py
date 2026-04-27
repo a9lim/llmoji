@@ -196,7 +196,7 @@ class Provider:
         provider's hook is currently wired up in settings."""
         raise NotImplementedError
 
-    # --- helpers for JSON-format settings (Claude Code, Codex) ---
+    # --- helpers for JSON-format settings (Claude Code) ---
 
     def _register_json_settings(
         self,
@@ -206,22 +206,40 @@ class Provider:
     ) -> None:
         """Append the hook to a JSON settings file under ``hooks[<event>]``.
 
-        The shape Claude Code / Codex both expect:
+        The shape Claude Code expects:
         ``{"hooks": {"Stop": [{"hooks": [{"type": "command",
         "command": "<path>"}]}]}}``.
 
         Idempotent — re-registering the same hook is a no-op.
+
+        Refuses to mutate when the existing settings file is present
+        but unparseable (loud failure beats silently wiping a
+        corrupt-but-recoverable config). Same for non-dict payloads
+        — JSON ``[]`` / ``"string"`` / etc.
         """
-        cfg: dict = _read_json(self.settings_path) or {}
+        cfg = _load_json_strict(self.settings_path)
+        hooks_field = cfg.get("hooks")
+        if hooks_field is not None and not isinstance(hooks_field, dict):
+            raise SettingsCorruptError(
+                self.settings_path,
+                f"existing 'hooks' field is {type(hooks_field).__name__}, "
+                f"not an object",
+            )
         hooks = cfg.setdefault("hooks", {})
+        bucket_field = hooks.get(event)
+        if bucket_field is not None and not isinstance(bucket_field, list):
+            raise SettingsCorruptError(
+                self.settings_path,
+                f"existing hooks[{event!r}] is "
+                f"{type(bucket_field).__name__}, not an array",
+            )
         bucket = hooks.setdefault(event, [])
-        # Each bucket entry is {"matcher"?: ..., "hooks": [{"type":
-        # "command", "command": "..."}]}. We add ours as a fresh entry
-        # if no existing entry already references our hook.
         cmd = str(self.hook_path)
         for entry in bucket:
+            if not isinstance(entry, dict):
+                continue
             for h in entry.get("hooks", []) or []:
-                if h.get("command") == cmd:
+                if isinstance(h, dict) and h.get("command") == cmd:
                     return  # already registered
         new_entry: dict = {"hooks": [{"type": "command", "command": cmd}]}
         if matcher_predicate is not None:
@@ -232,13 +250,31 @@ class Provider:
     def _unregister_json_settings(self, *, event: str) -> None:
         if not self.settings_path.exists():
             return
-        cfg: dict = _read_json(self.settings_path) or {}
-        hooks = cfg.get("hooks") or {}
-        bucket = hooks.get(event) or []
+        try:
+            cfg = _load_json_strict(self.settings_path)
+        except SettingsCorruptError:
+            # If the file is corrupt we'd rather leave it alone than
+            # blast it with our own clean output. The caller's
+            # `uninstall` will still remove the hook script; if the
+            # user's settings are unparseable we cannot reliably tell
+            # what's there to remove.
+            return
+        hooks = cfg.get("hooks")
+        if not isinstance(hooks, dict):
+            return
+        bucket = hooks.get(event)
+        if not isinstance(bucket, list):
+            return
         cmd = str(self.hook_path)
         kept = []
         for entry in bucket:
-            inner = [h for h in (entry.get("hooks") or []) if h.get("command") != cmd]
+            if not isinstance(entry, dict):
+                kept.append(entry)
+                continue
+            inner = [
+                h for h in (entry.get("hooks") or [])
+                if not (isinstance(h, dict) and h.get("command") == cmd)
+            ]
             if inner:
                 kept.append({**entry, "hooks": inner})
         if kept:
@@ -254,23 +290,63 @@ class Provider:
     def _is_registered_json_settings(self, *, event: str) -> bool:
         if not self.settings_path.exists():
             return False
-        cfg: dict = _read_json(self.settings_path) or {}
-        bucket = ((cfg.get("hooks") or {}).get(event)) or []
+        try:
+            cfg = _load_json_strict(self.settings_path)
+        except SettingsCorruptError:
+            return False
+        hooks = cfg.get("hooks")
+        if not isinstance(hooks, dict):
+            return False
+        bucket = hooks.get(event)
+        if not isinstance(bucket, list):
+            return False
         cmd = str(self.hook_path)
         for entry in bucket:
+            if not isinstance(entry, dict):
+                continue
             for h in entry.get("hooks", []) or []:
-                if h.get("command") == cmd:
+                if isinstance(h, dict) and h.get("command") == cmd:
                     return True
         return False
 
 
-def _read_json(path: Path) -> dict | None:
+class SettingsCorruptError(RuntimeError):
+    """Raised when a provider's settings file exists but is not in a
+    shape we can edit safely.
+
+    The pre-fix `_read_json` would silently wipe a corrupt-but-
+    valuable settings file by treating it as ``{}``. We'd rather the
+    user see a loud error so they can investigate.
+    """
+
+    def __init__(self, path: Path, why: str) -> None:
+        super().__init__(
+            f"refusing to edit {path}: {why}. Fix the file by hand, "
+            f"or move it aside, then re-run `llmoji install`."
+        )
+        self.path = path
+        self.why = why
+
+
+def _load_json_strict(path: Path) -> dict:
+    """Load a JSON settings file, returning ``{}`` for missing /
+    empty files but raising :class:`SettingsCorruptError` for
+    unparseable / non-object content."""
     if not path.exists():
-        return None
+        return {}
+    text = path.read_text()
+    if not text.strip():
+        return {}
     try:
-        return json.loads(path.read_text() or "{}")
-    except json.JSONDecodeError:
-        return None
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise SettingsCorruptError(path, f"invalid JSON ({e})") from e
+    if not isinstance(data, dict):
+        raise SettingsCorruptError(
+            path,
+            f"top-level JSON value is {type(data).__name__}, not an object",
+        )
+    return data
 
 
 def _write_json(path: Path, data: dict) -> None:

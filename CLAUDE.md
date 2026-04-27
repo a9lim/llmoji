@@ -110,11 +110,12 @@ rules declare "v1 corpus only"; bumping any of them is a major
 version bump (`llmoji` 2.0.0):
 
 - **`llmoji.taxonomy`**:
-  - `KAOMOJI_TAXONOMY` (gemma-tuned label dict, used by `extract`)
-  - `KAOMOJI_START_CHARS` (leading-glyph filter set; rules A–P
-    canonicalization rules in `canonicalize_kaomoji`)
+  - `KAOMOJI_START_CHARS` (leading-glyph filter set)
+  - rules A–P in `canonicalize_kaomoji`
   - `is_kaomoji_candidate` validator contract
-  - `extract` / `KaomojiMatch`
+  - `extract` / `KaomojiMatch` (span-only — no affect labels;
+    gemma-tuned label dicts moved to research-side
+    `llmoji_study.taxonomy_labels`)
 - **`llmoji.haiku_prompts`**:
   - `DESCRIBE_PROMPT_WITH_USER`, `DESCRIBE_PROMPT_NO_USER`
   - `SYNTHESIZE_PROMPT`
@@ -184,7 +185,8 @@ llmoji/
                            # data); rendered at install time
       claude_code.sh.tmpl
       codex.sh.tmpl
-      hermes.sh.tmpl
+      hermes.sh.tmpl                # post_llm_call (journal logger)
+      hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
     paths.py               # ~/.llmoji home, cache, bundle, journals
     analyze.py             # the analyze pipeline (Stage A + B + bundle)
     upload.py              # tar + HF / email targets
@@ -235,24 +237,78 @@ Flipping any of these would miss every multi-step turn's kaomoji.
   reads a state file at `~/.hermes/.llmoji-children`; populating
   that file is part of the hermes empirical-validation work.
 
-### Hermes is "implemented from docs", not battle-tested
+### Provider install refuses to clobber existing config
 
-The hermes provider (template, payload extraction, sidechain
-correlation strategy) is built from the documented hermes-agent
-v0.11.0 contract. Three items still want real-traffic verification
-before claiming stability:
+Three corruption paths are explicitly defended:
+
+1. **Malformed JSON in `~/.claude/settings.json`** — pre-fix the
+   loader returned `None` and `install` would silently treat it as
+   `{}` and rewrite. Post-fix `_load_json_strict` raises
+   `SettingsCorruptError` and the user has to fix the file by hand
+   before `install` will touch it.
+2. **Existing `[hooks.stop]` section in `~/.codex/config.toml`** —
+   appending a fresh `[hooks.stop]` block would yield invalid
+   duplicate-table TOML. `CodexProvider._has_unmanaged_hooks_stop`
+   detects an unmanaged stanza outside our marker fence and refuses
+   to install.
+3. **Existing top-level `hooks:` key in `~/.hermes/config.yaml`** —
+   appending another `hooks:` makes a duplicate-key YAML doc that
+   silently last-write-wins. `HermesProvider._has_unmanaged_hooks_top_level`
+   refuses to install.
+
+In all three cases the user gets a `SettingsCorruptError` with a
+specific path and reason. They edit the file (move-aside or merge
+by hand) and re-run.
+
+The non-managed analogue — a user re-running `install` after
+already installing once — is fully idempotent. The marker fences in
+codex/hermes mean the second `install` is a no-op; the JSON-edit
+path in claude_code checks for an existing entry with our command
+string and skips.
+
+### Bundle is allowlisted, not just-tar-everything
+
+`upload.tar_bundle()` only ships files in `BUNDLE_ALLOWLIST`
+(`manifest.json`, `descriptions.jsonl` — the v1.0 frozen schema).
+Any other file in `~/.llmoji/bundle/` makes `tar_bundle` raise
+`FileExistsError`. `analyze` clears loose files in the bundle dir
+before writing, so a clean run produces exactly the two-file
+schema. The two together mean: stale per-instance descriptions,
+user-added notes, hidden state caches, etc. cannot accidentally
+leak through `upload`.
+
+### Hermes provider — two-hook design from docs
+
+The hermes provider installs **two** hooks, both wired through the
+same shell-hooks mechanism:
+
+- `~/.hermes/agent-hooks/post-llm-call.sh` — main journal logger.
+- `~/.hermes/agent-hooks/subagent-stop.sh` — companion that records
+  delegated child session_ids to `~/.hermes/.llmoji-children` so
+  the main hook can drop them.
+
+Both registered in `~/.hermes/config.yaml` under the `hooks:` block,
+inside our managed marker fence so re-running install is idempotent
+and uninstall removes the stanza cleanly.
+
+This is built from the documented hermes-agent v0.11.0 hook
+contract (the [Event Hooks docs][hermes-hooks]). Three items still
+want real-traffic verification before claiming stability:
 
 1. The exact `extra.*` keys delivered by `post_llm_call` (the docs
    example block was for `pre_tool_call`).
-2. That session-correlation actually filters child sessions cleanly.
+2. That session-correlation against `subagent_stop` actually filters
+   child sessions cleanly under real `delegate_task` traffic.
 3. That `extra.user_message` arrives clean — no system-injection
    prefixes that need filtering. The Provider's
    `system_injected_prefixes` is `[]` per the docs; if real traffic
    shows otherwise, populate the list and re-render.
 
-Treat the hermes hook as experimental until that validation lands;
-the journal schema and CLI surface are stable across the
-verification.
+Treat the hermes hooks as docs-confirmed-but-untested until that
+validation lands; the journal schema and CLI surface are stable
+across the verification.
+
+[hermes-hooks]: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/
 
 ### Cache directory is leakier than the bundle
 

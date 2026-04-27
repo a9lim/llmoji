@@ -8,7 +8,7 @@
 # journal in the canonical 6-field schema:
 #
 #   ts             ISO-8601 UTC  hook fire time
-#   model          str           active model slug (from extra.model)
+#   model          str           extra.model
 #   cwd            str           working directory at hook fire
 #   kaomoji        str           leading non-letter prefix of the
 #                                final assistant_response, ≥2 bytes
@@ -17,12 +17,12 @@
 #                                leading kaomoji + surrounding
 #                                whitespace
 #
-# Consumed by `llmoji analyze` via llmoji.sources.journal.
+# Sidechain handling: a companion subagent_stop hook (installed
+# alongside this one) writes child session_ids to
+# $CHILD_STATE_PATH. We drop matching session_ids here so subagent
+# turns don't pollute the journal.
 #
-# ⚠ This template is implemented from the documented hermes-agent
-# v0.11.0 contract but has not yet been validated against live
-# traffic. Treat as experimental until empirically confirmed; the
-# journal schema is stable across that verification.
+# Consumed by `llmoji analyze` via llmoji.sources.journal.
 set -u
 
 INPUT=$(cat)
@@ -30,20 +30,21 @@ INPUT=$(cat)
 # Hermes payload shape (post_llm_call): all six llmoji fields land
 # in one event under the .extra dict.
 ASSISTANT_TEXT=$(printf '%s' "$INPUT" | jq -r '.extra.assistant_response // empty' 2>/dev/null || printf '')
-[ -z "$ASSISTANT_TEXT" ] && exit 0
+[ -z "$ASSISTANT_TEXT" ] && { echo '{}'; exit 0; }
 
 USER_TEXT=$(printf '%s' "$INPUT"  | jq -r '.extra.user_message     // empty' 2>/dev/null || printf '')
 MODEL=$(printf '%s' "$INPUT"      | jq -r '.extra.model            // empty' 2>/dev/null || printf '')
 CWD=$(printf '%s' "$INPUT"        | jq -r '.cwd                    // empty' 2>/dev/null || printf '')
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id             // empty' 2>/dev/null || printf '')
 
-# Sidechain filter: post_llm_call fires for both parent and child
-# (delegate_task) sessions. The companion subagent_stop registration
-# writes child session_ids to a state file; drop matches here.
-# State file is line-per-id, no JSON parsing needed.
-CHILD_STATE="$HOME/.hermes/.llmoji-children"
+# Sidechain filter: post_llm_call fires for both parent and
+# subagent (delegate_task) sessions. The companion subagent_stop
+# hook writes child session_ids here as plain text, one per line.
+# Drop matches.
+CHILD_STATE="${HOME}/.hermes/.llmoji-children"
 if [ -n "$SESSION_ID" ] && [ -f "$CHILD_STATE" ]; then
   if grep -qFx "$SESSION_ID" "$CHILD_STATE" 2>/dev/null; then
+    echo '{}'
     exit 0
   fi
 fi
@@ -55,16 +56,18 @@ KAOMOJI=$(printf '%s' "$FIRST_LINE" \
   | sed -E 's/[A-Za-z].*$//' \
   | sed -E 's/[[:space:]]+$//')
 if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ]; then
+  echo '{}'
   exit 0
 fi
 case "$KAOMOJI" in
   $KAOMOJI_START_CASE) ;;
-  *) exit 0 ;;
+  *) echo '{}'; exit 0 ;;
 esac
 case "$KAOMOJI" in
-  *\\*) exit 0 ;;
+  *\\*) echo '{}'; exit 0 ;;
 esac
 if [ "${#KAOMOJI}" -gt 32 ]; then
+  echo '{}'
   exit 0
 fi
 

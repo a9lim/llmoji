@@ -1,30 +1,25 @@
-"""Kaomoji taxonomy for the pilot.
+"""Kaomoji canonicalization, validation, and extraction.
 
-Two parallel dicts, one per axis under test:
-  TAXONOMY           — happy.sad labels (+1 happy, -1 sad)
-  ANGRY_CALM_TAXONOMY — angry.calm labels (+1 angry, -1 calm)
+The public v1.0 surface is everything in this module. Bumping any
+of `KAOMOJI_START_CHARS`, `is_kaomoji_candidate`, `extract`, or the
+canonicalization rules below is a major version bump — the central
+HF dataset declares "v1 corpus only" against these invariants.
 
-Both map kaomoji-string → int pole. A kaomoji may appear in one dict,
-both, or neither (the "other" bucket). ``extract()`` returns the
-happy.sad match for back-compat with v1 analysis; ``label_on(axis,
-form)`` is the generic accessor.
-
-Both sets were seeded from eriskii's Claude-faces catalog
-(https://eriskii.net/projects/claude-faces) and extended in place after
-observing gemma-4-31b-it's actual emissions. Locked taxonomies imply
-reproducibility across runs; extending after a taxonomy edit requires
-re-labeling the existing ``pilot_raw.jsonl`` (see CLAUDE.md).
-
-The model's dialect preferences are distinct per steering direction —
-``(｡X｡)`` bracket-dots under natural happy, ``(._.)`` ASCII under
-strong sad, likely ``(ಠ益ಠ)``-family under strong angry. Always run
-``00_vocab_sample.py``-style inspection before locking a new axis.
+Pilot-specific affect labels (`+1 happy / -1 sad`, `+1 angry / -1
+calm`, etc.) live with the research-side code in
+``llmoji-study/llmoji_study/taxonomy_labels.py``. They were here in
+v0.x; the v1.0 split extracts them because they're gemma-tuned and
+have no place in a provider-agnostic public package.
 
 Extractor notes:
-  - Primary lookup is exact longest-prefix match against TAXONOMY.
-  - Fallback is a balanced-paren span, so whitespace-padded kaomoji
-    like ``(｡˃ ᵕ ˂ )`` surface with a human-readable first_word even
-    when they miss the taxonomy.
+  - `extract` returns a `KaomojiMatch` containing the validated
+    leading kaomoji span (or `""` if the input doesn't look like a
+    kaomoji-prefixed message).
+  - The fallback is a balanced-paren span, so whitespace-padded
+    kaomoji like ``(｡˃ ᵕ ˂ )`` surface with a human-readable
+    `first_word` even when no exact taxonomy entry exists.
+  - For research-side label lookups, see
+    ``llmoji_study.taxonomy_labels.extract_with_label``.
 """
 
 from __future__ import annotations
@@ -33,181 +28,49 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-# Built from observed output across all four arms of the pilot run
-# (see data/pilot_raw.jsonl). The model's kaomoji dialect shifts
-# substantially under steering:
-#   - unsteered: Japanese-style (｡X｡) bracket-dots form dominates
-#   - happy-steered: simpler bracket forms, flower/hug decorations
-#   - sad-steered: collapses to ASCII minimalism ((._.) family)
-# Any form observed ≥2 times in any condition and visually unambiguous
-# is included below. Forms that are clearly model-corruption
-# (e.g. '(｡•impresa•)' — the Italian word 'impresa' appearing inside
-# the kaomoji at high-α sad-steering) are excluded.
-TAXONOMY: dict[str, int] = {
-    # --- happy pole: default dialect ---
-    "(｡◕‿◕｡)":    +1,   # unsteered default happy
-    "(๑˃ᴗ˂)ﻭ":   +1,   # enthusiastic / cheering
-    "(✿◠‿◠)":     +1,   # flower-adorned gentle warm
-    "(｡♥‿♥｡)":    +1,   # very happy / loving
-    "(｡◕ᴗ◕｡)":    +1,   # dialect variant
-    "(｡^‿^｡)":    +1,   # dialect variant
-    "(｡˃ ᵕ ˂ )":  +1,   # whitespace-padded happy
-    "(ﾉ◕ヮ◕)":    +1,   # throwing-arms happy
-    "(☀️‿☀️)":     +1,   # sun-eyed happy
-    "(っ´ω`)":    +1,   # hugging with cute face
-
-    # --- happy pole: steered / simpler-dialect variants ---
-    "(◕‿◕)":      +1,   # simple smile-eyed happy (dominant under happy-steering)
-    "(✿◕‿◕)":     +1,   # flower + simple smile
-    "(づ｡◕‿◕｡)":  +1,   # reaching/hugging with happy face
-    "(๑˃ᴗ˃)":    +1,   # enthusiastic (variant mouth direction)
-    "(✿^▽^)":    +1,   # triangular-smile with flower
-    "( ^v^ )":    +1,   # caret-eyed simple smile
-    "(✿˃ᴗ˃)":    +1,   # enthusiastic with flower
-
-    # --- sad pole: default dialect ---
-    "(｡•́︿•̀｡)":   -1,   # unsteered default sad (pouty)
-    "(｡╯︵╰｡)":    -1,   # downcast
-    "(っ╥﹏╥)っ":   -1,   # crying / needs-hug
-    "(｡T_T｡)":    -1,   # dialect variant
-    "(｡ŏ﹏ŏ｡)":    -1,   # dialect variant (pouty-fearful)
-    "(｡•́﹏•̀｡)":   -1,   # dialect variant (pouty, alt mouth)
-
-    # --- sad pole: steered / minimalist-dialect variants ---
-    "(._.)":      -1,   # ASCII minimalist, dominant under sad-steering
-    "( . .)":     -1,   # spaced minimalist
-    "( . . )":    -1,   # wider-spaced minimalist
-    "( ._.)":     -1,   # leading-space minimalist
-    "( . . . )":  -1,   # triple-dot minimalist
-    "( . _ . )":  -1,   # spaced ASCII sad
-    "( ˙ ˙ ˙ )":  -1,   # dot-trail minimalist
-    "(｡ ﹏ ｡)":    -1,   # closed-eyes crying
-    "(｡△｡)":      -1,   # triangle-mouth sad
-    "(｡•﹏•)":    -1,   # simpler pout
-    "(｡╥｡)":      -1,   # tear-eye
-    "(｡ ﾟ ｡)":    -1,   # whimper
-    "( ｡ ｡ )":    -1,   # minimal bracket-dots
-    "( •_• )":    -1,   # spaced blank-sad
-    "(っ╥╯﹏╰╥)":  -1,   # crying with multiple tears
-    "(っ˘̩╭╮˘̩)":   -1,   # closed-eye sad hug
-
-    # --- happy pole: additional hugging / decorated variants ---
-    "(っ´ω`c)":   +1,   # reaching hug with cute face
-    "(っ´ω` )":   +1,   # hug variant
-    "(っ´ω`ｃ)":  +1,   # hug variant (fullwidth c)
-    "(✿˃ᴗ˃)":    +1,   # enthusiastic with flower (variant)
-}
-
-POLE_NAMES = {+1: "happy", -1: "sad", 0: "other"}
-
-# Parallel dict for the angry.calm axis. Seeded from eriskii's catalog;
-# candidate forms to expect the model emitting under ±0.5 angry/calm
-# steering. Expect to extend post-hoc the same way we did for sad
-# minimalist forms — the model's actual dialect under these arms is not
-# known yet.
-ANGRY_CALM_TAXONOMY: dict[str, int] = {
-    # --- angry pole (+1) ---
-    "(ಠ_ಠ)":           +1,   # disapproving stare
-    "(ಠ益ಠ)":           +1,   # glaring
-    "(╬ಠ益ಠ)":          +1,   # super-glare
-    "(ノಠ益ಠ)ノ":         +1,   # throwing arms, angry
-    "(ノಠ益ಠ)ノ彡┻━┻":    +1,   # angry table-flip
-    "(╯°□°)╯":         +1,   # throwing gesture
-    "(╯°□°)╯︵ ┻━┻":    +1,   # classic table-flip
-    "(ノ°Д°)ノ︵ ┻━┻":   +1,   # angry table-flip variant
-    "(ꐦ°᷄д°᷅)":         +1,   # fury
-    "(＃°Д°)":          +1,   # wide-eye fury, fullwidth #
-    "(#°Д°)":          +1,   # wide-eye fury, ASCII #
-    "(｀ε´)":           +1,   # peeved
-    "(╭ರ_•́)":          +1,   # pissed off
-    "( `Д´)":          +1,   # furious
-
-    # --- calm pole (-1) ---
-    "(´-ω-`)":         -1,   # peaceful
-    "( ˘ω˘ )":         -1,   # sleepy-calm
-    "(︶ω︶)":           -1,   # content
-    "(￣ω￣)":           -1,   # content / placid
-    "(´ω`)":           -1,   # peaceful
-    "(─‿─)":           -1,   # serene
-    "( ˘▽˘)":          -1,   # calm-content
-    "(ーωー)":          -1,   # placid
-    "(´ー`)":           -1,   # calm
-    "(﹏‿﹏)":           -1,   # dreamy-calm
-    "(´ ▽`)":          -1,   # soft calm
-    "( ˘⌣˘ )":         -1,   # content calm
-    "( -_-)":          -1,   # placid deadpan (not clearly angry)
-    "(￣ー￣)":          -1,   # cool-calm
-    "(⌐■_■)":          -1,   # too-cool-to-care (calm-adjacent)
-
-    # --- observed pilot v2 forms (gemma-4-31b-it, α=0.5) ---
-    # angry pole: table-flip remnants (extractor clips at first `)`;
-    # full emissions look like ``(╯°°)╯┻╯`` with varying internal chars).
-    "(╯°°)":           +1,
-    "(╯°)":            +1,
-    # calm pole: soft-smile and emoji-bracket forms emitted under
-    # calm-steering. The pure-emoji bypass (``🌿``, ``☀️``, ``🚀``, ``🇵🇹``)
-    # is tracked separately as the "kaomoji-bypass" phenomenon rather
-    # than labeled calm here — see analysis notes.
-    "(｡•ᴗ•｡)":         -1,   # calm pouty-content
-    "( 🌿 )":           -1,   # leaf-in-brackets (condolence framing)
-    "( ☁️ )":           -1,   # cloud-in-brackets
-    "( 🫂 )":           -1,   # hug-in-brackets
-    "(ᵔᴥᵔ)":           -1,   # teddy-bear calm
-}
-
-
-def label_on(axis: str, form: str) -> int:
-    """Return the pole label (+1 / -1 / 0) for `form` on the named axis.
-
-    Unknown axes raise ValueError so typos fail loudly.
-    """
-    if axis == "happy.sad":
-        return TAXONOMY.get(form, 0)
-    if axis == "angry.calm":
-        return ANGRY_CALM_TAXONOMY.get(form, 0)
-    raise ValueError(f"unknown axis {axis!r}")
-
 # Bracket pairs the fallback extractor treats as kaomoji boundaries.
 _OPEN_BRACKETS = "([（｛"
 _CLOSE_BRACKETS = ")]）｝"
 
-# Leading-glyph filter for kaomoji-bearing assistant turns. Used by the
-# Python validators (extract, backfill_journals._kaomoji_prefix) and
-# mirrored inline in `~/.claude/hooks/kaomoji-log.sh` /
-# `~/.codex/hooks/kaomoji-log.sh`. Centralized here so the shell case
-# patterns and Python `frozenset` stay in sync — single source of truth.
+# Leading-glyph filter for kaomoji-bearing assistant turns. Used by
+# `extract`, by `is_kaomoji_candidate`, and by every shell hook
+# template under `llmoji._hooks/` (rendered into the bash `case`
+# pattern via `llmoji.providers.base.render_kaomoji_start_chars_case`).
+# Single source of truth; previous versions duplicated this set in
+# five places, which is the gotcha the v1.0 split resolved.
 KAOMOJI_START_CHARS: frozenset[str] = frozenset("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒")
 
 
 # Maximum length of a real kaomoji we expect to encounter. Real
-# kaomoji span ~5–25 characters; the longest in our corpus is
-# ``(╯°□°)╯︵ ┻━┻`` at ~12 chars. The cap rejects two-line balanced-
-# paren prose accidentally captured by the bracket-span scan.
+# kaomoji span ~5–25 characters; the longest form encountered in
+# the gemma corpus was ``(╯°□°)╯︵ ┻━┻`` at ~12 chars. The cap
+# rejects two-line balanced-paren prose accidentally captured by
+# the bracket-span scan.
 _KAOMOJI_MAX_LEN = 32
 
-# A run of 4+ consecutive ASCII letters indicates prose, not a kaomoji.
-# The hook's `[A-Za-z].*$` cut already strips at the first letter, so
-# this is belt-and-suspenders for the gemma extractor path and for
-# catching pre-cut garbage in legacy data.
+# A run of 4+ consecutive ASCII letters indicates prose, not a
+# kaomoji. Belt-and-suspenders for the gemma extractor path and for
+# catching pre-cut garbage in legacy data — the shell hook's
+# ``[A-Za-z].*$`` cut already strips at the first letter.
 _LETTER_RUN_RE = re.compile(r"[A-Za-z]{4}")
 
 
 def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     """Return True iff `s` looks like a real kaomoji prefix.
 
-    Used by ``extract`` and the journal-prefix validators (live-hook
+    Used by `extract` and the journal-prefix validators (live-hook
     Python mirror, backfill replay) to reject prose, markdown-escape
-    artifacts, and truncated junk that the leading-prefix sed pipeline
-    would otherwise let through.
+    artifacts, and truncated junk that the leading-prefix sed
+    pipeline would otherwise let through.
 
     Rules (all must pass):
-      - length 2..``max_len``
-      - first char ∈ ``KAOMOJI_START_CHARS``
+      - length 2..`max_len`
+      - first char ∈ `KAOMOJI_START_CHARS`
       - no ASCII backslash (markdown-escape artifact, e.g.
-        ``(\\*´∀｀\\*)`` came from Claude emitting a literal ``\\*``
-        that the model treated as Markdown escape)
+        ``(\\*´∀｀\\*)`` came from a model emitting a literal ``\\*``
+        that it treated as Markdown escape)
       - no run of 4+ consecutive ASCII letters (prose)
-      - if starts with an opening bracket from ``_OPEN_BRACKETS``,
+      - if starts with an opening bracket from `_OPEN_BRACKETS`,
         the span must be bracket-balanced
     """
     if not (2 <= len(s) <= max_len):
@@ -218,10 +81,10 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
         return False
     if _LETTER_RUN_RE.search(s):
         return False
-    # Require bracket balance regardless of leading char. Catches both
-    # `(unclosed` forms AND `ヽ(^`-style truncations where a non-bracket
-    # leader like `ヽ` precedes an unclosed inner `(` — the sed-cut at
-    # first ASCII letter can chop these mid-bracket.
+    # Require bracket balance regardless of leading char. Catches
+    # `(unclosed` AND `ヽ(^`-style truncations where a non-bracket
+    # leader like `ヽ` precedes an unclosed inner `(` — the sed-cut
+    # at first ASCII letter can chop these mid-bracket.
     depth = 0
     for c in s:
         if c in _OPEN_BRACKETS:
@@ -237,29 +100,32 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
 
 @dataclass(frozen=True)
 class KaomojiMatch:
-    """Result of running `extract` against a generated text."""
-    first_word: str        # the extracted leading kaomoji-like span (or "")
-    kaomoji: str | None    # the matched taxonomy entry, or None
-    label: int             # +1 / -1 / 0 (other)
+    """Result of running `extract` against a generated text.
 
-    @property
-    def pole(self) -> str:
-        return POLE_NAMES[self.label]
+    Slim public shape: just the validated leading span. Pre-v1.0
+    versions also reported a `kaomoji` (taxonomy match) and `label`
+    (+1/-1/0 affect pole) — those are now research-side
+    (`llmoji_study.taxonomy_labels.LabeledKaomojiMatch`) because the
+    underlying TAXONOMY dict is gemma-tuned and not part of the
+    provider-agnostic public package.
+    """
+    first_word: str  # validated leading kaomoji span, or ""
 
 
 def _leading_bracket_span(text: str) -> str:
-    """Return the leading balanced-paren span of text, or the first
-    whitespace-delimited word if text doesn't start with a bracket.
+    """Return the leading balanced-paren span of `text`, or the
+    first whitespace-delimited word if `text` doesn't start with a
+    bracket.
 
-    Handles kaomoji with internal whitespace (the model sometimes emits
-    ``(｡˃ ᵕ ˂ )`` — spaces and all) by matching on bracket balance
-    rather than splitting on the first space.
+    Handles kaomoji with internal whitespace (the model sometimes
+    emits ``(｡˃ ᵕ ˂ )`` — spaces and all) by matching on bracket
+    balance rather than splitting on the first space.
 
-    Returns ``""`` when the candidate fails ``is_kaomoji_candidate`` —
+    Returns `""` when the candidate fails `is_kaomoji_candidate` —
     unbalanced brackets, prose, markdown-escape artifacts, oversize
     spans all collapse to the empty string rather than producing
-    nonsense first_word values that downstream consumers have to
-    re-filter.
+    nonsense `first_word` values that downstream consumers would
+    have to re-filter.
     """
     stripped = text.lstrip()
     if not stripped:
@@ -278,10 +144,10 @@ def _leading_bracket_span(text: str) -> str:
                 if depth < 0:
                     break
             if i + 1 >= _KAOMOJI_MAX_LEN:
-                # Span ran past the length cap before closing — reject.
-                # Without this guard, balanced-paren prose like
-                # `(Backgrounddebugscriptcompleted...)` returns the
-                # whole sentence as a first_word.
+                # Span ran past the length cap before closing —
+                # reject. Without this guard, balanced-paren prose
+                # like `(Backgrounddebugscriptcompleted...)` returns
+                # the whole sentence as a `first_word`.
                 break
     else:
         idx = 0
@@ -299,24 +165,11 @@ def _leading_bracket_span(text: str) -> str:
 def extract(text: str) -> KaomojiMatch:
     """Identify the leading kaomoji in a generated text.
 
-    1. Try exact longest-prefix match against TAXONOMY.
-    2. Fall back to a validated balanced-paren span as the reported
-       first_word, with label=0 (other).
-
-    Returns ``KaomojiMatch(first_word="", kaomoji=None, label=0)`` for
-    plain prose / non-kaomoji input — see ``is_kaomoji_candidate`` for
-    the rejection rules.
+    Returns `KaomojiMatch(first_word="")` for plain prose /
+    non-kaomoji input — see `is_kaomoji_candidate` for the rejection
+    rules.
     """
-    stripped = text.lstrip()
-    ordered = sorted(TAXONOMY.keys(), key=len, reverse=True)
-    for k in ordered:
-        if stripped.startswith(k):
-            return KaomojiMatch(first_word=k, kaomoji=k, label=TAXONOMY[k])
-    return KaomojiMatch(
-        first_word=_leading_bracket_span(stripped),
-        kaomoji=None,
-        label=0,
-    )
+    return KaomojiMatch(first_word=_leading_bracket_span(text.lstrip()))
 
 
 # ---------------------------------------------------------------------------
@@ -378,8 +231,7 @@ def extract(text: str) -> KaomojiMatch:
 #   7. Strip arm modifiers (F + L).
 #
 # New rules added 2026-04-27 to catch cosmetic variants that survived
-# the rules-A-through-F pass (full list of new merge candidates is in
-# the "iterate parsing/scraping" thread):
+# the rules-A-through-F pass:
 #
 #   G. Combining strikethrough overlays U+0335–U+0338 over an eye
 #      glyph: ``(๑˃̵‿˂̵)`` and ``(๑˃‿˂)`` are the same expression,
@@ -445,15 +297,6 @@ _INVISIBLE_CHARS_RE = re.compile(
 # into space + combining marks, mangling eye glyphs in `(っ´ω`)` and
 # `(˘▽˘)`. NFC leaves those intact; we then apply just the specific
 # compatibility-equivalences we want.
-# Single-character substitution table. Organized as component
-# equivalence classes — each section lists glyphs that play the same
-# role (eye / mouth / decoration / punctuation) and fold to a chosen
-# canonical member of the class.
-#
-# Hand-picked over NFKC because NFKC also compatibility-decomposes
-# `´` (acute) and `˘` (breve) into space + combining marks, mangling
-# eye glyphs in `(っ´ω`)` and `(˘▽˘)`. NFC leaves those intact; we
-# then apply just the specific compatibility-equivalences we want.
 _TYPO_SUBS: tuple[tuple[str, str], ...] = (
     # === Brackets and arm-modifier glyphs ===
     ("）", ")"),   # full-width close paren
@@ -509,14 +352,10 @@ _TYPO_SUBS: tuple[tuple[str, str], ...] = (
     # Distinct from the directional-fill class — these glyphs look
     # like a circle with a visible interior pupil/center dot
     # (target / wide-open / shocked-eye register), not a directional
-    # fill. Canonical `⊙` chosen as the most-emitted variant in the
-    # current corpus (`(⊙_⊙)` n=4, `(⊙ω⊙)` n=1, `(⊙ヮ⊙)` n=1).
+    # fill.
     ("◉", "⊙"),   # FISHEYE (Geometric Shapes block) -> CIRCLED DOT
     # Speculative extension (not observed in corpus):
-    ("●", "⊙"),   # BLACK CIRCLE (fully solid; included on the
-                   # register-level argument that wide-filled-eye
-                   # forms are interchangeable; back out if visible
-                   # issues arise)
+    ("●", "⊙"),   # BLACK CIRCLE (fully solid)
     # === Eye-/decoration-glyph equivalence class: degree-like -> ° (rule E1) ===
     ("º", "°"),   # MASCULINE ORDINAL INDICATOR
     ("˚", "°"),   # RING ABOVE
@@ -524,35 +363,24 @@ _TYPO_SUBS: tuple[tuple[str, str], ...] = (
     ("･", "・"),   # HALFWIDTH KATAKANA MIDDLE DOT
     ("•", "・"),   # BULLET (U+2022)
     # === Mouth-glyph equivalence class: smile-curve -> ‿ (rules 3 + M + N) ===
-    # All upturned-mouth-curve variants — different stroke widths
-    # /shapes for the same role. Pre-existing rule 3 had `ᴗ`; M adds
-    # `◡` (LOWER HALF CIRCLE), N adds `ᵕ` (LATIN SMALL LETTER UP TACK).
     ("ᴗ", "‿"),   # LATIN SMALL LETTER OPEN O / connector
     ("◡", "‿"),   # LOWER HALF CIRCLE
     ("ᵕ", "‿"),   # LATIN SMALL LETTER UP TACK
-    # Speculative extension (not yet observed in corpus):
     ("⌣", "‿"),   # SMILE (U+2323) — direct synonym for the
                    # smile-mouth role.
     # === Mouth-line distinction (NO fold) ===
     # `﹏` (SMALL WAVY LOW LINE U+FE4F) and `_` (ASCII UNDERSCORE) are
     # NOT interchangeable. `﹏` is wavy/distressed (`(>﹏<)`,
-    # `(╥﹏╥)` — crying/distressed register); `_` is flat/neutral
-    # (`(•_•)`, `(◕_◕)` — blank-stare register). The previous
-    # `﹏` → `_` fold collapsed those affects together.
+    # `(╥﹏╥)`); `_` is flat/neutral (`(•_•)`, `(◕_◕)`).
     # === Bracket-corner-decoration equivalence class: -> ｡ (rule J + B-extension) ===
     ("◍", "｡"),   # CIRCLE WITH VERTICAL FILL (U+25CD)
-    ("。", "｡"),   # IDEOGRAPHIC FULL STOP (full-size CJK period;
-                   # halfwidth `｡` chosen as canonical to match J)
+    ("。", "｡"),   # IDEOGRAPHIC FULL STOP -> halfwidth (matches J's canonical)
 )
 
 # Rule K: substring-level substitutions applied AFTER `_TYPO_SUBS` so
 # that `•` → `・` has already happened, and AFTER internal-whitespace
 # stripping. Targeted to avoid global `-` ↔ `_` folds that would
 # corrupt `(´-ω-`)` (where `-` is a tired-eye glyph).
-#
-# The earlier targeted mirror-pair rule `(◑‿◐)` → `(◐‿◑)` is no
-# longer needed — circular-fill eye fold in `_TYPO_SUBS` collapses
-# both to `(◕‿◕)` directly.
 _INTERNAL_SUBS: tuple[tuple[str, str], ...] = (
     # Middle-dot eyes with hyphen mouth -> middle-dot eyes with
     # underscore mouth. Targeted: `(・-・)` ↔ `(・_・)`.
@@ -564,8 +392,8 @@ def _cyrillic_lower(s: str) -> str:
     """Rule D: lowercase Cyrillic capitals U+0410–U+042F.
 
     Leaves all non-Cyrillic-capital characters untouched, including
-    other Unicode case-bearing letters (Greek, etc.) which haven't been
-    observed as cosmetic-only variants in this corpus.
+    other Unicode case-bearing letters (Greek, etc.) which haven't
+    been observed as cosmetic-only variants in this corpus.
     """
     return "".join(
         c.lower() if 0x0410 <= ord(c) <= 0x042F else c
@@ -590,8 +418,8 @@ def canonicalize_kaomoji(s: str) -> str:
       7. Strip arm modifiers from face boundaries (rule F + L —
          ``っ ς c ﻭ *``).
 
-    Eye/mouth/decoration changes that aren't covered by rules E1/E2/I/J
-    are preserved.
+    Eye/mouth/decoration changes that aren't covered by rules
+    E1/E2/I/J are preserved.
 
     Idempotent: ``canonicalize_kaomoji(canonicalize_kaomoji(s)) == canonicalize_kaomoji(s)``.
 
@@ -619,22 +447,19 @@ def canonicalize_kaomoji(s: str) -> str:
 def sanity_check() -> None:
     """Smoke-test the extractor and canonicalizer."""
     # --- extract() ---
-    # registered kaomoji
-    assert extract("(｡◕‿◕｡) I had a great day!").label == +1
-    assert extract("(｡•́︿•̀｡) That's so sad.").label == -1
-    assert extract("  (✿◠‿◠) hi").label == +1
+    # Public extract is span-only post v1.0 (no taxonomy match flag).
+    assert extract("(｡◕‿◕｡) I had a great day!").first_word == "(｡◕‿◕｡)"
+    assert extract("(｡•́︿•̀｡) That's so sad.").first_word == "(｡•́︿•̀｡)"
+    assert extract("  (✿◠‿◠) hi").first_word == "(✿◠‿◠)"
     # plain text — non-kaomoji prose returns empty first_word
     assert extract("hello!").first_word == ""
-    # whitespace-padded taxonomy entry still matches exactly
-    m = extract("(｡˃ ᵕ ˂ ) That is wonderful!")
-    assert m.label == +1
-    # bracket-span fallback for an unknown paren form (real kaomoji-shape)
-    m = extract("(｡o_O｡) strange")
-    assert m.label == 0
-    assert m.first_word == "(｡o_O｡)", repr(m.first_word)
+    # whitespace-padded face surfaces with internal whitespace intact
+    assert extract("(｡˃ ᵕ ˂ ) That is wonderful!").first_word == "(｡˃ ᵕ ˂ )"
+    # bracket-span fallback for an unknown paren form (real
+    # kaomoji-shape — used to be label=0 / "other" in the legacy API)
+    assert extract("(｡o_O｡) strange").first_word == "(｡o_O｡)"
     # empty
-    assert extract("").label == 0
-    # --- new robustness: garbage rejection ---
+    assert extract("").first_word == ""
     # parenthesized prose with 4+-letter run → rejected
     assert extract("(Backgrounddebugscript) trailing").first_word == ""
     # bracketed phrase with internal letters → rejected
@@ -649,86 +474,71 @@ def sanity_check() -> None:
 
     # --- canonicalize_kaomoji ---
     ck = canonicalize_kaomoji
-    # idempotence on the empty / whitespace inputs
     assert ck("") == ""
     assert ck("   ") == ""
-    # rule A: strip word-joiner / ZWSP / Arabic footnote marker
+    # rule A
     assert ck("(⁠◕⁠‿⁠◕⁠✿⁠)") == "(◕‿◕✿)"
     assert ck("(๑>؂<๑)") == "(๑><๑)"
-    # rule B: half/full-width punctuation
+    # rule B
     assert ck("(＞_＜)") == "(>_<)"
     assert ck("(；ω；)") == "(;ω;)"
-    # rule C: strip internal ASCII whitespace inside brackets
+    # rule C
     assert ck("( ; ω ; )") == "(;ω;)"
-    assert ck("( ;´Д｀)") == "(;´д`)"  # rule O folds ｀ -> `
-    # rule D: Cyrillic case fold
-    assert ck("(；´Д｀)") == "(;´д`)"  # rule O folds ｀ -> `
-    assert ck("(；´д｀)") == "(;´д`)"  # rule O folds ｀ -> `
-    # rule E1: degree-like glyphs
+    assert ck("( ;´Д｀)") == "(;´д`)"
+    # rule D
+    assert ck("(；´Д｀)") == "(;´д`)"
+    assert ck("(；´д｀)") == "(;´д`)"
+    # rule E1
     assert ck("(°Д°)") == "(°д°)"
     assert ck("(ºДº)") == "(°д°)"
     assert ck("(˚Д˚)") == "(°д°)"
-    # rule E2: middle-dot fold
+    # rule E2
     assert ck("(´・ω・`)") == "(´・ω・`)"
     assert ck("(´･ω･`)") == "(´・ω・`)"
-    # rule F (existing): arm modifiers
+    # rule F
     assert ck("(๑˃ᴗ˂)ﻭ") == "(๑˃‿˂)"
-    assert ck("(っ╥﹏╥)っ") == "(╥﹏╥)"  # ﹏ stays distinct from _
-    # rule G: combining strikethrough overlays
+    assert ck("(っ╥﹏╥)っ") == "(╥﹏╥)"
+    # rule G
     assert ck("(๑˃̵‿˂̵)") == "(๑˃‿˂)"
-    # rule H: curly quotes -> ASCII; fullwidth tilde `～` ALSO folds to
-    # `~` under the speculative B extension added 2026-04-27 (corpus
-    # had the mixed-internally-inconsistent `(~～~;)` form).
+    # rule H + speculative B
     assert ck("┐(‘～`;)┌") == "┐('~`;)┌"
     assert ck("┐('～`;)┌") == "┐('~`;)┌"
-    # rule I: bullet -> middle-dot
+    # rule I
     assert ck("(´•ω•`)") == "(´・ω・`)"
-    assert ck("(´・ω・`)") == "(´・ω・`)"
-    # rule J: bracket-corner circle -> bracket-corner dot
-    assert ck("(◍•‿•◍)") == "(｡・‿・｡)"  # also picks up rule I
-    assert ck("(｡•‿•｡)") == "(｡・‿・｡)"  # also picks up rule I
-    # rule K: targeted ・-・ -> ・_・
+    # rule J
+    assert ck("(◍•‿•◍)") == "(｡・‿・｡)"
+    assert ck("(｡•‿•｡)") == "(｡・‿・｡)"
+    # rule K
     assert ck("(・-・)") == "(・_・)"
     assert ck("(・_・)") == "(・_・)"
-    # rule K does NOT corrupt eye-`-` glyphs in (X-Y-X) form
     assert ck("(´-ω-`)") == "(´-ω-`)"
-    # rule L: `*` arm modifier
-    assert ck("(*•̀‿•́*)") == "(・̀‿・́)"  # I fires too: • -> ・
-    # rule M: smile-curve fold ◡ -> ‿ (with eye-class fold ◔ -> ◕)
+    # rule L
+    assert ck("(*•̀‿•́*)") == "(・̀‿・́)"
+    # rules M / N
     assert ck("(◔◡◔)") == "(◕‿◕)"
     assert ck("(ᵔ◡ᵔ)") == "(ᵔ‿ᵔ)"
-    # rule N: smaller-mouth tack fold ᵕ -> ‿
     assert ck("(´｡・ᵕ・｡`)") == "(´｡・‿・｡`)"
-    # rule O: fullwidth grave accent -> ASCII grave
+    # rule O
     assert ck("ヽ(´ー｀)ノ") == "ヽ(´ー`)ノ"
     assert ck("ヽ(´ー`)ノ") == "ヽ(´ー`)ノ"
-    # rule B extension: ideographic full stop -> halfwidth ideographic
-    # full stop (matches J's canonical `｡`)
-    assert ck("(´。・ᵕ・。`)") == "(´｡・‿・｡`)"  # N fires too
-    # eye class: directional-fill circular eyes -> ◕
+    # B extension
+    assert ck("(´。・ᵕ・。`)") == "(´｡・‿・｡`)"
+    # eye class
     assert ck("(◔‿◔)") == "(◕‿◕)"
-    assert ck("(◑‿◐)") == "(◕‿◕)"   # mirror pair, both fold to ◕
+    assert ck("(◑‿◐)") == "(◕‿◕)"
     assert ck("(◐‿◑)") == "(◕‿◕)"
-    assert ck("(◕‿◕)") == "(◕‿◕)"   # canonical, idempotent
-    # speculative directional-fill extensions
+    assert ck("(◕‿◕)") == "(◕‿◕)"
     assert ck("(◒_◒)") == "(◕_◕)"
     assert ck("(◓‿◓)") == "(◕‿◕)"
     assert ck("(◖_◗)") == "(◕_◕)"
-    # eye class: filled-with-pupil eyes -> ⊙ (separate from
-    # directional-fill class — distinct visual register)
     assert ck("(◉_◉)") == "(⊙_⊙)"
-    assert ck("(⊙_⊙)") == "(⊙_⊙)"   # canonical, idempotent
-    assert ck("(●_●)") == "(⊙_⊙)"   # speculative
-    # speculative mouth extension
-    assert ck("(◕⌣◕)") == "(◕‿◕)"   # SMILE -> ‿
-    # speculative B extensions
+    assert ck("(⊙_⊙)") == "(⊙_⊙)"
+    assert ck("(●_●)") == "(⊙_⊙)"
+    assert ck("(◕⌣◕)") == "(◕‿◕)"
     assert ck("(・_・？)") == "(・_・?)"
     assert ck("(～ω～)") == "(~ω~)"
-    # speculative G extensions: U+0334 + U+033F overlay strikethroughs
     assert ck("(๑˃̴‿˂̿)") == "(๑˃‿˂)"
-    # eye-class fold preserves shapes outside the class
-    assert ck("(◠‿◠)") == "(◠‿◠)"   # ◠ (UPPER HALF CIRCLE) is a
-                                       # different eye glyph, not folded
+    assert ck("(◠‿◠)") == "(◠‿◠)"
     # idempotence on a complex example
     once = ck("( ⁠;⁠ ´⁠Д⁠｀⁠ )")
     twice = ck(once)
@@ -746,6 +556,7 @@ def sanity_check() -> None:
 
 if __name__ == "__main__":
     sanity_check()
-    happy = sum(1 for v in TAXONOMY.values() if v > 0)
-    sad = sum(1 for v in TAXONOMY.values() if v < 0)
-    print(f"taxonomy OK; {len(TAXONOMY)} kaomoji registered ({happy}+/{sad}-)")
+    print(
+        f"taxonomy OK; {len(KAOMOJI_START_CHARS)} start chars; "
+        f"canonicalization rules A–P locked"
+    )

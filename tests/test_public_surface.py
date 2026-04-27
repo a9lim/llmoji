@@ -19,7 +19,6 @@ def test_taxonomy_surface_present():
     from llmoji.taxonomy import (
         KAOMOJI_START_CHARS,
         KaomojiMatch,
-        TAXONOMY,
         canonicalize_kaomoji,
         extract,
         is_kaomoji_candidate,
@@ -27,8 +26,6 @@ def test_taxonomy_surface_present():
     # KAOMOJI_START_CHARS — frozen set of leading-glyph chars.
     assert isinstance(KAOMOJI_START_CHARS, frozenset)
     assert "(" in KAOMOJI_START_CHARS and "[" in KAOMOJI_START_CHARS
-    # TAXONOMY — gemma-tuned + extended; non-empty, dict[str, int].
-    assert TAXONOMY and all(isinstance(v, int) for v in TAXONOMY.values())
     # canonicalize_kaomoji — idempotent on the empty string.
     assert canonicalize_kaomoji("") == ""
     # And idempotent on a sample.
@@ -37,10 +34,24 @@ def test_taxonomy_surface_present():
     # is_kaomoji_candidate basic positive + negative.
     assert is_kaomoji_candidate("(｡◕‿◕｡)")
     assert not is_kaomoji_candidate("hi")
-    # extract returns a KaomojiMatch with the public field set.
+    # extract returns a KaomojiMatch with the public field set
+    # (post-v1.0: span-only; gemma-tuned label dict moved to
+    # llmoji_study.taxonomy_labels).
     m = extract("(｡◕‿◕｡) hi")
     assert isinstance(m, KaomojiMatch)
-    assert m.label == +1
+    assert m.first_word == "(｡◕‿◕｡)"
+
+
+def test_no_pilot_labels_in_public():
+    """The TAXONOMY / ANGRY_CALM_TAXONOMY / label_on names are
+    research-side; they must NOT appear on the public taxonomy
+    module. v1.0 split locked this out."""
+    import llmoji.taxonomy as tax
+    for name in ("TAXONOMY", "ANGRY_CALM_TAXONOMY", "label_on", "POLE_NAMES"):
+        assert not hasattr(tax, name), (
+            f"llmoji.taxonomy.{name} leaked into the public package; "
+            f"it belongs in llmoji_study.taxonomy_labels."
+        )
 
 
 def test_haiku_prompts_locked():
@@ -68,7 +79,7 @@ def test_scrape_row_schema():
         "source", "session_id", "project_slug", "assistant_uuid",
         "parent_uuid", "model", "timestamp", "cwd", "git_branch",
         "turn_index", "had_thinking", "assistant_text", "first_word",
-        "kaomoji", "kaomoji_label", "surrounding_user",
+        "surrounding_user",
     }
     got = {f.name for f in fields(ScrapeRow)}
     # The frozen v1.0 surface — additions are OK (forward compat),
@@ -143,6 +154,83 @@ def test_bundle_schema():
                 "kaomoji", "count", "haiku_synthesis_description",
                 "llmoji_version",
             }
+
+
+def test_bundle_allowlist_rejects_extras():
+    """`tar_bundle` must refuse to ship anything outside
+    {manifest.json, descriptions.jsonl} — that's the v1.0 frozen
+    bundle schema. Loud failure beats silent leak."""
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.analyze import _write_bundle
+    from llmoji.upload import BUNDLE_ALLOWLIST, tar_bundle
+
+    with tempfile.TemporaryDirectory() as td:
+        bundle = Path(td) / "bundle"
+        _write_bundle(
+            bundle,
+            counts_by_canon={"(◕‿◕)": 1},
+            synthesized_by_canon={"(◕‿◕)": "smile"},
+            providers_seen=[],
+            notes="",
+        )
+        # Add an extra — tar should refuse.
+        (bundle / "stray.txt").write_text("would leak")
+        try:
+            tar_bundle(bundle, out_path=Path(td) / "out.tgz")
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("tar_bundle didn't refuse extras")
+        # Allowlist itself is the frozen pair.
+        assert set(BUNDLE_ALLOWLIST) == {"manifest.json", "descriptions.jsonl"}
+
+
+def test_corrupt_settings_refused():
+    """Provider install must refuse to mutate a corrupt-but-existing
+    settings file. Silently wiping a user's config is a regression
+    we never want to ship."""
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import get_provider
+    from llmoji.providers.base import SettingsCorruptError
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # Claude Code: malformed JSON
+        cc = get_provider("claude_code")
+        cc.hooks_dir = td / "claude" / "hooks"
+        cc.settings_path = td / "claude" / "settings.json"
+        cc.journal_path = td / "claude" / "journal.jsonl"
+        cc.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        cc.settings_path.write_text("{ not json")
+        try:
+            cc.install()
+        except SettingsCorruptError:
+            pass
+        else:
+            raise AssertionError("claude_code didn't refuse corrupt JSON")
+        assert cc.settings_path.read_text() == "{ not json", (
+            "corrupt config was modified"
+        )
+
+        # Codex: existing [hooks.stop]
+        cx = get_provider("codex")
+        cx.hooks_dir = td / "codex" / "hooks"
+        cx.settings_path = td / "codex" / "config.toml"
+        cx.journal_path = td / "codex" / "journal.jsonl"
+        cx.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        original = '[hooks.stop]\ncommand = "/user/own/hook.sh"\n'
+        cx.settings_path.write_text(original)
+        try:
+            cx.install()
+        except SettingsCorruptError:
+            pass
+        else:
+            raise AssertionError("codex didn't refuse existing [hooks.stop]")
+        assert cx.settings_path.read_text() == original
 
 
 def test_hook_templates_render_to_valid_bash_substitutions():

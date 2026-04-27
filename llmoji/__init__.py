@@ -33,7 +33,6 @@ from .taxonomy import (
     canonicalize_kaomoji,
     extract,
     is_kaomoji_candidate,
-    label_on,
 )
 
 try:
@@ -48,7 +47,6 @@ __all__ = [
     "canonicalize_kaomoji",
     "extract",
     "is_kaomoji_candidate",
-    "label_on",
     "ScrapeRow",
     "iter_all",
     "DESCRIBE_PROMPT_WITH_USER",

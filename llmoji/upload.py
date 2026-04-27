@@ -38,23 +38,71 @@ from . import paths
 DEFAULT_HF_REPO = "a9lim/llmoji"
 DEFAULT_EMAIL_TO = "mx@a9l.im"
 
+# Strict allowlist of files the bundle is permitted to ship.
+# Anything else in `~/.llmoji/bundle/` is treated as user-added or
+# stale and refused (loud failure beats silent leak). The two-file
+# bundle schema is part of the v1.0 frozen public surface; bumping
+# this list is a major version bump.
+BUNDLE_ALLOWLIST: tuple[str, ...] = (
+    "manifest.json",
+    "descriptions.jsonl",
+)
+
 
 def _bundle_files(bundle_dir: Path) -> list[Path]:
-    """Return the loose-file bundle contents in deterministic order."""
+    """Return the bundle's allowlisted files in deterministic order.
+
+    Files outside the allowlist are skipped (and surfaced separately
+    via :func:`_unexpected_bundle_files` so the caller can refuse to
+    ship).
+    """
     if not bundle_dir.exists():
         return []
-    return sorted(p for p in bundle_dir.iterdir() if p.is_file())
+    return sorted(
+        bundle_dir / name
+        for name in BUNDLE_ALLOWLIST
+        if (bundle_dir / name).is_file()
+    )
+
+
+def _unexpected_bundle_files(bundle_dir: Path) -> list[Path]:
+    """Return any files in the bundle dir that are NOT on the
+    allowlist. Used to refuse `upload` when stale or user-added
+    content is present."""
+    if not bundle_dir.exists():
+        return []
+    allowed = set(BUNDLE_ALLOWLIST)
+    return sorted(
+        p for p in bundle_dir.iterdir()
+        if p.is_file() and p.name not in allowed
+    )
 
 
 def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
-    """Tar the bundle directory. Returns the tarball path."""
+    """Tar the bundle directory. Returns the tarball path.
+
+    Strict allowlist: only ``manifest.json`` and
+    ``descriptions.jsonl`` are included. If the bundle directory
+    holds any other files, raise — refusing to ship is the safe
+    default (the user can `rm` the extras and re-tar).
+    """
     if out_path is None:
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         out_path = bundle_dir.parent / f"bundle-{ts}.tar.gz"
+    extras = _unexpected_bundle_files(bundle_dir)
+    if extras:
+        joined = ", ".join(p.name for p in extras)
+        raise FileExistsError(
+            f"refusing to tar {bundle_dir} — unexpected file(s) "
+            f"{joined!r} are not in the v1.0 bundle allowlist "
+            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
+            f"`llmoji analyze` (which clears the bundle dir)."
+        )
     files = _bundle_files(bundle_dir)
     if not files:
         raise FileNotFoundError(
-            f"no files in {bundle_dir} — run `llmoji analyze` first"
+            f"no allowlisted files in {bundle_dir} — run "
+            f"`llmoji analyze` first"
         )
     with tarfile.open(out_path, "w:gz") as tar:
         for f in files:
@@ -83,8 +131,16 @@ def _submission_token() -> str:
 
 
 def _submitter_id() -> str:
-    """Salted-hash submitter identifier. 16 hex chars, stable per
-    (machine, llmoji version)."""
+    """Salted-hash submitter identifier. 32 hex chars (128 bits),
+    stable per (machine, llmoji version).
+
+    Length is 128 bits because the dataset README will pin
+    submission identity to this string and an attacker who knows
+    the per-machine token (server-side compromise) shouldn't be
+    able to grind a same-id submission. 64 bits would be fine for
+    pure dedup but isn't crypto-collision-resistant in the formal
+    sense.
+    """
     import hashlib
 
     from .providers.base import _package_version
@@ -92,7 +148,7 @@ def _submitter_id() -> str:
     h.update(_submission_token().encode("ascii"))
     h.update(b"\0")
     h.update(_package_version().encode("ascii"))
-    return h.hexdigest()[:16]
+    return h.hexdigest()[:32]
 
 
 def _confirm(message: str) -> bool:

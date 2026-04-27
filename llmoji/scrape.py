@@ -27,8 +27,14 @@ class ScrapeRow:
     others empty / ``None``. The downstream :mod:`llmoji.analyze`
     pipeline reads only ``first_word``, ``assistant_text``, and
     ``surrounding_user``; the richer fields (``session_id``,
-    ``parent_uuid``, etc.) are preserved for research-side consumers
-    that want them.
+    ``parent_uuid``, etc.) are preserved for research-side
+    consumers that want them.
+
+    Pre-v1.0 versions also carried ``kaomoji`` (TAXONOMY-registered
+    form) and ``kaomoji_label`` (+1/-1/0 affect pole) fields. Those
+    were gemma-tuned and have moved to the research-side schema in
+    ``llmoji_study.taxonomy_labels.LabeledScrapeRow``; the public
+    schema is span-only.
     """
 
     # --- provenance ---
@@ -49,10 +55,8 @@ class ScrapeRow:
 
     # --- content ---
     assistant_text: str         # full assistant message text (kaomoji stripped)
-    first_word: str             # leading balanced-paren span (canonical
-                                # kaomoji identifier in the unified schema)
-    kaomoji: str | None         # taxonomy-registered form, or None
-    kaomoji_label: int          # +1/-1/0 (mostly 0 outside the gemma corpus)
+    first_word: str             # canonical leading kaomoji span — the
+                                # unified-schema kaomoji identifier
 
     # --- upstream ---
     surrounding_user: str       # latest preceding user-authored text
