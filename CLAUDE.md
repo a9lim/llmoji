@@ -79,10 +79,10 @@ first-class harness. Each provider knows:
 
 The bash hook templates live as data files under
 `llmoji/_hooks/`. `Provider.render_hook()` reads the template and
-substitutes `${KAOMOJI_START_CHARS}`, `${INJECTED_PREFIXES_FILTER}`,
-`${JOURNAL_PATH}`, `${LLMOJI_VERSION}`. Single source of truth in
-Python (the start-char set lives in `llmoji.taxonomy`,
-system-injection prefixes on the Provider class).
+substitutes `${KAOMOJI_START_CASE}`, `${INJECTED_PREFIXES_FILTER}`,
+`${JOURNAL_PATH}`, `${LLMOJI_VERSION}` via `string.Template`. Single
+source of truth in Python (the start-char set lives in
+`llmoji.taxonomy`, system-injection prefixes on the Provider class).
 
 ### Two-stage Haiku pipeline
 
@@ -160,13 +160,15 @@ llmoji/
   CLAUDE.md
   llmoji/
     __init__.py            # public surface re-exports
-    taxonomy.py            # KAOMOJI_TAXONOMY + KAOMOJI_START_CHARS
-                           # + is_kaomoji_candidate + extract +
-                           # canonicalize_kaomoji (frozen v1.0)
+    taxonomy.py            # KAOMOJI_START_CHARS + is_kaomoji_candidate
+                           # + extract + KaomojiMatch (span-only)
+                           # + canonicalize_kaomoji (rules A–P; frozen v1.0)
     haiku_prompts.py       # DESCRIBE_PROMPT_* + SYNTHESIZE_PROMPT
                            # + HAIKU_MODEL_ID (frozen v1.0)
-    haiku.py               # mask_kaomoji + call_haiku + cache
+    haiku.py               # mask_kaomoji + call_haiku +
+                           # per-instance content-hash cache
     scrape.py              # ScrapeRow + iter_all chain helper
+                           # (span-only schema; no affect labels)
     sources/
       journal.py           # generic kaomoji-journal reader (any
                            # provider's ~/.<harness>/kaomoji-journal.jsonl)
@@ -174,13 +176,15 @@ llmoji/
     backfill.py            # one-shot transcript→journal replays
                            # for Claude Code + Codex
     providers/
-      base.py              # Provider base class + dataclasses +
-                           # template render helpers
-      claude_code.py       # JSON-shaped Stop-hook provider
-      codex.py             # TOML-shaped Stop-hook provider
-      hermes.py            # YAML-shaped post_llm_call provider
-                           # (impl per docs; needs live-traffic
-                           # validation)
+      base.py              # Provider + ProviderStatus dataclasses +
+                           # SettingsCorruptError + template render
+                           # helpers + JSON-settings edit helpers
+      claude_code.py       # JSON Stop-hook provider (~/.claude/settings.json)
+      codex.py             # TOML Stop-hook provider (~/.codex/config.toml,
+                           # marker-fenced [hooks.stop] stanza)
+      hermes.py            # YAML post_llm_call + subagent_stop dual-hook
+                           # provider (~/.hermes/config.yaml,
+                           # marker-fenced hooks: stanza)
     _hooks/                # bash hook templates (importlib.resources
                            # data); rendered at install time
       claude_code.sh.tmpl
@@ -188,10 +192,17 @@ llmoji/
       hermes.sh.tmpl                # post_llm_call (journal logger)
       hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
     paths.py               # ~/.llmoji home, cache, bundle, journals
-    analyze.py             # the analyze pipeline (Stage A + B + bundle)
-    upload.py              # tar + HF / email targets
+    analyze.py             # the analyze pipeline (Stage A + B + bundle;
+                           # clears bundle dir before writing)
+    upload.py              # tar + HF / email targets;
+                           # BUNDLE_ALLOWLIST enforces the two-file
+                           # schema, refuses extras
     cli.py                 # argparse entry, [project.scripts] llmoji
-  tests/                   # (place for unit tests; not present at v1.0)
+  tests/
+    test_public_surface.py # pytest checks locking the v1.0 contract
+                           # (taxonomy / haiku_prompts / ScrapeRow /
+                           # provider rendering / bundle allowlist /
+                           # corrupt-config refusal). 9 tests.
 ```
 
 ## Gotchas
@@ -230,12 +241,14 @@ Flipping any of these would miss every multi-step turn's kaomoji.
 - Claude Code: `field_flag` on `isSidechain`. Hooks drop the row.
 - Codex: no subagent concept. `collaboration_mode` is `"default"`
   for every observed turn_context.
-- Hermes: `session_correlation`. `post_llm_call` fires for both
-  parent and child sessions; child sessions are identified by
-  correlating `session_id` against `delegate_task` events from a
-  companion `subagent_stop` registration. The current shell hook
-  reads a state file at `~/.hermes/.llmoji-children`; populating
-  that file is part of the hermes empirical-validation work.
+- Hermes: `session_correlation` against the `subagent_stop` event.
+  `post_llm_call` fires for both parent and child sessions; the
+  installed companion hook
+  `~/.hermes/agent-hooks/subagent-stop.sh` records each completed
+  child's `session_id` to `~/.hermes/.llmoji-children`. The main
+  hook checks that file and drops matching session_ids. Both hooks
+  are registered together in the YAML stanza `llmoji install
+  hermes` writes; uninstall removes both.
 
 ### Provider install refuses to clobber existing config
 
