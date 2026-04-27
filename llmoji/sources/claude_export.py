@@ -57,6 +57,17 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
         if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
             turn += 1
             continue
+        # Strip the leading kaomoji + surrounding whitespace from
+        # ``assistant_text`` so the journal-row contract is uniform
+        # across sources: ``kaomoji`` carries the prefix, ``assistant_text``
+        # is the body without it. Live-hook journals already do this
+        # (jq's ``sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")``);
+        # without this strip the export reader would yield kaomoji-bearing
+        # ``assistant_text`` and ``mask_kaomoji`` would need a dual-branch
+        # patch to handle both shapes.
+        body = text.lstrip()
+        if body.startswith(match.first_word):
+            body = body[len(match.first_word):].lstrip()
         # Walk parent_message_uuid back ≤5 hops to the nearest
         # human-authored message with non-empty text. Five hops is
         # enough to skip a couple of intermediate tool turns without
@@ -88,7 +99,7 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             git_branch=None,
             turn_index=turn,
             had_thinking=False,
-            assistant_text=text,
+            assistant_text=body,
             first_word=match.first_word,
             surrounding_user=user_text,
         )

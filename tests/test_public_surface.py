@@ -233,30 +233,28 @@ def test_corrupt_settings_refused():
         assert cx.settings_path.read_text() == original
 
 
-def test_mask_kaomoji_handles_pre_stripped_journal_rows():
-    """Live-hook journals already strip the leading kaomoji from
-    ``assistant_text`` (the bash hook's ``ltrimstr($kaomoji)`` is
-    part of the v1.0 journal contract). ``mask_kaomoji`` must still
-    return text starting with ``[FACE]`` so the Haiku DESCRIBE
-    prompts' "we replaced it with [FACE]" framing matches what
-    Haiku actually sees. Bug pre-fix: the pre-stripped branch fell
-    through to ``return text`` and Haiku got a prompt promising a
-    [FACE] that wasn't in the body."""
+def test_mask_kaomoji_prepends_face_token():
+    """By v1.0 journal contract every source — live hooks, the
+    Claude.ai export reader, the generic-JSONL contract — strips
+    the leading kaomoji from ``assistant_text`` before yielding a
+    ScrapeRow; the prefix lives in the row's ``kaomoji`` field.
+    ``mask_kaomoji`` therefore just prepends ``[FACE] `` so Haiku
+    sees the ``[FACE] <body>`` shape the DESCRIBE prompts promise.
+    """
     from llmoji.haiku import MASK_TOKEN, mask_kaomoji
 
-    # Journal-source row: hook already stripped, so text doesn't
-    # start with first_word. Must still get masked.
+    # Stripped-body row (the only journal-row shape under the v1.0
+    # contract): mask token gets prepended with a separating space.
     masked = mask_kaomoji("I think we should refactor.", "(◕‿◕)")
-    assert masked.startswith(MASK_TOKEN), masked
+    assert masked.startswith(MASK_TOKEN + " "), masked
     assert "I think we should refactor." in masked
 
-    # Static-export row: kaomoji still at the head. Substituted in
-    # place.
-    masked = mask_kaomoji("(◕‿◕) I think we should refactor.", "(◕‿◕)")
-    assert masked.startswith(MASK_TOKEN)
-    assert "(◕‿◕)" not in masked
+    # Leading whitespace on the body is normalized away — Haiku
+    # shouldn't see ``[FACE]   body``.
+    masked = mask_kaomoji("   leading spaces.", "(◕‿◕)")
+    assert masked == MASK_TOKEN + " leading spaces."
 
-    # Empty first_word — pass through unchanged.
+    # Empty first_word — defensive pass-through.
     assert mask_kaomoji("hello", "") == "hello"
 
 

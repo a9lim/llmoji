@@ -30,31 +30,23 @@ MASK_TOKEN = "[FACE]"
 
 
 def mask_kaomoji(text: str, first_word: str) -> str:
-    """Replace the leading kaomoji span with :data:`MASK_TOKEN`.
+    """Prepend :data:`MASK_TOKEN` to a kaomoji-stripped assistant body.
 
-    Two source shapes feed this:
+    By v1.0 journal contract, ``assistant_text`` never includes the
+    leading kaomoji — that's carried separately in the row's
+    ``kaomoji`` field. Live-hook journals strip on write
+    (``ltrimstr($kaomoji)`` in the bash template), the Claude.ai
+    export reader strips on parse, and the generic-JSONL contract
+    requires the same. So this function just prepends ``[FACE] ``
+    to give Haiku the ``[FACE] <body>`` shape its DESCRIBE prompts
+    promise.
 
-    * Live-hook journal rows — the bash hook already stripped the
-      leading kaomoji from ``assistant_text`` before persisting.
-      ``text`` does NOT start with ``first_word``; we PREPEND
-      ``MASK_TOKEN`` so the prompt's "we have replaced [the kaomoji]
-      with [FACE]" framing matches what Haiku actually sees.
-    * Static-export rows (claude.ai conversations.json) — the
-      kaomoji is still at the head of ``assistant_text``; we strip
-      it and substitute ``MASK_TOKEN`` in place.
-
-    Either way the returned string starts with ``MASK_TOKEN`` (when
-    ``first_word`` is non-empty), keeping the prompt-shape contract
-    Haiku is told to expect.
+    Empty ``first_word`` (no kaomoji on this row — shouldn't reach
+    here in normal flow, but defensive) → pass through unchanged.
     """
     if not first_word:
         return text
-    stripped = text.lstrip()
-    if stripped.startswith(first_word):
-        return MASK_TOKEN + stripped[len(first_word):]
-    # Pre-stripped (journal-source) row: prepend the mask so Haiku
-    # sees the same ``[FACE] <body>`` shape the prompt promises.
-    return MASK_TOKEN + " " + stripped
+    return MASK_TOKEN + " " + text.lstrip()
 
 
 def call_haiku(
