@@ -233,12 +233,45 @@ def test_corrupt_settings_refused():
         assert cx.settings_path.read_text() == original
 
 
+def test_mask_kaomoji_handles_pre_stripped_journal_rows():
+    """Live-hook journals already strip the leading kaomoji from
+    ``assistant_text`` (the bash hook's ``ltrimstr($kaomoji)`` is
+    part of the v1.0 journal contract). ``mask_kaomoji`` must still
+    return text starting with ``[FACE]`` so the Haiku DESCRIBE
+    prompts' "we replaced it with [FACE]" framing matches what
+    Haiku actually sees. Bug pre-fix: the pre-stripped branch fell
+    through to ``return text`` and Haiku got a prompt promising a
+    [FACE] that wasn't in the body."""
+    from llmoji.haiku import MASK_TOKEN, mask_kaomoji
+
+    # Journal-source row: hook already stripped, so text doesn't
+    # start with first_word. Must still get masked.
+    masked = mask_kaomoji("I think we should refactor.", "(◕‿◕)")
+    assert masked.startswith(MASK_TOKEN), masked
+    assert "I think we should refactor." in masked
+
+    # Static-export row: kaomoji still at the head. Substituted in
+    # place.
+    masked = mask_kaomoji("(◕‿◕) I think we should refactor.", "(◕‿◕)")
+    assert masked.startswith(MASK_TOKEN)
+    assert "(◕‿◕)" not in masked
+
+    # Empty first_word — pass through unchanged.
+    assert mask_kaomoji("hello", "") == "hello"
+
+
 def test_hook_templates_render_to_valid_bash_substitutions():
     """The base renderer should ignore unknown $VARS in the template
     body (so embedded jq / sed `$KAOMOJI` etc. aren't eaten by the
     Python Template substitution). string.Template's safe_substitute
-    handles this — verify."""
+    handles this — verify. Also bash -n the rendered output so a
+    template syntax error fails CI rather than failing silently
+    inside the user's harness post-install."""
+    import shutil
+    import subprocess
+    import tempfile
     from llmoji.providers import get_provider
+    bash = shutil.which("bash")
     for name in ("claude_code", "codex", "hermes"):
         p = get_provider(name)
         rendered = p.render_hook()
@@ -253,4 +286,19 @@ def test_hook_templates_render_to_valid_bash_substitutions():
             assert placeholder not in rendered, (
                 f"{name} kept literal {placeholder}; "
                 "did substitution drop the placeholder?"
+            )
+        # bash -n syntax check on the rendered output — catches
+        # template-edit regressions that don't show up in pure
+        # placeholder checks.
+        if bash:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".sh", delete=False,
+            ) as f:
+                f.write(rendered)
+                tmp = f.name
+            r = subprocess.run(
+                [bash, "-n", tmp], capture_output=True, text=True,
+            )
+            assert r.returncode == 0, (
+                f"{name} hook failed bash -n: {r.stderr}"
             )

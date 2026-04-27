@@ -109,6 +109,11 @@ class Provider:
     hook_filename: str = ""
     kaomoji_position: KaomojiPosition = "first"
     sidechain_strategy: SidechainStrategy = "none"
+    # Defaults are read but not mutated in-place; subclasses replace
+    # the whole attr with their own class-level dict/list. The
+    # ``type: ignore`` shuts up pyright's mutable-default warning —
+    # we accept the footgun in exchange for not requiring subclasses
+    # to redeclare the field shape.
     sidechain_config: dict[str, str] = {}  # type: ignore[assignment]
     system_injected_prefixes: list[str] = []  # type: ignore[assignment]
 
@@ -349,9 +354,24 @@ def _load_json_strict(path: Path) -> dict:
     return data
 
 
-def _write_json(path: Path, data: dict) -> None:
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` via tmp-file + rename.
+
+    ``Path.write_text`` truncates and writes in place; an interrupt
+    between truncate and final flush leaves the user's settings file
+    in a partially-written state. ``os.replace`` (the underlying
+    ``Path.replace`` call) is POSIX-atomic on the same filesystem,
+    so the file either has the old content or the new — never half.
+    Used by every provider's settings writer.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    tmp = path.with_name(path.name + ".llmoji-tmp")
+    tmp.write_text(content)
+    tmp.replace(path)
+
+
+def _write_json(path: Path, data: dict) -> None:
+    _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 
 def _package_version() -> str:

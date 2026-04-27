@@ -69,38 +69,40 @@ def iter_journal(
     p = Path(path)
     if not p.exists():
         return
-    with p.open() as f:
-        lines = f.read().splitlines()
     turn = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        prefix = row.get("kaomoji")
-        if not prefix:
-            continue
-        match = extract(str(prefix))
-        if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
-            continue
-        cwd = row.get("cwd")
-        yield ScrapeRow(
-            source=f"{source}-hook",
-            session_id="",
-            project_slug=_project_slug_from_cwd(cwd),
-            assistant_uuid="",
-            parent_uuid=None,
-            model=str(row.get("model") or "") or None,
-            timestamp=str(row.get("ts") or ""),
-            cwd=str(cwd) if cwd else None,
-            git_branch=None,
-            turn_index=turn,
-            had_thinking=False,
-            assistant_text=str(row.get("assistant_text") or ""),
-            first_word=match.first_word,
-            surrounding_user=str(row.get("user_text") or ""),
-        )
-        turn += 1
+    # Stream line-by-line — journals grow monotonically and a heavy
+    # user's file can hit 100s of MB. Reading + splitlines materialized
+    # the whole file in memory; the iter form scales with row count.
+    with p.open() as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            prefix = row.get("kaomoji")
+            if not prefix:
+                continue
+            match = extract(str(prefix))
+            if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
+                continue
+            cwd = row.get("cwd")
+            yield ScrapeRow(
+                source=f"{source}-hook",
+                session_id="",
+                project_slug=_project_slug_from_cwd(cwd),
+                assistant_uuid="",
+                parent_uuid=None,
+                model=str(row.get("model") or "") or None,
+                timestamp=str(row.get("ts") or ""),
+                cwd=str(cwd) if cwd else None,
+                git_branch=None,
+                turn_index=turn,
+                had_thinking=False,
+                assistant_text=str(row.get("assistant_text") or ""),
+                first_word=match.first_word,
+                surrounding_user=str(row.get("user_text") or ""),
+            )
+            turn += 1

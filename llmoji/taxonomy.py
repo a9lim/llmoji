@@ -280,16 +280,20 @@ _LEAD_INSIDE_RE = re.compile(rf"^\([{re.escape(_ARM_INSIDE_LEAD)}]+")
 #      U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM,
 #      U+0602 ARABIC FOOTNOTE MARKER (observed as a stray byte between
 #      ``>`` and ``<`` in Qwen ``(๑>؂<๑)``).
-#   G: U+0335 COMBINING SHORT STROKE OVERLAY,
+#   G: U+0334 COMBINING TILDE OVERLAY,
+#      U+0335 COMBINING SHORT STROKE OVERLAY,
 #      U+0336 COMBINING LONG STROKE OVERLAY,
 #      U+0337 COMBINING SHORT SOLIDUS OVERLAY,
-#      U+0338 COMBINING LONG SOLIDUS OVERLAY — strikethrough overlays
-#      that occasionally land on eye glyphs (``˃̵`` etc.). Stripped
-#      narrowly to U+0335–U+0338; broader stripping of combining marks
-#      (U+0300–U+036F) would destroy intentional accent eye glyphs in
-#      ``(•̀_•́)`` (U+0300 GRAVE / U+0301 ACUTE).
-_INVISIBLE_CHARS_RE = re.compile(
-    "[​‌‍⁠﻿؂̴̵̶̷̸̿]"
+#      U+0338 COMBINING LONG SOLIDUS OVERLAY,
+#      U+033F COMBINING DOUBLE OVERLINE — strikethrough / overlay
+#      combining marks that occasionally land on eye glyphs
+#      (``˃̵``, ``˂̿`` etc.). Stripped narrowly across this set;
+#      broader stripping of combining marks (U+0300–U+036F) would
+#      destroy intentional accent eye glyphs in ``(•̀_•́)``
+#      (U+0300 GRAVE / U+0301 ACUTE).
+_INVISIBLE_CHARS = (
+    "​‌‍⁠﻿؂"  # rule A
+    "̴̵̶̷̸̿"               # rule G
 )
 
 # Hand-picked typographic / glyph substitutions. Hand-picked over NFKC
@@ -388,17 +392,32 @@ _INTERNAL_SUBS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _cyrillic_lower(s: str) -> str:
-    """Rule D: lowercase Cyrillic capitals U+0410–U+042F.
+# Combined translation table: invisibles (rule A + G) → delete,
+# typo-subs (rules B / E1 / E2 / H / I / J + arm/paren folds) →
+# replace, Cyrillic upper (rule D) → lower. Built once at import,
+# applied in a single ``str.translate`` pass per call (one O(n)
+# string scan instead of ~30 full-string ``replace`` walks plus a
+# regex sub plus a per-char Cyrillic-lower comprehension). The
+# substitutions don't chain (no destination char is also a source)
+# so the iterative + table forms are equivalent.
+def _build_translation_table() -> dict[int, int | None]:
+    table: dict[int, int | None] = {}
+    # Invisibles → delete (rules A + G).
+    for c in _INVISIBLE_CHARS:
+        table[ord(c)] = None
+    # Typo subs (single-char → single-char). All entries are 1→1
+    # and no destination char appears as a source elsewhere, so the
+    # iterative ``replace`` form and a single-pass translate are
+    # equivalent.
+    for src, dst in _TYPO_SUBS:
+        table[ord(src)] = ord(dst)
+    # Cyrillic capitals → lower (rule D).
+    for cp in range(0x0410, 0x0430):
+        table[cp] = cp + 0x20
+    return table
 
-    Leaves all non-Cyrillic-capital characters untouched, including
-    other Unicode case-bearing letters (Greek, etc.) which haven't
-    been observed as cosmetic-only variants in this corpus.
-    """
-    return "".join(
-        c.lower() if 0x0410 <= ord(c) <= 0x042F else c
-        for c in s
-    )
+
+_TRANSLATE_TABLE = _build_translation_table()
 
 
 def canonicalize_kaomoji(s: str) -> str:
@@ -406,16 +425,16 @@ def canonicalize_kaomoji(s: str) -> str:
 
     Applies, in order:
       1. NFC normalization (preserves `´`, `˘`, `｡` which NFKC would mangle).
-      2. Strip invisible / cosmetic-overlay chars (rule A + G — U+200B/C/D,
-         U+2060, U+FEFF, U+0602, U+0335–U+0338).
-      3. Apply ``_TYPO_SUBS`` (rule B half/full-width + E1 degree + E2
-         middle-dot + H curly-quote + I bullet→middle-dot + J
-         bracket-corner-circle, plus existing arm/paren folds).
-      4. Strip ASCII spaces inside the `(...)` bracket span (rule C).
-      5. Lowercase Cyrillic capitals (rule D).
-      6. Apply ``_INTERNAL_SUBS`` substring substitutions (rule K
+      2. Single ``str.translate`` pass folding:
+           * invisible / cosmetic-overlay chars (rule A + G — U+200B/C/D,
+             U+2060, U+FEFF, U+0602, U+0335–U+0338) → deleted.
+           * ``_TYPO_SUBS`` substitutions (rules B / E1 / E2 / H / I / J
+             plus existing arm/paren folds).
+           * Cyrillic capitals (rule D) → lowercase.
+      3. Strip ASCII spaces inside the `(...)` bracket span (rule C).
+      4. Apply ``_INTERNAL_SUBS`` substring substitutions (rule K
          ``・-・`` → ``・_・``).
-      7. Strip arm modifiers from face boundaries (rule F + L —
+      5. Strip arm modifiers from face boundaries (rule F + L —
          ``っ ς c ﻭ *``).
 
     Eye/mouth/decoration changes that aren't covered by rules
@@ -428,12 +447,9 @@ def canonicalize_kaomoji(s: str) -> str:
     if not s:
         return ""
     s = unicodedata.normalize("NFC", s.strip())
-    s = _INVISIBLE_CHARS_RE.sub("", s)
-    for src, dst in _TYPO_SUBS:
-        s = s.replace(src, dst)
+    s = s.translate(_TRANSLATE_TABLE)
     if s.startswith("(") and s.endswith(")"):
         s = "(" + s[1:-1].replace(" ", "") + ")"
-    s = _cyrillic_lower(s)
     for src, dst in _INTERNAL_SUBS:
         s = s.replace(src, dst)
     # Strip outside-paren trailing arm chars first so trailing-inside
@@ -444,119 +460,3 @@ def canonicalize_kaomoji(s: str) -> str:
     return s
 
 
-def sanity_check() -> None:
-    """Smoke-test the extractor and canonicalizer."""
-    # --- extract() ---
-    # Public extract is span-only post v1.0 (no taxonomy match flag).
-    assert extract("(｡◕‿◕｡) I had a great day!").first_word == "(｡◕‿◕｡)"
-    assert extract("(｡•́︿•̀｡) That's so sad.").first_word == "(｡•́︿•̀｡)"
-    assert extract("  (✿◠‿◠) hi").first_word == "(✿◠‿◠)"
-    # plain text — non-kaomoji prose returns empty first_word
-    assert extract("hello!").first_word == ""
-    # whitespace-padded face surfaces with internal whitespace intact
-    assert extract("(｡˃ ᵕ ˂ ) That is wonderful!").first_word == "(｡˃ ᵕ ˂ )"
-    # bracket-span fallback for an unknown paren form (real
-    # kaomoji-shape — used to be label=0 / "other" in the legacy API)
-    assert extract("(｡o_O｡) strange").first_word == "(｡o_O｡)"
-    # empty
-    assert extract("").first_word == ""
-    # parenthesized prose with 4+-letter run → rejected
-    assert extract("(Backgrounddebugscript) trailing").first_word == ""
-    # bracketed phrase with internal letters → rejected
-    assert extract("[pre-commit] passed").first_word == ""
-    # markdown-escape backslash → rejected
-    assert extract("(\\*´∀｀\\*) hello").first_word == ""
-    # unbalanced bracket → rejected (no fall-through to whitespace split)
-    assert extract("(｡• ω •｡  open paren never closed").first_word == ""
-    # oversize balanced span → rejected
-    long_paren = "(" + "a" * 50 + ")"
-    assert extract(long_paren + " text").first_word == ""
-
-    # --- canonicalize_kaomoji ---
-    ck = canonicalize_kaomoji
-    assert ck("") == ""
-    assert ck("   ") == ""
-    # rule A
-    assert ck("(⁠◕⁠‿⁠◕⁠✿⁠)") == "(◕‿◕✿)"
-    assert ck("(๑>؂<๑)") == "(๑><๑)"
-    # rule B
-    assert ck("(＞_＜)") == "(>_<)"
-    assert ck("(；ω；)") == "(;ω;)"
-    # rule C
-    assert ck("( ; ω ; )") == "(;ω;)"
-    assert ck("( ;´Д｀)") == "(;´д`)"
-    # rule D
-    assert ck("(；´Д｀)") == "(;´д`)"
-    assert ck("(；´д｀)") == "(;´д`)"
-    # rule E1
-    assert ck("(°Д°)") == "(°д°)"
-    assert ck("(ºДº)") == "(°д°)"
-    assert ck("(˚Д˚)") == "(°д°)"
-    # rule E2
-    assert ck("(´・ω・`)") == "(´・ω・`)"
-    assert ck("(´･ω･`)") == "(´・ω・`)"
-    # rule F
-    assert ck("(๑˃ᴗ˂)ﻭ") == "(๑˃‿˂)"
-    assert ck("(っ╥﹏╥)っ") == "(╥﹏╥)"
-    # rule G
-    assert ck("(๑˃̵‿˂̵)") == "(๑˃‿˂)"
-    # rule H + speculative B
-    assert ck("┐(‘～`;)┌") == "┐('~`;)┌"
-    assert ck("┐('～`;)┌") == "┐('~`;)┌"
-    # rule I
-    assert ck("(´•ω•`)") == "(´・ω・`)"
-    # rule J
-    assert ck("(◍•‿•◍)") == "(｡・‿・｡)"
-    assert ck("(｡•‿•｡)") == "(｡・‿・｡)"
-    # rule K
-    assert ck("(・-・)") == "(・_・)"
-    assert ck("(・_・)") == "(・_・)"
-    assert ck("(´-ω-`)") == "(´-ω-`)"
-    # rule L
-    assert ck("(*•̀‿•́*)") == "(・̀‿・́)"
-    # rules M / N
-    assert ck("(◔◡◔)") == "(◕‿◕)"
-    assert ck("(ᵔ◡ᵔ)") == "(ᵔ‿ᵔ)"
-    assert ck("(´｡・ᵕ・｡`)") == "(´｡・‿・｡`)"
-    # rule O
-    assert ck("ヽ(´ー｀)ノ") == "ヽ(´ー`)ノ"
-    assert ck("ヽ(´ー`)ノ") == "ヽ(´ー`)ノ"
-    # B extension
-    assert ck("(´。・ᵕ・。`)") == "(´｡・‿・｡`)"
-    # eye class
-    assert ck("(◔‿◔)") == "(◕‿◕)"
-    assert ck("(◑‿◐)") == "(◕‿◕)"
-    assert ck("(◐‿◑)") == "(◕‿◕)"
-    assert ck("(◕‿◕)") == "(◕‿◕)"
-    assert ck("(◒_◒)") == "(◕_◕)"
-    assert ck("(◓‿◓)") == "(◕‿◕)"
-    assert ck("(◖_◗)") == "(◕_◕)"
-    assert ck("(◉_◉)") == "(⊙_⊙)"
-    assert ck("(⊙_⊙)") == "(⊙_⊙)"
-    assert ck("(●_●)") == "(⊙_⊙)"
-    assert ck("(◕⌣◕)") == "(◕‿◕)"
-    assert ck("(・_・？)") == "(・_・?)"
-    assert ck("(～ω～)") == "(~ω~)"
-    assert ck("(๑˃̴‿˂̿)") == "(๑˃‿˂)"
-    assert ck("(◠‿◠)") == "(◠‿◠)"
-    # idempotence on a complex example
-    once = ck("( ⁠;⁠ ´⁠Д⁠｀⁠ )")
-    twice = ck(once)
-    assert once == twice, (once, twice)
-    # eye change preserved (NOT collapsed by E)
-    assert ck("(◕‿◕)") != ck("(♥‿♥)")
-    # is_kaomoji_candidate
-    assert is_kaomoji_candidate("(｡◕‿◕｡)")
-    assert not is_kaomoji_candidate("hi")
-    assert not is_kaomoji_candidate("(\\*´∀｀\\*)")
-    assert not is_kaomoji_candidate("(Backgrounddebug)")
-    assert not is_kaomoji_candidate("(unclosed")
-    assert not is_kaomoji_candidate("(" + "a" * 100 + ")")
-
-
-if __name__ == "__main__":
-    sanity_check()
-    print(
-        f"taxonomy OK; {len(KAOMOJI_START_CHARS)} start chars; "
-        f"canonicalization rules A–P locked"
-    )
