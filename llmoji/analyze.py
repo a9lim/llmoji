@@ -198,9 +198,25 @@ def _write_bundle(
     notes: str,
 ) -> None:
     """Write manifest.json + descriptions.jsonl. Loose-files layout
-    so the user can ``cat`` and review before ``upload``."""
+    so the user can ``cat`` and review before ``upload``.
+
+    Clears any prior contents of ``bundle_dir`` (loose files only —
+    we don't recurse into subdirs in case the user has stashed
+    notes there) before writing. The bundle is the privacy
+    boundary; stale leftover files MUST NOT survive an `analyze`
+    that's about to feed `upload`. The two-file schema is the v1.0
+    frozen surface (see :data:`llmoji.upload.BUNDLE_ALLOWLIST`).
+    """
     from .providers.base import _package_version
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    # Clear loose files in the bundle dir before writing — guarantees
+    # the post-`analyze` state is exactly the two-file schema with no
+    # stragglers from prior runs or out-of-band user edits. Subdirs
+    # (if any) are left alone; the upload allowlist refuses to ship
+    # them.
+    for p in bundle_dir.iterdir():
+        if p.is_file():
+            p.unlink()
 
     manifest = {
         "llmoji_version": _package_version(),

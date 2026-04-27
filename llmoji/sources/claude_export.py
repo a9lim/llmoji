@@ -90,8 +90,6 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             had_thinking=False,
             assistant_text=text,
             first_word=match.first_word,
-            kaomoji=match.kaomoji,
-            kaomoji_label=match.label,
             surrounding_user=user_text,
         )
         turn += 1

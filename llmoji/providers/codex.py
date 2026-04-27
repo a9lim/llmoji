@@ -72,9 +72,57 @@ class CodexProvider(Provider):
         )
         if self._MARKER_BEGIN in existing:
             return  # idempotent
+        # Refuse to clobber: if the user already has their own
+        # `[hooks.stop]` section in the file (without our marker
+        # block), appending another one yields a duplicate-table
+        # TOML error and hides whatever they had. Loud failure;
+        # they can move/delete their config and re-run.
+        if self._has_unmanaged_hooks_stop(existing):
+            from .base import SettingsCorruptError
+            raise SettingsCorruptError(
+                self.settings_path,
+                "existing [hooks.stop] section is not managed by "
+                "llmoji. Remove it (or move the whole file aside) "
+                "before installing the codex hook.",
+            )
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings_path.write_text(existing + sep + self._stanza())
+
+    @staticmethod
+    def _has_unmanaged_hooks_stop(text: str) -> bool:
+        """Return True iff the TOML text contains a `[hooks.stop]`
+        section that is NOT inside our managed marker block."""
+        # Cheap scan: find every `[hooks.stop]` occurrence and check
+        # whether any is outside any `>>> begin <<<` ... `<<< end >>>`
+        # block. We don't need a full TOML parser for this — the
+        # check is conservative (false-positive is fine, false-
+        # negative is the bad case).
+        if "[hooks.stop]" not in text:
+            return False
+        managed_starts = [
+            i for i in range(len(text))
+            if text.startswith(CodexProvider._MARKER_BEGIN, i)
+        ]
+        managed_ends = [
+            i for i in range(len(text))
+            if text.startswith(CodexProvider._MARKER_END, i)
+        ]
+        # Build managed spans (begin → end pairs, in order).
+        spans = []
+        for s, e in zip(managed_starts, managed_ends):
+            if e > s:
+                spans.append((s, e + len(CodexProvider._MARKER_END)))
+        # Any [hooks.stop] occurrence outside every span is unmanaged.
+        idx = 0
+        while True:
+            idx = text.find("[hooks.stop]", idx)
+            if idx < 0:
+                return False
+            inside = any(s <= idx < e for s, e in spans)
+            if not inside:
+                return True
+            idx += len("[hooks.stop]")
 
     def _unregister(self) -> None:
         if not self.settings_path.exists():

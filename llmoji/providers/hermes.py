@@ -1,46 +1,75 @@
 """Hermes (NousResearch hermes-agent) provider.
 
-Hook fires as a YAML-configured ``post_llm_call`` event under
-``~/.hermes/config.yaml``. The payload (stdin JSON) carries
-``hook_event_name``, ``session_id``, ``cwd``, plus an ``extra``
-dict containing the pre-injection ``user_message``, the final
-``assistant_response`` text, the active model, the platform, and
-the conversation history. All six llmoji fields land cleanly in
-one event — single-event payload, so neither the first/last
-disambiguation Claude Code and Codex need.
+Implemented against hermes-agent v0.11.0's
+[Event Hooks docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/).
+The applicable mechanism is **shell hooks** under
+``~/.hermes/agent-hooks/`` registered via the ``hooks:`` block in
+``~/.hermes/config.yaml``. (Hermes also supports gateway hooks at
+``~/.hermes/hooks/<name>/HOOK.yaml + handler.py`` and plugin hooks
+registered via ``ctx.register_hook()``; for a CLI-installed
+journal-logger the shell-hooks path is the lowest-friction option
+because it doesn't require a Python plugin and inherits the same
+fail-open / stdout-JSON contract Claude Code and Codex hooks use.)
 
-Key per-provider quirks (vs claude_code / codex):
+The CLI installs **two** hooks for hermes:
 
-  - **kaomoji_position = "single"**: one final-text field, no
-    first/last ambiguity.
-  - **sidechain_strategy = "session_correlation"**:
-    ``post_llm_call`` fires for both parent and child sessions;
-    child sessions are identified by correlating ``session_id``
-    against ``delegate_task`` events. Concrete config: track child
-    session_ids from a companion ``subagent_stop`` registration;
-    drop ``post_llm_call`` events whose session_id matches a known
-    child. Implemented inline in the hook template via a small
-    state file at ``~/.hermes/.llmoji-children``.
+  - ``post-llm-call.sh`` — main journal logger; fires after every
+    assistant turn that the agent loop completes.
+  - ``subagent-stop.sh`` — companion sidechain registrar; records
+    delegated child session_ids to a state file the main hook
+    consults to drop subagent traffic.
+
+Stdin payload (``post_llm_call``)::
+
+    {
+      "hook_event_name": "post_llm_call",
+      "session_id": "...",
+      "cwd": "...",
+      "extra": {
+        "user_message":          "...",
+        "assistant_response":    "...",
+        "model":                 "...",
+        "platform":              "...",
+        "conversation_history":  [...]
+      }
+    }
+
+Stdin payload (``subagent_stop``)::
+
+    {
+      "hook_event_name": "subagent_stop",
+      "session_id": "...",          // child session id
+      "extra": {
+        "parent_session_id": "...",
+        "child_role":        "...",
+        "child_status":      "..."
+      }
+    }
+
+Stdout: JSON. ``{}`` is no-op. Malformed JSON / non-zero exit /
+timeout never abort the agent loop (fail-open).
+
+Per-provider quirks (vs claude_code / codex):
+
+  - **kaomoji_position = "single"**: one final-text field per turn
+    (``extra.assistant_response``); no first/last ambiguity.
+  - **sidechain_strategy = "session_correlation"**: implemented via
+    the companion ``subagent_stop`` hook, which writes child
+    session_ids to ``~/.hermes/.llmoji-children``. The main
+    ``post_llm_call`` hook checks that file and drops matching
+    session_ids.
   - **system_injected_prefixes = []**: hermes delivers
-    ``user_message`` pre-injection — no system-injection scrubbing
-    needed.
+    ``extra.user_message`` pre-injection, per the documented
+    contract.
 
-⚠ **Empirical validation pending.** The hermes provider in v1.0
-is implemented from the documented hermes-agent v0.11.0 hook
-contract (see plan v1.0 prereq §4) but has not yet been smoke-
-tested end-to-end against a live agent. Three items still want
-real-traffic verification before claiming stability:
-
-  1. The exact ``extra.*`` keys delivered by ``post_llm_call``
-     (the docs example block was for ``pre_tool_call``).
-  2. That the session-correlation sidechain strategy works
-     against actual ``delegate_task`` traffic.
-  3. That ``user_message`` arrives clean (no system-injection
-     prefixes that need filtering).
-
-Treat the hermes hook as experimental until that validation
-lands; the journal file format and CLI surface are stable across
-this verification.
+⚠ The hermes path was implemented from docs only. The shell hook
+shape is well-documented and other providers' hooks share the same
+``stdin JSON / stdout JSON / fail-open`` skeleton, but live-traffic
+verification of (a) the exact ``extra.*`` keys delivered by
+``post_llm_call``, (b) the companion subagent_stop event firing as
+expected on real ``delegate_task`` traffic, (c) ``user_message``
+arriving clean, would still be useful before claiming the hermes
+provider is battle-tested.
 
 Hermes settings are YAML — same edit-with-marker-block strategy as
 codex's TOML to avoid pulling in a YAML dependency for what
@@ -49,9 +78,20 @@ amounts to a few lines.
 
 from __future__ import annotations
 
+import importlib.resources
 from pathlib import Path
+from string import Template
 
-from .base import KaomojiPosition, Provider, SidechainStrategy
+from .base import (
+    KaomojiPosition,
+    Provider,
+    SettingsCorruptError,
+    SidechainStrategy,
+    _package_version,
+)
+
+CHILD_STATE_PATH = Path.home() / ".hermes" / ".llmoji-children"
+SUBAGENT_STOP_HOOK_FILENAME = "subagent-stop.sh"
 
 
 class HermesProvider(Provider):
@@ -61,26 +101,77 @@ class HermesProvider(Provider):
     settings_format = "yaml"
     journal_path = Path.home() / ".hermes" / "kaomoji-journal.jsonl"
     hook_template = "hermes.sh.tmpl"
-    hook_filename = "kaomoji-log.sh"
+    hook_filename = "post-llm-call.sh"
     kaomoji_position: KaomojiPosition = "single"
     sidechain_strategy: SidechainStrategy = "session_correlation"
     sidechain_config = {
-        "child_state_path": str(Path.home() / ".hermes" / ".llmoji-children"),
-        "correlation_event": "delegate_task",
+        "child_state_path": str(CHILD_STATE_PATH),
+        "correlation_event": "subagent_stop",
     }
     system_injected_prefixes: list[str] = []
 
     _MARKER_BEGIN = "# >>> llmoji begin (managed) >>>"
     _MARKER_END = "# <<< llmoji end (managed) <<<"
 
+    @property
+    def subagent_hook_path(self) -> Path:
+        return self.hooks_dir / SUBAGENT_STOP_HOOK_FILENAME
+
+    # --- hook rendering ---
+
+    def render_subagent_hook(self) -> str:
+        """Render the companion subagent_stop hook."""
+        template_text = importlib.resources.files("llmoji._hooks").joinpath(
+            "hermes_subagent_stop.sh.tmpl"
+        ).read_text()
+        return Template(template_text).safe_substitute(
+            CHILD_STATE_PATH=str(CHILD_STATE_PATH),
+            LLMOJI_VERSION=_package_version(),
+        )
+
+    # --- install / uninstall override (two hooks, one config block) ---
+
+    def install(self) -> None:
+        self.hooks_dir.mkdir(parents=True, exist_ok=True)
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        # Main hook (post_llm_call)
+        self.hook_path.write_text(self.render_hook())
+        self.hook_path.chmod(0o755)
+        # Companion hook (subagent_stop)
+        self.subagent_hook_path.write_text(self.render_subagent_hook())
+        self.subagent_hook_path.chmod(0o755)
+        # Init the child-state file so the main hook's `grep -qFx`
+        # never errors on a missing file.
+        CHILD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CHILD_STATE_PATH.touch(exist_ok=True)
+        # Register both in config.yaml
+        self._register()
+
+    def uninstall(self) -> None:
+        self._unregister()
+        if self.hook_path.exists():
+            self.hook_path.unlink()
+        if self.subagent_hook_path.exists():
+            self.subagent_hook_path.unlink()
+        # Leave the child-state file in place; user can `rm
+        # ~/.hermes/.llmoji-children` if they want a clean slate.
+
+    # --- YAML stanza ---
+
     def _stanza(self) -> str:
-        # YAML-shaped registration. Hermes's `hooks` block accepts a
-        # mapping {event_name: [list of command paths]}.
+        # Hermes shell-hooks YAML shape per docs:
+        #   hooks:
+        #     post_llm_call:
+        #       - command: "<path>"
+        #     subagent_stop:
+        #       - command: "<path>"
         return (
             f"{self._MARKER_BEGIN}\n"
             "hooks:\n"
             "  post_llm_call:\n"
-            f"    - {self.hook_path}\n"
+            f'    - command: "{self.hook_path}"\n'
+            "  subagent_stop:\n"
+            f'    - command: "{self.subagent_hook_path}"\n'
             f"{self._MARKER_END}\n"
         )
 
@@ -91,7 +182,19 @@ class HermesProvider(Provider):
             else ""
         )
         if self._MARKER_BEGIN in existing:
-            return
+            return  # idempotent
+        # Refuse to clobber an existing top-level `hooks:` key —
+        # appending a fresh `hooks:` to a YAML file that already has
+        # one yields a duplicate-key document; most YAML parsers
+        # silently last-write-wins, which would discard the user's
+        # prior hook config.
+        if self._has_unmanaged_hooks_top_level(existing):
+            raise SettingsCorruptError(
+                self.settings_path,
+                "existing top-level 'hooks:' key is not managed by "
+                "llmoji. Add the hermes hooks under that block by "
+                "hand, or move the file aside and re-run.",
+            )
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         self.settings_path.write_text(existing + sep + self._stanza())
@@ -115,3 +218,52 @@ class HermesProvider(Provider):
         if not self.settings_path.exists():
             return False
         return self._MARKER_BEGIN in self.settings_path.read_text()
+
+    @staticmethod
+    def _has_unmanaged_hooks_top_level(text: str) -> bool:
+        """Return True iff the YAML text contains a top-level
+        ``hooks:`` key not inside our managed marker block.
+
+        Conservative: matches lines that start with ``hooks:`` (no
+        leading whitespace, a colon, then end-of-line or whitespace).
+        That's exactly the top-level YAML key shape Hermes documents.
+        """
+        if "\nhooks:" not in ("\n" + text):
+            return False
+        # Find managed spans
+        managed_starts = [
+            i for i in range(len(text))
+            if text.startswith(HermesProvider._MARKER_BEGIN, i)
+        ]
+        managed_ends = [
+            i for i in range(len(text))
+            if text.startswith(HermesProvider._MARKER_END, i)
+        ]
+        spans = []
+        for s, e in zip(managed_starts, managed_ends):
+            if e > s:
+                spans.append((s, e + len(HermesProvider._MARKER_END)))
+        # Walk every "\nhooks:" line-start
+        for line_start in _line_starts_matching(text, "hooks:"):
+            inside = any(s <= line_start < e for s, e in spans)
+            if not inside:
+                return True
+        return False
+
+
+def _line_starts_matching(text: str, prefix: str) -> list[int]:
+    """Return offsets in ``text`` of every line that starts with
+    ``prefix``."""
+    out = []
+    if text.startswith(prefix):
+        out.append(0)
+    idx = 0
+    while True:
+        nl = text.find("\n", idx)
+        if nl < 0:
+            break
+        line_start = nl + 1
+        if text.startswith(prefix, line_start):
+            out.append(line_start)
+        idx = line_start
+    return out
