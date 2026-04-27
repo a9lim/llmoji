@@ -209,7 +209,7 @@ llmoji/
                            # (taxonomy / haiku_prompts / ScrapeRow /
                            # provider rendering + bash -n / bundle
                            # allowlist / corrupt-config refusal /
-                           # mask_kaomoji pre-stripped branch).
+                           # mask_kaomoji unified prepend contract).
     test_canonicalize.py   # parametrized rule-by-rule regression
                            # tests for canonicalize_kaomoji + extract
                            # + is_kaomoji_candidate. Each rule case is
@@ -218,31 +218,30 @@ llmoji/
 
 ## Gotchas
 
-### `mask_kaomoji` re-prepends `[FACE]` for journal-source rows
+### Journal-row contract: `assistant_text` never carries the kaomoji
 
-The bash hooks strip the leading kaomoji from `assistant_text`
-before writing the journal row (the
-`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")` jq
-chain). The `kaomoji` field carries the prefix separately. So at
-`analyze` time:
+Every source — bash hooks, Claude.ai export reader, generic-JSONL
+contract — must persist `assistant_text` with the leading kaomoji
+already stripped. The prefix lives separately in the row's
+`kaomoji` field. The bash hooks enforce this via jq's
+`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")`;
+`llmoji.sources.claude_export` does the equivalent in Python after
+`taxonomy.extract`.
 
-  - **Live-hook journal rows**: `assistant_text` does NOT start
-    with `first_word`. `mask_kaomoji` prepends `[FACE] ` so the
-    Haiku DESCRIBE prompt's "we replaced it with [FACE]" framing
-    matches what Haiku actually sees in the body.
-  - **Static-export rows** (claude.ai conversations.json): the
-    kaomoji is still at the head of `assistant_text`.
-    `mask_kaomoji` substitutes `[FACE]` in place.
+`mask_kaomoji` consequently has a single branch: prepend
+`"[FACE] "` to whatever's there. No source-shape dispatch, no
+substitute-in-place fallback. If you add a new source, strip on
+the way in — don't push the special case into `mask_kaomoji`.
 
-Either way the masked text starts with `[FACE]` whenever
-`first_word` is non-empty. Pre-fix the live-hook branch fell
-through to `return text` and Haiku got a prompt promising a
-`[FACE]` that wasn't in the body — affected every journal row.
+The cache key hashes raw `(canonical, user_text, assistant_text)`;
+existing cache entries from prior `parse + analyze` runs of an
+export will miss after this normalization (export rows now hash
+without the kaomoji). One-time re-call cost on the next analyze.
 
-If you change the hook's strip-on-write behavior, audit
-`mask_kaomoji` in the same diff. The cache key is on raw
-`(canonical, user_text, assistant_text)` — not on the masked
-output — so existing cache entries survive a fix to either side.
+Pre-package, the live-hook branch of `mask_kaomoji` fell through
+to `return text` and Haiku got a prompt promising a `[FACE]` that
+wasn't in the body — affected every journal row. The unified
+contract makes that class of bug structurally impossible.
 
 ### KAOMOJI_START_CHARS sync — RESOLVED via templating
 
