@@ -1,0 +1,51 @@
+[project]
+name = "llmoji"
+version = "1.0.0"
+description = "Provider-agnostic kaomoji journal collection + canonical Haiku synthesis + privacy-preserving aggregate submission for cross-corpus emotional-state research."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "a9lim", email = "mx@a9l.im" }]
+keywords = ["kaomoji", "claude", "codex", "hermes", "emoticons", "ai", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Lean by design: the package is provider-agnostic data collection
+# + canonical Haiku synthesis + bundle/upload. Heavy ML deps
+# (torch / saklas / sentence-transformers / matplotlib) live in
+# the research-side `llmoji-study` repo.
+dependencies = [
+    "anthropic>=0.40",
+    "huggingface_hub>=0.25",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.urls]
+Homepage = "https://github.com/a9lim/llmoji"
+Repository = "https://github.com/a9lim/llmoji"
+Issues = "https://github.com/a9lim/llmoji/issues"
+Research = "https://github.com/a9lim/llmoji-study"
+
+[project.scripts]
+llmoji = "llmoji.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llmoji"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"llmoji/_hooks" = "llmoji/_hooks"

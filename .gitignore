@@ -1,0 +1,18 @@
+# build / editable install artifacts
+*.egg-info/
+dist/
+build/
+__pycache__/
+*.pyc
+
+# local envs
+.venv/
+.env
+
+# editor cruft
+.DS_Store
+.idea/
+.vscode/
+
+# pytest
+.pytest_cache/
