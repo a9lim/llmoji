@@ -104,7 +104,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         if extra:
             print(f"\nextra journals at {journals}:")
             for j in extra:
-                lines = sum(1 for line in j.open() if line.strip())
+                with j.open() as f:
+                    lines = sum(1 for line in f if line.strip())
                 print(f"  - {j.name}  ({lines} rows)")
     return 0
 

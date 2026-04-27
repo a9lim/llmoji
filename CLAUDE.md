@@ -179,6 +179,8 @@ llmoji/
       base.py              # Provider + ProviderStatus dataclasses +
                            # SettingsCorruptError + template render
                            # helpers + JSON-settings edit helpers
+                           # + _atomic_write_text (tmp+rename) used
+                           # by every provider's settings writer
       claude_code.py       # JSON Stop-hook provider (~/.claude/settings.json)
       codex.py             # TOML Stop-hook provider (~/.codex/config.toml,
                            # marker-fenced [hooks.stop] stanza)
@@ -193,7 +195,11 @@ llmoji/
       hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
     paths.py               # ~/.llmoji home, cache, bundle, journals
     analyze.py             # the analyze pipeline (Stage A + B + bundle;
-                           # clears bundle dir before writing)
+                           # clears bundle dir before writing). Stage A
+                           # dispatches cache-miss Haiku calls on a
+                           # ThreadPoolExecutor (default 4 workers, env
+                           # $LLMOJI_CONCURRENCY); cache appends serialize
+                           # on the main thread via as_completed
     upload.py              # tar + HF / email targets;
                            # BUNDLE_ALLOWLIST enforces the two-file
                            # schema, refuses extras
@@ -201,11 +207,42 @@ llmoji/
   tests/
     test_public_surface.py # pytest checks locking the v1.0 contract
                            # (taxonomy / haiku_prompts / ScrapeRow /
-                           # provider rendering / bundle allowlist /
-                           # corrupt-config refusal). 9 tests.
+                           # provider rendering + bash -n / bundle
+                           # allowlist / corrupt-config refusal /
+                           # mask_kaomoji pre-stripped branch).
+    test_canonicalize.py   # parametrized rule-by-rule regression
+                           # tests for canonicalize_kaomoji + extract
+                           # + is_kaomoji_candidate. Each rule case is
+                           # its own pytest line. ~70 cases total.
 ```
 
 ## Gotchas
+
+### `mask_kaomoji` re-prepends `[FACE]` for journal-source rows
+
+The bash hooks strip the leading kaomoji from `assistant_text`
+before writing the journal row (the
+`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")` jq
+chain). The `kaomoji` field carries the prefix separately. So at
+`analyze` time:
+
+  - **Live-hook journal rows**: `assistant_text` does NOT start
+    with `first_word`. `mask_kaomoji` prepends `[FACE] ` so the
+    Haiku DESCRIBE prompt's "we replaced it with [FACE]" framing
+    matches what Haiku actually sees in the body.
+  - **Static-export rows** (claude.ai conversations.json): the
+    kaomoji is still at the head of `assistant_text`.
+    `mask_kaomoji` substitutes `[FACE]` in place.
+
+Either way the masked text starts with `[FACE]` whenever
+`first_word` is non-empty. Pre-fix the live-hook branch fell
+through to `return text` and Haiku got a prompt promising a
+`[FACE]` that wasn't in the body — affected every journal row.
+
+If you change the hook's strip-on-write behavior, audit
+`mask_kaomoji` in the same diff. The cache key is on raw
+`(canonical, user_text, assistant_text)` — not on the masked
+output — so existing cache entries survive a fix to either side.
 
 ### KAOMOJI_START_CHARS sync — RESOLVED via templating
 
@@ -278,6 +315,12 @@ already installing once — is fully idempotent. The marker fences in
 codex/hermes mean the second `install` is a no-op; the JSON-edit
 path in claude_code checks for an existing entry with our command
 string and skips.
+
+Settings writes go through `_atomic_write_text` (tmp file +
+`os.replace`) so a power loss / SIGINT mid-write leaves the user's
+settings file with either the old content or the new — never half.
+The `upload` state.json (per-machine submission token) writes the
+same way.
 
 ### Bundle is allowlisted, not just-tar-everything
 
@@ -382,9 +425,17 @@ first-class is post-v1.0.
 - `~/.llmoji` is the on-disk root for everything the package
   manages; tests can override via `$LLMOJI_HOME`.
 - Hook templates are bash, syntactically validated by `bash -n`
-  during dev. Don't introduce non-bash hook formats; if a harness
-  needs one, that's a post-v1.0 first-class adapter, and the
-  generic-JSONL-append contract is the v1.0 path until then.
+  in the test suite (`test_hook_templates_render_to_valid_bash_substitutions`)
+  so a template-edit regression fails CI rather than failing
+  silently inside a user's harness post-install. Don't introduce
+  non-bash hook formats; if a harness needs one, that's a post-v1.0
+  first-class adapter, and the generic-JSONL-append contract is the
+  v1.0 path until then.
+- Stage-A Haiku calls run on a small thread pool (default 4,
+  `$LLMOJI_CONCURRENCY` to override). The Anthropic httpx.Client is
+  thread-safe; cache writes serialize on the main thread via
+  `as_completed`, so no append interleaving. Set
+  `$LLMOJI_CONCURRENCY=1` to force serial dispatch when debugging.
 - Public-API freeze: anything in §"v1.0 frozen public surface" gets
   a major-version bump if changed. Internal helpers (everything in
   `llmoji.providers.base._*`, `llmoji.haiku.cache_key`, etc.) are

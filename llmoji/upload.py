@@ -125,8 +125,11 @@ def _submission_token() -> str:
             state = {}
     if "submission_token" not in state:
         state["submission_token"] = secrets.token_hex(32)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state_path.write_text(json.dumps(state, indent=2) + "\n")
+        # Atomic write — losing the token mid-write would invalidate
+        # the user's submitter id and double-credit them in the
+        # dataset's per-machine dedup.
+        from .providers.base import _atomic_write_text
+        _atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
     return state["submission_token"]
 
 

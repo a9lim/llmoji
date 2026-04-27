@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import KaomojiPosition, Provider, SidechainStrategy
+from .base import (
+    KaomojiPosition,
+    Provider,
+    SidechainStrategy,
+    _atomic_write_text,
+)
 
 
 class CodexProvider(Provider):
@@ -86,8 +91,7 @@ class CodexProvider(Provider):
                 "before installing the codex hook.",
             )
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(existing + sep + self._stanza())
+        _atomic_write_text(self.settings_path, existing + sep + self._stanza())
 
     @staticmethod
     def _has_unmanaged_hooks_stop(text: str) -> bool:
@@ -136,7 +140,7 @@ class CodexProvider(Provider):
         cleaned = before.rstrip() + ("\n" + after.lstrip() if after.strip() else "")
         cleaned = cleaned.rstrip() + "\n" if cleaned.strip() else ""
         if cleaned:
-            self.settings_path.write_text(cleaned)
+            _atomic_write_text(self.settings_path, cleaned)
         else:
             self.settings_path.unlink()
 

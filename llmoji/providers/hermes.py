@@ -87,6 +87,7 @@ from .base import (
     Provider,
     SettingsCorruptError,
     SidechainStrategy,
+    _atomic_write_text,
     _package_version,
 )
 
@@ -196,8 +197,7 @@ class HermesProvider(Provider):
                 "hand, or move the file aside and re-run.",
             )
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self.settings_path.write_text(existing + sep + self._stanza())
+        _atomic_write_text(self.settings_path, existing + sep + self._stanza())
 
     def _unregister(self) -> None:
         if not self.settings_path.exists():
@@ -210,7 +210,7 @@ class HermesProvider(Provider):
         cleaned = before.rstrip() + ("\n" + after.lstrip() if after.strip() else "")
         cleaned = cleaned.rstrip() + "\n" if cleaned.strip() else ""
         if cleaned:
-            self.settings_path.write_text(cleaned)
+            _atomic_write_text(self.settings_path, cleaned)
         else:
             self.settings_path.unlink()
 

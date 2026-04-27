@@ -28,9 +28,11 @@ Embedding, axis-projection, figures, clustering all live in
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -59,6 +61,14 @@ from .taxonomy import canonicalize_kaomoji
 # fully sampled.
 INSTANCE_SAMPLE_CAP = 4
 INSTANCE_SAMPLE_SEED = 0
+
+# Stage-A Haiku-call concurrency. The Anthropic SDK's underlying
+# httpx.Client is thread-safe, and a content-hash cache append-write
+# is POSIX-atomic for sub-PIPE_BUF (4 KB) JSONL lines, so a small
+# thread pool gives ~Nx wallclock speedup on cache misses with no
+# coordination beyond per-future result handling on the main thread.
+# Override via $LLMOJI_CONCURRENCY (>=1).
+DEFAULT_STAGE_A_CONCURRENCY = 4
 
 
 @dataclass
@@ -103,22 +113,46 @@ def _sample(
     return rng.sample(rows, cap)
 
 
+def _resolve_concurrency(explicit: int | None) -> int:
+    """Stage-A worker count: explicit arg → ``$LLMOJI_CONCURRENCY``
+    → :data:`DEFAULT_STAGE_A_CONCURRENCY`. Clamps to ``>=1``. Bad
+    env values fall back silently to the default."""
+    if explicit is not None:
+        return max(1, explicit)
+    raw = os.environ.get("LLMOJI_CONCURRENCY")
+    if raw is None:
+        return DEFAULT_STAGE_A_CONCURRENCY
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_STAGE_A_CONCURRENCY
+
+
 def _stage_a(
     client,
     buckets: dict[str, list[ScrapeRow]],
     *,
     cache_path: Path,
     print_progress: bool = True,
+    max_workers: int | None = None,
 ) -> tuple[dict[str, list[str]], int, int]:
     """For each canonical bucket, sample ≤ INSTANCE_SAMPLE_CAP rows;
     Haiku-describe each (with cache hit skipping the API call);
     return ``(descriptions_by_canonical, n_calls, n_cached)``.
+
+    Cache-miss Haiku calls run on a small thread pool
+    (``max_workers`` or ``$LLMOJI_CONCURRENCY``, default 4). The
+    Anthropic client is thread-safe; cache appends happen serially
+    on the main thread as futures complete, so there's no append
+    interleaving to worry about.
     """
     cache = load_cache(cache_path)
     descs_by_canon: dict[str, list[str]] = defaultdict(list)
-    n_calls = 0
     n_cached = 0
+    pending: list[tuple[str, str, str]] = []  # (canon, key, prompt)
 
+    # Pass 1: walk every sampled row, satisfy from cache where
+    # possible, queue misses for parallel dispatch.
     for canon in sorted(buckets):
         sampled = _sample(buckets[canon], cap=INSTANCE_SAMPLE_CAP, seed_label=canon)
         for r in sampled:
@@ -130,7 +164,6 @@ def _stage_a(
                 descs_by_canon[canon].append(hit["description"])
                 n_cached += 1
                 continue
-
             masked = mask_kaomoji(assistant, r.first_word)
             if user_text:
                 prompt = DESCRIBE_PROMPT_WITH_USER.format(
@@ -138,9 +171,23 @@ def _stage_a(
                 )
             else:
                 prompt = DESCRIBE_PROMPT_NO_USER.format(masked_text=masked)
-            t0 = time.time()
-            description = call_haiku(client, prompt, model_id=HAIKU_MODEL_ID)
-            dt = time.time() - t0
+            pending.append((canon, key, prompt))
+
+    if not pending:
+        return dict(descs_by_canon), 0, n_cached
+
+    workers = _resolve_concurrency(max_workers)
+
+    def _describe_one(canon: str, key: str, prompt: str) -> tuple[str, str, str, float]:
+        t0 = time.monotonic()
+        description = call_haiku(client, prompt, model_id=HAIKU_MODEL_ID)
+        return canon, key, description, time.monotonic() - t0
+
+    n_calls = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_describe_one, c, k, p) for c, k, p in pending]
+        for fut in as_completed(futures):
+            canon, key, description, dt = fut.result()
             row = {
                 "key": key,
                 "kaomoji": canon,

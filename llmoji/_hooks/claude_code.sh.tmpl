@@ -64,7 +64,7 @@ ASSISTANT_TEXT=$(jq -rs '
 # ignoring tool_result), drops skill-injected payloads, keeps the
 # last surviving non-empty one. Skill-injected prefix list comes
 # from the package taxonomy + provider definition.
-USER_TEXT=$(jq -rs --argjson _ '0' '
+USER_TEXT=$(jq -rs '
   [ .[]
     | select(.type == "user")
     | .message.content as $c
