@@ -8,23 +8,23 @@
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
-Llmoji configures your agent to start each message with a kaomoji. It locally saves them, asks Haiku to summarize the meaning per face, and gives you the option of uploading it to contribute to a shared database.
+Llmoji configures your agent to start each message with a kaomoji. It locally saves them, and provides optional tools to summarize and upload the aggregated meaning per face to contribute to a shared database.
 
-The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is where this data is processed. The only runtime deps are `anthropic` (for Haiku) and `huggingface_hub` (for the upload target).
+The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is where this data is processed.
 
 There are three main commands:
 
-- **`llmoji install <provider>`**: idempotently write a stop-event hook into your harness
-- **`llmoji analyze`**: scrape and summarize into a local bundle
+- **`llmoji install <provider>`**: write a `Stop` hook into your harness
+- **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: tarball the bundle and ship it
 
-Analyze needs an Anthropic API key in `$ANTHROPIC_API_KEY`; upload to HuggingFace needs `$HF_TOKEN`. The email path has you attach the tarball manually.
+`analyze` needs an Anthropic API key in `$ANTHROPIC_API_KEY`; `upload --target hf` needs `$HF_TOKEN`. The email path has you attach the tarball manually.
 
 ---
 
 ## What this is for
 
-The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) collects kaomoji counts and a single summarized description per face, across many users' coding agents. The companion repo embeds and processes those descriptions. After you run `analyze`, you can inspect the files yourself at `~/.llmoji/bundle/descriptions.jsonl`. 
+The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) collects kaomoji counts and a single summarized description per face, across many users' coding agents. The companion repo processes those descriptions. After you run `analyze`, you can inspect the files yourself at `~/.llmoji/bundle/descriptions.jsonl` before you choose to `upload`. 
 
 ---
 
@@ -35,17 +35,17 @@ pip install llmoji
 llmoji install claude_code      # or: codex, hermes
 ```
 
-This writes a read-only `Stop` hook into `~/.claude/settings.json` and a hook script under `~/.claude/llmoji-hooks/`. From now on, your Claude will use kaomoji at the start of each message, and saves them to `~/.claude/kaomoji-journal.jsonl`. 
+From now on, your agent will use kaomoji at the start of each message. 
 
 After letting it run for a week or so:
 
 ```bash
 export ANTHROPIC_API_KEY=...
 llmoji status                              # check what's been logged
-llmoji analyze                             # scrape + canonicalize + Haiku synthesize
+llmoji analyze                             # scrape + canonicalize + Haiku summarize
 llmoji upload --target hf                  # commit to a9lim/llmoji
 # or:
-llmoji upload --target email               # opens mailto: with attach hint
+llmoji upload --target email               # opens mailto:
 ```
 
 `analyze` caches Haiku descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content-hash. `llmoji cache clear` wipes it.
@@ -58,8 +58,7 @@ llmoji upload --target email               # opens mailto: with attach hint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is two packages: `anthropic` and `huggingface_hub`. Hooks run in `bash` and need `jq`, both of which ship on macOS and most Linux distros.
-
+This requires Python 3.11+. The runtime dependency footprint is two packages: `anthropic` and `huggingface_hub`. Hooks run in `bash` and need `jq`.
 From source:
 
 ```bash
@@ -74,7 +73,7 @@ pip install -e ".[dev]"      # adds pytest + ruff
 
 ### Journal capture
 
-Each provider has a `Stop` hook that fires once per assistant turn. The hook extracts the assistant's reply, strips the kaomoji from the body, and appends one JSONL row to `~/.<harness>/kaomoji-journal.jsonl`. The schema is the same across every provider:
+Each provider has a `Stop` hook that fires once per assistant turn. The hook extracts the reply, strips the kaomoji from the body, and appends one JSONL row to `~/.<harness>/kaomoji-journal.jsonl`. The schema is the same across every provider:
 
 ```json
 {"ts": "...", "model": "...", "cwd": "...", "kaomoji": "(◕‿◕)", "user_text": "...", "assistant_text": "..."}
@@ -82,21 +81,18 @@ Each provider has a `Stop` hook that fires once per assistant turn. The hook ext
 
 ### Haiku pipeline
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`, then runs a two-stage pipeline:
-
-- **Stage A (per instance)**: for each (kaomoji, user, assistant) row saved, mask the kaomoji to `[FACE]` and call Haiku with `DESCRIBE_PROMPT_WITH_USER` or `DESCRIBE_PROMPT_NO_USER`.
-- **Stage B (per canonical face)**: pool Stage A descriptions for each kaomoji, and synthesize an overall meaning via `SYNTHESIZE_PROMPT`. This synthesized line is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each (kaomoji, user, assistant) row saved, it uses Haiku to describe that specific instance. Then, it aggregates each unique kaomoji's descriptions and uses Haiku again to summarize an overall meaning. This summarized output is the only thing that ships in the bundle.
 
 ### Bundle structure
 
 `analyze` writes to `~/.llmoji/bundle/`:
 
 - **`manifest.json`**: package version, journal counts per provider, kaomoji counts, the Haiku model id used, anything you include as `--notes`, and the salted submitter id.
-- **`descriptions.jsonl`**: one row per kaomoji, with the synthesized meaning.
+- **`descriptions.jsonl`**: one row per kaomoji, with the summarized meaning.
 
 ---
 
-## What does and doesn't leave your machine
+## What is and isn't uploaded
 
 | Tier                                  | Where                                | Shipped on `upload`? |
 |---------------------------------------|--------------------------------------|----------------------|
@@ -104,7 +100,7 @@ Each provider has a `Stop` hook that fires once per assistant turn. The hook ext
 | Per-instance Haiku paraphrase         | `~/.llmoji/cache/per_instance.jsonl` | Never                |
 | Overall Haiku summaries and counts    | `~/.llmoji/bundle/`                  | Yes                  |
 
-Please see [SECURITY.md](SECURITY.md) for the full privacy threat model.
+Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ---
 
