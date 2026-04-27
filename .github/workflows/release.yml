@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read version from llmoji/__init__.py
+        # Source of truth for the version is ``__version__`` in
+        # llmoji/__init__.py; pyproject.toml resolves it via hatch's
+        # regex source. Parse the literal directly here rather than
+        # ``pip install -e .`` just to read it.
+        id: ver
+        run: |
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import pathlib, re
+          text = pathlib.Path("llmoji/__init__.py").read_text()
+          match = re.search(r'^__version__ = "([^"]+)"', text, re.M)
+          if match is None:
+              raise SystemExit("llmoji/__init__.py has no __version__")
+          print(f"version={match.group(1)}")
+          EOF
+
+      - name: Check if tag already exists
+        id: check
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v6
+        if: steps.check.outputs.exists == 'false'
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          pip install build
+          python -m build
+
+      - name: Create tag
+        if: steps.check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: gh release create "v$VERSION" --generate-notes dist/*

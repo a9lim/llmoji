@@ -32,6 +32,7 @@ import tarfile
 import time
 import urllib.parse
 from pathlib import Path
+from typing import Any
 
 from . import paths
 
@@ -117,7 +118,7 @@ def _submission_token() -> str:
     used as the salt in :func:`_submitter_id`.
     """
     state_path = paths.state_path()
-    state: dict = {}
+    state: dict[str, Any] = {}
     if state_path.exists():
         try:
             state = json.loads(state_path.read_text())
@@ -174,7 +175,7 @@ def upload_hf(
     *,
     repo: str = DEFAULT_HF_REPO,
     confirm: bool = True,
-) -> dict:
+) -> dict[str, Any]:
     """Upload the bundle as a tarball under
     ``<contributor>/bundle-<ts>.tar.gz`` in the chosen HF dataset
     repo. Returns the submission metadata dict."""
@@ -217,7 +218,7 @@ def upload_email(
     *,
     to: str = DEFAULT_EMAIL_TO,
     confirm: bool = True,
-) -> dict:
+) -> dict[str, Any]:
     """Build a mailto URI and open it in the system mail client; the
     user attaches the tarball manually. We don't ship SMTP."""
     tarball = tar_bundle(bundle_dir)

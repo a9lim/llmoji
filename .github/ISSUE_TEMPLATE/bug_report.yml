@@ -1,0 +1,82 @@
+name: Bug report
+description: Something broke, crashed, or behaved wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did you get?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Which command
+      options:
+        - install
+        - uninstall
+        - status
+        - parse
+        - analyze
+        - upload
+        - cache
+        - other (please describe in "what happened")
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider (if relevant)
+      options:
+        - claude_code
+        - codex
+        - hermes
+        - generic JSONL contract (custom harness)
+        - not provider-specific
+
+  - type: input
+    id: llmoji-version
+    attributes:
+      label: llmoji version
+      description: Output of `pip show llmoji | grep Version`
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The shortest command sequence or code that reproduces the issue. Please redact any private content from journal rows before pasting.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Full traceback or log output
+      render: shell

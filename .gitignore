@@ -1,18 +1,35 @@
-# build / editable install artifacts
+# Python
+__pycache__/
+*.py[cod]
 *.egg-info/
+*.egg
 dist/
 build/
-__pycache__/
-*.pyc
+*.whl
 
-# local envs
+# Virtual environments
 .venv/
-.env
+venv/
+env/
 
-# editor cruft
+# pytest / ruff
+.pytest_cache/
+.ruff_cache/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
-# pytest
-.pytest_cache/
+# Local secrets
+.env
+
+# Claude Code
+.claude/
+.remember/
+.superpowers/

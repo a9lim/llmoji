@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  typecheck:
+    # Pyright runs against the v1.0 frozen public API surface only
+    # (the ``include`` list in pyproject.toml's [tool.pyright] section).
+    # Internal helpers in cli / analyze / backfill / providers/codex
+    # etc. lean on argparse + bash-shaped IO + third-party SDK types
+    # whose stubs are uneven; running the checker over them is noise.
+    # The contract users import from ``llmoji`` is the real surface,
+    # so it's what we hold to a type checker.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pyright
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  build:
+    # Validates the dynamic-version setup in pyproject.toml: confirms
+    # ``python -m build`` resolves ``llmoji.__version__`` via hatch's
+    # regex source without executing the module (which would import
+    # the eager re-exports and require anthropic / huggingface_hub at
+    # build time).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+      - name: Verify wheel imports and version round-trips
+        run: |
+          pip install dist/llmoji-*.whl
+          python -c "import llmoji; print('version:', llmoji.__version__)"
+          python -c "from importlib.resources import files; \
+            names = sorted(p.name for p in files('llmoji._hooks').iterdir() if p.suffix == '.tmpl'); \
+            assert names, 'no hook templates in wheel'; \
+            print('hooks shipped:', names)"

@@ -1,26 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "llmoji"
-version = "1.0.0"
-description = "Provider-agnostic kaomoji journal collection + canonical Haiku synthesis + privacy-preserving aggregate submission for cross-corpus emotional-state research."
+dynamic = ["version"]
+description = "Provider-agnostic kaomoji journal collection, canonical Haiku synthesis, and privacy-preserving aggregate submission for cross-corpus emotional-state research on coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "a9lim", email = "mx@a9l.im" }]
-keywords = ["kaomoji", "claude", "codex", "hermes", "emoticons", "ai", "llm"]
+keywords = [
+    "kaomoji",
+    "claude",
+    "claude-code",
+    "codex",
+    "hermes",
+    "emoticons",
+    "agents",
+    "interpretability",
+    "mechanistic-interpretability",
+    "llm",
+    "ai",
+    "research-tooling",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 
-# Lean by design: the package is provider-agnostic data collection
-# + canonical Haiku synthesis + bundle/upload. Heavy ML deps
-# (torch / saklas / sentence-transformers / matplotlib) live in
-# the research-side `llmoji-study` repo.
+# Lean by design. The package is provider-agnostic data collection
+# plus canonical Haiku synthesis plus bundle/upload. Heavier ML deps
+# (torch, sentence-transformers, matplotlib, saklas) live in the
+# research-side `llmoji-study` repo.
 dependencies = [
     "anthropic>=0.40",
     "huggingface_hub>=0.25",
@@ -29,23 +52,76 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "ruff>=0.6.9",
+    "pyright>=1.1.400",
 ]
 
 [project.urls]
 Homepage = "https://github.com/a9lim/llmoji"
 Repository = "https://github.com/a9lim/llmoji"
 Issues = "https://github.com/a9lim/llmoji/issues"
+Releases = "https://github.com/a9lim/llmoji/releases"
 Research = "https://github.com/a9lim/llmoji-study"
+Dataset = "https://huggingface.co/datasets/a9lim/llmoji"
 
 [project.scripts]
 llmoji = "llmoji.cli:main"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# Single source of truth for the version is ``__version__`` in
+# llmoji/__init__.py. Hatch's default regex source parses the literal
+# from the file without executing it, so the eager re-exports at
+# import time don't fire at build time.
+[tool.hatch.version]
+path = "llmoji/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llmoji"]
+# The bash hook templates under llmoji/_hooks/ ship as part of the
+# package directory automatically; no force-include needed (and a
+# force-include would duplicate them in the wheel zip).
 
-[tool.hatch.build.targets.wheel.force-include]
-"llmoji/_hooks" = "llmoji/_hooks"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E741", "E402", "E731"]
+
+# Pyright is scoped to the v1.0 frozen public API surface. Internal
+# helpers (cli argparse plumbing, analyze pipeline glue, provider
+# config writers, the backfill module's transcript walkers) lean on
+# argparse + third-party SDK shapes whose stubs are uneven; running
+# the checker over them is all noise. The contract users import from
+# ``llmoji`` is the real surface, so it's what we hold to a type
+# checker.
+[tool.pyright]
+include = [
+    "llmoji/__init__.py",
+    "llmoji/taxonomy.py",
+    "llmoji/haiku_prompts.py",
+    "llmoji/haiku.py",
+    "llmoji/scrape.py",
+    "llmoji/providers/__init__.py",
+    "llmoji/providers/base.py",
+    "llmoji/upload.py",
+]
+exclude = ["**/__pycache__"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+reportMissingImports = "warning"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "error"
+reportAttributeAccessIssue = "error"
+reportArgumentType = "error"
+reportCallIssue = "error"
+reportReturnType = "error"
+reportAssignmentType = "error"

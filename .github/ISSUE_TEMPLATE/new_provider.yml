@@ -1,0 +1,57 @@
+name: New provider support
+description: Request first-class support for a new coding-agent harness
+labels: [enhancement, provider]
+body:
+  - type: input
+    id: harness-name
+    attributes:
+      label: Harness name
+      placeholder: e.g. openclaw, aider
+    validations:
+      required: true
+
+  - type: input
+    id: docs-link
+    attributes:
+      label: Hook contract docs link
+      description: Where the harness documents its stop-event hook (or post-LLM-call hook) contract
+    validations:
+      required: true
+
+  - type: textarea
+    id: payload-shape
+    attributes:
+      label: Stop payload shape
+      description: Where in the payload does the assistant's reply live? Is the kaomoji on the first text block, the last, or a single text field?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: settings-format
+    attributes:
+      label: Settings file format
+      options:
+        - JSON
+        - TOML
+        - YAML
+        - other (please describe)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sidechain
+    attributes:
+      label: Sidechain or subagent strategy
+      options:
+        - none (no subagent concept)
+        - field flag on the payload
+        - session-id correlation against a separate event
+        - unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: System-injection prefixes, multimodal text extraction, FP8 quirks, anything that makes this harness nonstandard

@@ -35,7 +35,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from . import paths
 from .haiku import (
@@ -129,7 +129,7 @@ def _resolve_concurrency(explicit: int | None) -> int:
 
 
 def _stage_a(
-    client,
+    client: Any,
     buckets: dict[str, list[ScrapeRow]],
     *,
     cache_path: Path,
@@ -206,7 +206,7 @@ def _stage_a(
 
 
 def _stage_b(
-    client,
+    client: Any,
     descs_by_canon: dict[str, list[str]],
     *,
     print_progress: bool = True,
