@@ -3,7 +3,7 @@
 [![CI](https://github.com/a9lim/llmoji/actions/workflows/ci.yml/badge.svg)](https://github.com/a9lim/llmoji/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/llmoji)](https://pypi.org/project/llmoji/)
 [![Downloads](https://img.shields.io/pypi/dm/llmoji)](https://pypi.org/project/llmoji/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/llmoji/)
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
@@ -167,6 +167,6 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup. For security and pr
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE). The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is AGPL-3.0-or-later. The shared corpus on [HuggingFace](https://huggingface.co/datasets/a9lim/llmoji) is CC-BY-SA-4.0; running `llmoji upload --target hf` contributes a bundle under those terms.
 
 If you use llmoji or the central corpus in published research, please cite this repository.

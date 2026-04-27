@@ -451,6 +451,32 @@ managed providers' journals. Document the contract in the README
 with a worked OpenClaw example when one materializes; OpenClaw
 first-class is post-v1.0.
 
+### HF dataset card is a separate hand-maintained surface
+
+The user-facing dataset card at
+https://huggingface.co/datasets/a9lim/llmoji is a separate document
+from anything in this repo. It re-states the bundle schema and the
+privacy model in user-facing prose so contributors reading the
+dataset page can decide whether to submit before they've ever
+touched the package README.
+
+Two coupling points to keep in mind:
+
+- **Schema changes need both updates.** Any change to
+  `bundle/manifest.json` or `bundle/descriptions.jsonl` field names
+  is a v1.0 frozen-surface break (see §"v1.0 frozen public
+  surface"), so it bumps the package major version AND wants a
+  hand-edit on the HF dataset card so the field-by-field schema
+  documentation doesn't go stale. The card is editable in-place via
+  the HF web UI; the canonical surface lives there, not in this
+  repo.
+- **License split.** The package code is GPL-3.0-or-later; the
+  shared corpus on HF is CC-BY-SA-4.0. `llmoji upload --target hf`
+  contributes a bundle under CC-BY-SA-4.0, and the package README's
+  License section calls this out so contributors aren't surprised.
+  `llmoji-study` is AGPL-3.0-or-later (the network-use clause
+  matters if anyone ever runs the research pipeline as a service).
+
 ## Conventions
 
 - Single venv at `.venv/`, pip not uv. `pip install -e ../llmoji`
