@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Literal
+from typing import Any, Literal
 
 from ..taxonomy import KAOMOJI_START_CHARS
 
@@ -207,7 +207,7 @@ class Provider:
         self,
         *,
         event: str,
-        matcher_predicate: dict | None = None,
+        matcher_predicate: dict[str, Any] | None = None,
     ) -> None:
         """Append the hook to a JSON settings file under ``hooks[<event>]``.
 
@@ -246,7 +246,7 @@ class Provider:
             for h in entry.get("hooks", []) or []:
                 if isinstance(h, dict) and h.get("command") == cmd:
                     return  # already registered
-        new_entry: dict = {"hooks": [{"type": "command", "command": cmd}]}
+        new_entry: dict[str, Any] = {"hooks": [{"type": "command", "command": cmd}]}
         if matcher_predicate is not None:
             new_entry["matcher"] = matcher_predicate
         bucket.append(new_entry)
@@ -333,7 +333,7 @@ class SettingsCorruptError(RuntimeError):
         self.why = why
 
 
-def _load_json_strict(path: Path) -> dict:
+def _load_json_strict(path: Path) -> dict[str, Any]:
     """Load a JSON settings file, returning ``{}`` for missing /
     empty files but raising :class:`SettingsCorruptError` for
     unparseable / non-object content."""
@@ -370,7 +370,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     tmp.replace(path)
 
 
-def _write_json(path: Path, data: dict) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> None:
     _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 

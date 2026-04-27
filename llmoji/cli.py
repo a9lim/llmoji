@@ -25,10 +25,12 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Iterator
 
 from . import paths
 from .haiku import cache_size
 from .providers import PROVIDERS, get_provider
+from .scrape import ScrapeRow
 from .sources.claude_export import iter_claude_export
 from .sources.journal import iter_journal
 
@@ -95,7 +97,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         for f in files:
             print(f"  - {f.name}  ({_human_bytes(f.stat().st_size)})")
     else:
-        print(f"no bundle (run `llmoji analyze`).")
+        print("no bundle (run `llmoji analyze`).")
 
     # Generic-JSONL contract zone
     journals = paths.journals_dir()
@@ -150,7 +152,7 @@ def _cmd_parse(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _gather_rows():
+def _gather_rows() -> Iterator[ScrapeRow]:
     """Iterate every installed provider's journal + any extra
     JSONLs under ``~/.llmoji/journals/``."""
     for name in PROVIDERS:

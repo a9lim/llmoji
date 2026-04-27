@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a new capability or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that llmoji doesn't support today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How do you imagine this working? A CLI sketch or API sketch is welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: surface-impact
+    attributes:
+      label: v1.0 frozen surface impact
+      description: Please tick if this proposal would change anything in the v1.0 frozen public surface (taxonomy rules, Haiku prompts, journal schema, bundle schema, Provider interface). Such changes gate a major version bump.
+      options:
+        - label: This proposal would change the v1.0 frozen public surface

@@ -154,11 +154,45 @@ committing. `--yes` skips the prompt for scripted use.
 
 ```
 llmoji/
-  pyproject.toml
-  README.md
-  LICENSE
+  pyproject.toml          # PEP 621 + hatch dynamic version (reads
+                          # __version__ from llmoji/__init__.py via
+                          # [tool.hatch.version] regex source)
+  README.md               # public-facing, voice-rewritten using the
+                          # writing skill; technical-professional
+                          # register, em-dashes out
+  CONTRIBUTING.md         # warm public-prose welcome + dev setup +
+                          # adding-a-provider checklist
+  SECURITY.md             # privacy threat model (the bundle is the
+                          # consent boundary; cache never ships;
+                          # singleton-kaomoji caveat called out)
+  LICENSE                 # MIT (PEP 639 SPDX in pyproject)
   CLAUDE.md
+  .gitignore
+  .github/
+    dependabot.yml        # weekly pip + github-actions; anthropic /
+                          # huggingface_hub bumped manually
+    PULL_REQUEST_TEMPLATE.md
+    ISSUE_TEMPLATE/
+      config.yml          # blank issues off; security + take-down
+                          # contact links
+      bug_report.yml
+      feature_request.yml
+      new_provider.yml
+    workflows/
+      ci.yml              # ruff + pytest matrix (3.11–3.13 ×
+                          # ubuntu+macos) + build-and-import-wheel
+                          # gate that confirms hatch's regex source
+                          # round-trips without executing __init__
+      release.yml         # version-from-attr → tag → PyPI publish →
+                          # GitHub release; same pattern as saklas
+  examples/
+    README.md             # warm-public-prose intro
+    inspect_bundle.py     # audit-the-bundle script (the consent step)
+    openclaw_hook.ts      # worked generic-JSONL-append example for
+                          # the post-v1.0 OpenClaw first-class story
   llmoji/
+    py.typed              # PEP 561 type marker (Typing :: Typed
+                          # classifier in pyproject)
     __init__.py            # public surface re-exports
     taxonomy.py            # KAOMOJI_START_CHARS + is_kaomoji_candidate
                            # + extract + KaomojiMatch (span-only)

@@ -27,6 +27,12 @@ Bumping any of those is a major version bump (``llmoji`` 2.0.0).
 
 from __future__ import annotations
 
+# Single source of truth for the package version. ``pyproject.toml``
+# resolves it dynamically via ``[tool.hatch.version] path =
+# "llmoji/__init__.py"`` (hatch parses the literal without executing
+# the module, so the eager re-exports below don't fire at build time).
+__version__ = "1.0.0"
+
 from .haiku_prompts import (
     DESCRIBE_PROMPT_NO_USER,
     DESCRIBE_PROMPT_WITH_USER,
@@ -41,12 +47,6 @@ from .taxonomy import (
     extract,
     is_kaomoji_candidate,
 )
-
-try:
-    from importlib.metadata import version as _v
-    __version__ = _v("llmoji")
-except Exception:
-    __version__ = "0.0.0+dev"
 
 __all__ = [
     "KAOMOJI_START_CHARS",
