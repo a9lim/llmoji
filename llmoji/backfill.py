@@ -31,6 +31,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
+from .providers import ClaudeCodeProvider, CodexProvider
 from .taxonomy import is_kaomoji_candidate
 
 _KAOMOJI_LETTER_RE = re.compile(r"[A-Za-z]")
@@ -103,13 +104,18 @@ def _collect_assistant_text(message: dict[str, Any]) -> str:
     return ""
 
 
-# Per-provider system-injection prefix list. Skill activations (Claude
-# slash-commands) inject the skill body as a user-role message; those
-# aren't real user input and would otherwise contaminate
-# user_text → kaomoji-axis correlations. Kept in sync with the inline
-# filter in the rendered ``llmoji._hooks/claude_code.sh`` template.
-CLAUDE_CODE_INJECTED_PREFIXES = (
-    "Base directory for this skill:",
+# Per-provider system-injection prefix list. Skill activations
+# (Claude slash-commands) inject the skill body as a user-role
+# message; those aren't real user input and would otherwise
+# contaminate user_text → kaomoji-axis correlations.
+#
+# Single source of truth is the Provider class attribute. The bash
+# live hook gets the same list rendered into its jq filter via
+# ``${INJECTED_PREFIXES_FILTER}`` at install time, so Python-side
+# replay (here) and shell-side live capture cannot drift — both
+# read from the Provider class.
+_CLAUDE_CODE_INJECTED_PREFIXES: tuple[str, ...] = tuple(
+    ClaudeCodeProvider.system_injected_prefixes
 )
 
 
@@ -144,7 +150,7 @@ def _resolve_user_text_claude(
                         if txt.strip():
                             text = txt
                             break
-            if text and not text.startswith(CLAUDE_CODE_INJECTED_PREFIXES):
+            if text and not text.startswith(_CLAUDE_CODE_INJECTED_PREFIXES):
                 return text
         uuid = ev.get("parentUuid")
     return ""
@@ -216,12 +222,14 @@ def backfill_claude_code(transcript_root: Path, journal: Path) -> int:
 
 
 # Codex injects AGENTS.md, <environment_context>, and bare
-# <INSTRUCTIONS> blocks as user-role response_items at session start.
-# Drop them defensively (the live hook does the same).
-CODEX_INJECTED_PREFIXES = (
-    "# AGENTS.md",
-    "<environment_context>",
-    "<INSTRUCTIONS>",
+# <INSTRUCTIONS> blocks as user-role response_items at session
+# start. Drop them defensively.
+#
+# Same single-source-of-truth pattern as the Claude side above —
+# the Provider class attribute is canonical and the bash live hook
+# gets it rendered into the jq filter at install time.
+_CODEX_INJECTED_PREFIXES: tuple[str, ...] = tuple(
+    CodexProvider.system_injected_prefixes
 )
 
 
@@ -273,7 +281,7 @@ def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
                         if isinstance(b, dict) and b.get("type") == "input_text"
                     ]
                     txt = "\n".join(s for s in parts if s)
-                    if txt and not txt.startswith(CODEX_INJECTED_PREFIXES):
+                    if txt and not txt.startswith(_CODEX_INJECTED_PREFIXES):
                         latest_user = txt
         elif t == "event_msg":
             p = ev.get("payload") or {}
