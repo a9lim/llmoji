@@ -1,6 +1,6 @@
 # Contributing to llmoji
 
-Thank you very much for wanting to contribute! I really appreciate any contribution you would like to make, whether it's a PR, a bug report, or live-traffic validation of the hermes provider. New first-class providers (OpenClaw, Aider, anything else with a documented stop-event hook contract) are especially welcome.
+Thank you very much for wanting to contribute! I really appreciate any contribution you would like to make, whether it's a PR, a bug report, or hook validation. New first-class providers are especially welcome.
 
 ## Dev setup
 
@@ -10,7 +10,7 @@ cd llmoji
 pip install -e ".[dev]"
 ```
 
-The dev extras pull in `pytest` and `ruff`. The runtime deps (`anthropic`, `huggingface_hub`) install with the package itself. There is no GPU dependency and no network requirement for tests.
+The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or network requirement for tests.
 
 ## Running tests
 
@@ -33,28 +33,28 @@ ruff check . --fix      # auto-fix what's fixable
 
 ## Adding a new provider
 
-A first-class provider is one bash hook template under `llmoji/_hooks/` plus one `Provider` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:Provider` documents what the subclass owes. The three things that drive it:
+A first-class provider is one bash hook template under `llmoji/_hooks/` plus one `Provider` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:Provider` documents what the subclass needs. The three things that matter are:
 
 1. Where the harness keeps its hooks dir and settings file.
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON, TOML, and YAML), please add a new format alongside. The settings writer must go through `_atomic_write_text` so a power loss mid-write can't half-write the user's config.
+If the harness's settings format isn't already in `base.py` (we have JSON, TOML, and YAML), please add a new format alongside. The settings writer must go through `_atomic_write_text`.
 
 Please include in the PR:
 
-- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), validated by `bash -n`.
+- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`).
 - The `Provider` subclass and its `system_injected_prefixes` list (empty if the harness doesn't inject system-role-as-user-text payloads).
 - Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path.
 - A short note on the harness's docs version and where the kaomoji lands in the stop payload.
 
-The journal schema does not change for a new provider. Every provider writes the same six-field row.
+The journal schema does not change for a new provider.
 
 ## Adding a static-dump source
 
-Static-dump readers live under `llmoji/sources/`. They convert a vendor-specific export format (Claude.ai conversations, Codex rollouts, etc.) into the canonical six-field row stream. The reader is plain Python; it does not interact with the harness's settings or hook layer.
+Static-dump readers live under `llmoji/sources/`. They convert a specific provider's export format into the canonical six-field schema. The reader is plain Python and does not interact with the harnesses.
 
-Please strip the leading kaomoji from `assistant_text` on parse, the same way the bash hooks do (the prefix lives in the row's `kaomoji` field). This is a v1.0 invariant, and `llmoji.haiku.mask_kaomoji` depends on it.
+Please strip the leading kaomoji from `assistant_text` on parse, the same way the bash hooks do (the prefix lives in the row's `kaomoji` field).
 
 ## PRs
 
