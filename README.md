@@ -163,7 +163,7 @@ The public-surface test exercises taxonomy invariants, haiku-prompt content chec
 
 ## Prior art
 
-Llmoji replicates and scales [eriskii's Claude-faces catalog](https://eriskii.net/projects/claude-faces), the original pass at cataloging the kaomoji Claude uses across conversations with per-face descriptions and axis projection. Pre-registered taxonomy candidates in `llmoji.taxonomy` were seeded from that catalog, and the per-canonical-face Stage A sample cap of 4 in `analyze` is inherited unchanged for cross-corpus comparability. The shared HuggingFace dataset is what that pipeline looks like run across many users' coding agents and many model releases.
+Llmoji replicates and scales [eriskii's Claude-faces catalog](https://eriskii.net/projects/claude-faces), the original post that came up with the idea of prompting and tracking Claude's kaomoji use. The shared HuggingFace dataset extends that pipeline across many users, many harnesses, and many model releases.
 
 ---
 
