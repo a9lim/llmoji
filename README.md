@@ -93,9 +93,9 @@ Llmoji first registers a `UserPromptSubmit` hook that injects a reminder on ever
 
 ### Synthesis pipeline
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. Rows bucket by `(source_model, canonical_kaomoji)`, where `source_model` is the model that wrote the kaomoji-bearing turn (Sonnet, Haiku, GPT-5.4, a local model, etc.). For each row in a bucket, the chosen synthesizer describes that specific instance. Then, it pools the per-instance descriptions for one cell and produces a single one or two sentence overall meaning for that kaomoji as that source model used it. The synthesized output is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each entry a model wrote, the chosen synthesizer describes that specific instance. Then, it aggregates the descriptions for each unique kaomoji per model and writes an overall meaning. This summarized output is the only thing that ships in the bundle.
 
-The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates every cell in a single `analyze` run, so the descriptions across source models are directly comparable.
+The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates everything in a single `analyze` run, so the descriptions across source models are directly comparable.
 
 | Backend     | API                                          | Default model                  |
 |-------------|----------------------------------------------|--------------------------------|
@@ -119,7 +119,7 @@ The synthesizer is one of three backends, chosen via `--backend`. The same synth
 ```
 
 - **`manifest.json`**: package version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
-- **`<source-model>/descriptions.jsonl`**: one row per canonical kaomoji as that source model used it, with the synthesized meaning. Subfolder names are sanitized (lowercase, slashes become double-underscores, colons become hyphens).
+- **`<source-model>/descriptions.jsonl`**: one row per kaomoji as that model used it, with the synthesized meaning. 
 
 ---
 
