@@ -161,17 +161,24 @@ def test_scrape_row_schema():
     from dataclasses import fields
     from llmoji.scrape import ScrapeRow
 
+    # The lean 1.1.x ScrapeRow — only fields the v1 pipeline reads.
+    # NOTE: ``ScrapeRow`` is in-memory only; the cross-corpus
+    # invariant is the on-disk 6-field journal row, not this
+    # dataclass. Adding fields is forward-compat; removing or
+    # renaming is fine because no external consumer reads the
+    # dataclass directly. Pre-1.1.x carried richer metadata
+    # (``session_id``, ``parent_uuid``, ``project_slug``,
+    # ``assistant_uuid``, ``git_branch``, ``turn_index``,
+    # ``had_thinking``); they're dropped because nothing in v1
+    # reads them and ``llmoji-study`` reads bundles + journals.
     expected = {
-        "source", "session_id", "project_slug", "assistant_uuid",
-        "parent_uuid", "model", "timestamp", "cwd", "git_branch",
-        "turn_index", "had_thinking", "assistant_text", "first_word",
-        "surrounding_user",
+        "source", "model", "timestamp", "cwd",
+        "assistant_text", "first_word", "surrounding_user",
     }
     got = {f.name for f in fields(ScrapeRow)}
-    # The frozen v1.0 surface — additions are OK (forward compat),
-    # removals or renames are major version events.
-    missing = expected - got
-    assert not missing, f"ScrapeRow missing fields: {missing}"
+    assert got == expected, (
+        f"ScrapeRow shape drifted; expected {expected}, got {got}"
+    )
 
 
 def test_provider_interface():

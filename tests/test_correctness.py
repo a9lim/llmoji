@@ -112,24 +112,14 @@ class _CountingFakeSynth(Synthesizer):
 
 
 def _make_row(model: str, kaomoji: str, user: str, assistant: str):
-    """Build a ScrapeRow with all required fields — fills in the
-    optional/legacy fields with sensible defaults so the test stays
-    decoupled from Wave 5's schema-tightening (which drops several
-    of these)."""
+    """Build a ScrapeRow with the post-Wave-5 lean schema."""
     from llmoji.scrape import ScrapeRow
 
     return ScrapeRow(
         source="test",
-        session_id="",
-        project_slug="",
-        assistant_uuid="",
-        parent_uuid=None,
         model=model,
         timestamp="2026-04-28T00:00:00Z",
         cwd="/tmp",
-        git_branch=None,
-        turn_index=0,
-        had_thinking=False,
         first_word=kaomoji,
         assistant_text=assistant,
         surrounding_user=user,

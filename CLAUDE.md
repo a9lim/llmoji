@@ -130,9 +130,15 @@ and update the HF dataset card to match.
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
   `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot).
-- **`llmoji.scrape.ScrapeRow`** schema (in-memory row shape).
 - **6-field unified journal row schema** (on-disk JSONL):
-  `{ts, model, cwd, kaomoji, user_text, assistant_text}`.
+  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. This is
+  the cross-corpus invariant; `llmoji.scrape.ScrapeRow` is in-memory
+  only (lean 7-field shape: `source, model, timestamp, cwd,
+  assistant_text, first_word, surrounding_user`) and free to
+  evolve. Pre-1.1.x carried richer ScrapeRow metadata (`session_id`,
+  `parent_uuid`, `project_slug`, etc.) for would-be research-side
+  consumers; nothing in v1 reads them and `llmoji-study` reads
+  bundles + journals, so they're dropped in 1.1.x.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
 - **`llmoji.providers.Provider`** interface.
