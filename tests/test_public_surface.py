@@ -183,13 +183,13 @@ def test_scrape_row_schema():
 
 def test_provider_interface():
     from llmoji.providers import PROVIDERS, get_provider
-    from llmoji.providers.base import Provider
+    from llmoji.providers.base import HookInstaller
 
     # All three first-class providers register.
     assert set(PROVIDERS) == {"claude_code", "codex", "hermes"}
     for name in PROVIDERS:
         p = get_provider(name)
-        assert isinstance(p, Provider)
+        assert isinstance(p, HookInstaller)
         # All five required attributes are non-empty.
         assert p.name == name
         assert p.hooks_dir
@@ -460,8 +460,8 @@ def test_write_bundle_rejects_slug_collision():
 
 
 def test_corrupt_settings_refused():
-    """Provider install must refuse to mutate a corrupt-but-existing
-    settings file. Silently wiping a user's config is a regression
+    """HookInstaller.install must refuse to mutate a corrupt-but-
+    existing settings file. Silently wiping a user's config is a regression
     we never want to ship."""
     from pathlib import Path
     import tempfile

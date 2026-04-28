@@ -17,7 +17,7 @@ The end-user CLI is :mod:`llmoji.cli`. The locked public surface
     DEFAULT_OPENAI_MODEL_ID.
   - :mod:`llmoji.scrape` — :class:`~llmoji.scrape.ScrapeRow` schema
     (span-only; no `kaomoji` / `kaomoji_label`).
-  - :mod:`llmoji.providers` — :class:`~llmoji.providers.Provider`
+  - :mod:`llmoji.providers` — :class:`~llmoji.providers.HookInstaller`
     interface and the three first-class providers.
   - The bundle schema written by :func:`llmoji.analyze.run_analyze`
     (top-level ``manifest.json`` + per-source-model

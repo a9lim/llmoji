@@ -29,10 +29,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import JsonSettingsProvider
+from .base import JsonSettingsHookInstaller
 
 
-class ClaudeCodeProvider(JsonSettingsProvider):
+class ClaudeCodeProvider(JsonSettingsHookInstaller):
     name = "claude_code"
     hooks_dir = Path.home() / ".claude" / "hooks"
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -51,6 +51,6 @@ class ClaudeCodeProvider(JsonSettingsProvider):
     ]
 
     # Nudge attrs (template / filename / event / message) inherited
-    # from JsonSettingsProvider — same wording + envelope shared with
+    # from JsonSettingsHookInstaller — same wording + envelope shared with
     # Codex (the UserPromptSubmit envelope is byte-identical between
     # the two harnesses).

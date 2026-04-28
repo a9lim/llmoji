@@ -43,10 +43,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import JsonSettingsProvider
+from .base import JsonSettingsHookInstaller
 
 
-class CodexProvider(JsonSettingsProvider):
+class CodexProvider(JsonSettingsHookInstaller):
     name = "codex"
     hooks_dir = Path.home() / ".codex" / "hooks"
     settings_path = Path.home() / ".codex" / "hooks.json"
@@ -64,6 +64,6 @@ class CodexProvider(JsonSettingsProvider):
     ]
 
     # Nudge attrs (template / filename / event / message) inherited
-    # from JsonSettingsProvider — same wording + envelope shared with
+    # from JsonSettingsHookInstaller — same wording + envelope shared with
     # Claude Code; verified byte-identical UserPromptSubmit envelope
     # on the Codex side at codex-rs/hooks/src/events/user_prompt_submit.rs.

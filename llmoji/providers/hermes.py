@@ -79,10 +79,10 @@ import re
 from pathlib import Path
 
 from .._util import atomic_write_text
-from .base import Provider, SettingsCorruptError
+from .base import HookInstaller, SettingsCorruptError
 
 
-class HermesProvider(Provider):
+class HermesProvider(HookInstaller):
     name = "hermes"
     hooks_dir = Path.home() / ".hermes" / "agent-hooks"
     settings_path = Path.home() / ".hermes" / "config.yaml"
@@ -179,7 +179,7 @@ class HermesProvider(Provider):
     def _check_registrations(self) -> tuple[bool, bool]:
         # Single-read override: hermes wires both hooks inside one
         # marker-fenced stanza, so one file read tells us about both.
-        # Default Provider._check_registrations would route through
+        # Default HookInstaller._check_registrations would route through
         # the JSON-settings batch (wrong for YAML); cleaner to
         # override directly.
         if not self.settings_path.exists():

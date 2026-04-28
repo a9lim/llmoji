@@ -1,5 +1,5 @@
 # Shared kaomoji validator. Substituted into every provider's main
-# hook by ``Provider.render_hook`` so the validation logic lives in
+# hook by ``HookInstaller.render_hook`` so the validation logic lives in
 # one place.
 #
 # Inputs:

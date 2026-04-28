@@ -37,15 +37,18 @@ The bundle on disk between `analyze` and `upload` is the deliberate
 inspection gap — the user `cat`s each `<source-model>.jsonl` before
 deciding to ship.
 
-### Provider abstraction
+### HookInstaller abstraction
 
-`llmoji.providers.Provider` is the base class, one subclass per
-first-class harness. JSON-settings providers (`ClaudeCodeProvider`,
-`CodexProvider`) inherit from `JsonSettingsProvider` (also in
-`base.py`), which supplies the default
-`_register` / `_unregister` / `_is_registered` /
-`_is_nudge_registered` against any `settings.json`-shaped file.
-YAML-settings providers (`HermesProvider`) override the four.
+`llmoji.providers.HookInstaller` is the base class, one subclass
+per first-class harness. JSON-settings providers
+(`ClaudeCodeProvider`, `CodexProvider`) inherit from
+`JsonSettingsHookInstaller` (also in `base.py`), which supplies the
+default `_register` / `_unregister` / `_check_registrations`
+against any `settings.json`-shaped file. YAML-settings providers
+(`HermesProvider`) override the three. Renamed from `Provider` in
+1.1.x — the abstraction is about installing hooks, not about being
+a generic "provider"; the `providers/` directory name stays because
+concrete subclasses correspond to user-facing harness providers.
 
 Each provider declares: `hooks_dir`, `settings_path`, `journal_path`,
 `main_event`, `skip_action` (`continue` for claude_code/codex —
@@ -66,7 +69,7 @@ two **shared partials** every main hook inlines:
   tail. Substituted with `${JOURNAL_PATH}`, inserted as
   `${JOURNAL_WRITE}`.
 
-`Provider.render_hook()` runs `string.Template.safe_substitute`
+`HookInstaller.render_hook()` runs `string.Template.safe_substitute`
 twice — once on each partial with its own placeholders, once on
 the main template with `JOURNAL_PATH`, `KAOMOJI_VALIDATE`,
 `JOURNAL_WRITE`, `INJECTED_PREFIXES_FILTER`, `LLMOJI_VERSION`. Two
@@ -141,7 +144,7 @@ and update the HF dataset card to match.
   bundles + journals, so they're dropped in 1.1.x.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
-- **`llmoji.providers.Provider`** interface.
+- **`llmoji.providers.HookInstaller`** interface.
 - **Bundle schema**:
   - `manifest.json` keys: `llmoji_version`, `synthesis_model_id`,
     `synthesis_backend`, `submitter_id`, `generated_at`,
@@ -232,9 +235,13 @@ llmoji/
                                # up via parent)
     backfill.py                # one-shot transcript→journal replays
                                # for claude_code + codex + hermes;
-                               # parity-tested against live hooks
+                               # parity-tested against live hooks.
+                               # Internal _replay_* generators yield
+                               # ScrapeRow; _flush_rows routes through
+                               # scrape_row_to_journal_line for the
+                               # canonical 6-field on-disk shape.
     providers/
-      base.py                  # Provider + JsonSettingsProvider +
+      base.py                  # HookInstaller + JsonSettingsHookInstaller +
                                # ProviderStatus + SettingsCorruptError
                                # + render helpers + JSON batch
                                # register/unregister/is_registered
@@ -265,7 +272,7 @@ llmoji/
                                # envelope at state.json). NOT an
                                # install registry — install state is
                                # read live from each harness's
-                               # settings file by Provider.status().
+                               # settings file by HookInstaller.status().
     analyze.py                 # Stage A + B + bundle write. Buckets
                                # by (source_model, canonical) where
                                # source_model = ScrapeRow.model or
@@ -407,7 +414,7 @@ Response shapes:
 - **Hermes**: bare `{"context": "<msg>"}` — no envelope, returned by
   `pre_llm_call`, "the only hook whose return value is used."
 
-The base `Provider` class exposes the nudge through
+The base `HookInstaller` class exposes the nudge through
 `nudge_hook_template` / `nudge_hook_filename` / `nudge_event` /
 `nudge_message` class attrs and a `has_nudge` predicate. Providers
 that opt in get the nudge written + registered automatically by
@@ -431,7 +438,7 @@ nudge to a future provider is four class-level attrs (and a
   carrying the child id, or (b) `post_llm_call` exposing
   `parent_session_id` / `is_subagent`.
 
-### Provider install refuses to clobber existing config
+### HookInstaller.install refuses to clobber existing config
 
 Three corruption paths are explicitly defended:
 

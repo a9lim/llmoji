@@ -38,30 +38,36 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
-from ._util import journal_line_dict
+from ._util import scrape_row_to_journal_line
 from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
+from .scrape import ScrapeRow
 from .sources._common import walk_parents_for_user_text
 from .taxonomy import is_kaomoji_candidate
 
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
-def _flush_rows(rows: list[dict[str, Any]], journal: Path) -> int:
-    """Sort rows by ``ts`` and write them as JSONL to ``journal``.
+def _flush_rows(rows: Iterable[ScrapeRow], journal: Path) -> int:
+    """Sort :class:`~llmoji.scrape.ScrapeRow` instances by timestamp
+    and persist them as canonical 6-field JSONL via
+    :func:`llmoji._util.scrape_row_to_journal_line`.
 
     Shared tail for every ``backfill_*`` function — three providers
     converge on the same write contract (chronological order, JSONL,
     truncate-on-write). Drift here is the failure mode this helper
     exists to prevent.
     """
-    rows.sort(key=lambda r: r["ts"])
+    materialized = sorted(rows, key=lambda r: r.timestamp)
     journal.parent.mkdir(parents=True, exist_ok=True)
     with journal.open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return len(rows)
+        for r in materialized:
+            f.write(
+                json.dumps(scrape_row_to_journal_line(r), ensure_ascii=False)
+                + "\n"
+            )
+    return len(materialized)
 
 
 def kaomoji_prefix(text: str) -> str:
@@ -136,11 +142,11 @@ def _collect_assistant_text(message: dict[str, Any]) -> str:
 # message; those aren't real user input and would otherwise
 # contaminate user_text → kaomoji-axis correlations.
 #
-# Single source of truth is the Provider class attribute. The bash
-# live hook gets the same list rendered into its jq filter via
-# ``${INJECTED_PREFIXES_FILTER}`` at install time, so Python-side
+# Single source of truth is the HookInstaller subclass attribute.
+# The bash live hook gets the same list rendered into its jq filter
+# via ``${INJECTED_PREFIXES_FILTER}`` at install time, so Python-side
 # replay (here) and shell-side live capture cannot drift — both
-# read from the Provider class.
+# read from the same ClaudeCodeProvider class attribute.
 _CLAUDE_CODE_INJECTED_PREFIXES: tuple[str, ...] = tuple(
     ClaudeCodeProvider.system_injected_prefixes
 )
@@ -193,7 +199,7 @@ def _resolve_user_text_claude(
     )
 
 
-def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
+def _replay_claude_transcript(path: Path) -> Iterator[ScrapeRow]:
     """Walk a Claude Code transcript JSONL and emit one journal row
     per kaomoji-led assistant text entry.
 
@@ -242,13 +248,14 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
         if not prefix:
             continue
         user_text = _resolve_user_text_claude(ev.get("parentUuid"), by_uuid)
-        yield journal_line_dict(
-            ts=str(ev.get("timestamp") or ""),
-            model=str(m.get("model") or ""),
-            cwd=str(ev.get("cwd") or ""),
-            kaomoji=prefix,
-            user_text=user_text,
+        yield ScrapeRow(
+            source="claude_code-backfill",
+            model=str(m.get("model") or "") or None,
+            timestamp=str(ev.get("timestamp") or ""),
+            cwd=str(ev.get("cwd") or "") or None,
+            first_word=prefix,
             assistant_text=strip_leading_kaomoji(text, prefix),
+            surrounding_user=user_text,
         )
 
 
@@ -257,7 +264,7 @@ def backfill_claude_code(transcript_root: Path, journal: Path) -> int:
     chronologically-sorted journal rows to ``journal``. Returns row
     count.
     """
-    rows: list[dict[str, Any]] = []
+    rows: list[ScrapeRow] = []
     paths = sorted(transcript_root.rglob("*.jsonl"))
     for path in paths:
         rows.extend(_replay_claude_transcript(path))
@@ -274,14 +281,14 @@ def backfill_claude_code(transcript_root: Path, journal: Path) -> int:
 # start. Drop them defensively.
 #
 # Same single-source-of-truth pattern as the Claude side above —
-# the Provider class attribute is canonical and the bash live hook
-# gets it rendered into the jq filter at install time.
+# the CodexProvider class attribute is canonical and the bash live
+# hook gets it rendered into the jq filter at install time.
 _CODEX_INJECTED_PREFIXES: tuple[str, ...] = tuple(
     CodexProvider.system_injected_prefixes
 )
 
 
-def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
+def _replay_codex_rollout(path: Path) -> Iterator[ScrapeRow]:
     """Walk a Codex rollout JSONL and emit one journal row per
     kaomoji-led ``event_msg.agent_message`` event.
 
@@ -366,18 +373,19 @@ def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
             continue
         ctx = turn_ctx.get(current_turn_id, {})
         ts = ev.get("timestamp") or ""
-        yield journal_line_dict(
-            ts=str(ts),
-            model=ctx.get("model", ""),
-            cwd=ctx.get("cwd", session_cwd),
-            kaomoji=prefix,
-            user_text=latest_user,
+        yield ScrapeRow(
+            source="codex-backfill",
+            model=ctx.get("model", "") or None,
+            timestamp=str(ts),
+            cwd=ctx.get("cwd", session_cwd) or None,
+            first_word=prefix,
             assistant_text=strip_leading_kaomoji(text, prefix),
+            surrounding_user=latest_user,
         )
 
 
 def backfill_codex(rollouts_root: Path, journal: Path) -> int:
-    rows: list[dict[str, Any]] = []
+    rows: list[ScrapeRow] = []
     paths = sorted(rollouts_root.rglob("rollout-*.jsonl"))
     for path in paths:
         rows.extend(_replay_codex_rollout(path))
@@ -392,14 +400,14 @@ def backfill_codex(rollouts_root: Path, journal: Path) -> int:
 # Hermes' documented contract is ``extra.user_message`` arrives
 # pre-injection, so the prefix list is empty. Mirrors
 # :data:`HermesProvider.system_injected_prefixes`. Single source of
-# truth on the Provider class — if that ever populates, this picks up
-# the change automatically.
+# truth on the HermesProvider class — if that ever populates, this
+# picks up the change automatically.
 _HERMES_INJECTED_PREFIXES: tuple[str, ...] = tuple(
     HermesProvider.system_injected_prefixes
 )
 
 
-def _replay_hermes_session(path: Path) -> Iterator[dict[str, Any]]:
+def _replay_hermes_session(path: Path) -> Iterator[ScrapeRow]:
     """Walk one Hermes session JSON and emit one journal row per
     kaomoji-led assistant message, chunked by user-role boundaries.
 
@@ -475,13 +483,14 @@ def _replay_hermes_session(path: Path) -> Iterator[dict[str, Any]]:
             prefix = kaomoji_prefix(content)
             if not prefix:
                 continue
-            yield journal_line_dict(
-                ts=ts,
-                model=model,
-                cwd=cwd,
-                kaomoji=prefix,
-                user_text=user_text,
+            yield ScrapeRow(
+                source="hermes-backfill",
+                model=model or None,
+                timestamp=ts,
+                cwd=cwd or None,
+                first_word=prefix,
                 assistant_text=strip_leading_kaomoji(content, prefix),
+                surrounding_user=user_text,
             )
 
 
@@ -496,7 +505,7 @@ def backfill_hermes(sessions_root: Path, journal: Path) -> int:
     (chronological by construction — the file is the agent's
     persisted message list).
     """
-    rows: list[dict[str, Any]] = []
+    rows: list[ScrapeRow] = []
     paths = sorted(sessions_root.glob("session_*.json"))
     for path in paths:
         rows.extend(_replay_hermes_session(path))
