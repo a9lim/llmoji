@@ -16,10 +16,11 @@ HF target:
     dataset card. ``upload_folder`` does a single atomic
     commit so partial uploads can't land. The submitter's identifier
     is a 32-hex-char salted hash of (a per-machine random token +
-    the package version), persisted at ``~/.llmoji/state.json``. We
-    do NOT collect HF usernames or any account-bound identifier; the
-    salted hash is just enough to dedup repeat submissions from the
-    same machine.
+    the package version), persisted at ``~/.llmoji/.salt`` (a flat
+    64-hex-char file; pre-1.1.x had it wrapped in a JSON envelope at
+    ``state.json``). We do NOT collect HF usernames or any
+    account-bound identifier; the salted hash is just enough to
+    dedup repeat submissions from the same machine.
 
 Email target:
     Build a ``mailto:`` URI with the bundle path printed in the
@@ -32,13 +33,12 @@ Email target:
 
 from __future__ import annotations
 
-import json
 import secrets
-import subprocess
 import sys
 import tarfile
 import time
 import urllib.parse
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -168,25 +168,24 @@ def tar_bundle(
 
 
 def _submission_token() -> str:
-    """Per-machine random token, persisted at ``~/.llmoji/state.json``.
+    """Per-machine random token, persisted at ``~/.llmoji/.salt``.
 
     Generated once on first ``upload``. Never sent anywhere — only
-    used as the salt in :func:`submitter_id`.
+    used as the salt in :func:`submitter_id`. The flat 64-hex-char
+    file replaces the pre-1.1.x JSON envelope at ``state.json``;
+    same byte, less wrapping.
     """
-    state_path = paths.state_path()
-    state: dict[str, Any] = {}
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text())
-        except json.JSONDecodeError:
-            state = {}
-    if "submission_token" not in state:
-        state["submission_token"] = secrets.token_hex(32)
-        # Atomic write — losing the token mid-write would invalidate
-        # the user's submitter id and double-credit them in the
-        # dataset's per-machine dedup.
-        atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
-    return state["submission_token"]
+    salt_path = paths.salt_path()
+    if salt_path.exists():
+        existing = salt_path.read_text().strip()
+        if existing:
+            return existing
+    token = secrets.token_hex(32)
+    # Atomic write — losing the salt mid-write would invalidate
+    # the user's submitter id and double-credit them in the
+    # dataset's per-machine dedup.
+    atomic_write_text(salt_path, token + "\n")
+    return token
 
 
 def submitter_id() -> str:
@@ -301,13 +300,25 @@ def upload_email(
     confirm: bool = True,
 ) -> dict[str, Any]:
     """Build a mailto URI and open it in the system mail client; the
-    user attaches the tarball manually. We don't ship SMTP."""
+    user attaches the tarball manually. We don't ship SMTP.
+
+    Uses :func:`webbrowser.open` to launch the mailto: URL — the
+    Python stdlib's cross-platform handler picks the right opener
+    on macOS / Linux / Windows without per-platform branching. On
+    a CI box without a registered handler it returns ``False`` and
+    we fall through to printing the URI (the user can copy it into
+    a mail client by hand).
+    """
     tarball, files = tar_bundle(bundle_dir)
     print(f"target: email {to}")
     print(f"local tarball: {tarball} ({tarball.stat().st_size} bytes)")
     if confirm and not _confirm("open your mail client and attach this bundle?"):
         print("aborted; tarball left on disk.")
-        return {"submitted": False, "tarball": str(tarball)}
+        # Aborted by the user — surface the tarball path so a
+        # scripted caller can still find it, and report submitted=False
+        # accurately (pre Wave 6 the abort path returned
+        # submitted=True, which lied about user intent).
+        return {"submitted": False, "tarball": str(tarball), "to": to}
 
     body = (
         "Hi,\n\n"
@@ -324,18 +335,13 @@ def upload_email(
         "body": body,
     })
 
-    if sys.platform == "darwin":
-        opener = "open"
-    elif sys.platform.startswith("linux"):
-        opener = "xdg-open"
-    else:
-        opener = ""
-
-    if opener:
-        try:
-            subprocess.run([opener, mailto], check=False)
-        except FileNotFoundError:
-            pass
+    # Best-effort handoff to the system mail client. webbrowser.open
+    # returns False when no handler is registered — we still print
+    # the URL so the user can copy it into a mail client by hand.
+    try:
+        webbrowser.open(mailto)
+    except webbrowser.Error:
+        pass
 
     print(f"\nattach: {tarball}")
     print(f"mailto: {mailto[:200]}{'...' if len(mailto) > 200 else ''}")

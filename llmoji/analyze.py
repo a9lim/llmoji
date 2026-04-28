@@ -607,7 +607,7 @@ def run_analyze(
         print_progress=print_progress, max_workers=concurrency,
     )
 
-    # Lazy import — upload is the only place that touches state.json,
+    # Lazy import — upload is the only place that touches the .salt file,
     # but we want the submitter id stamped into the manifest so the
     # bundle the user inspects matches what would land on HF.
     from .upload import submitter_id as _submitter_id
