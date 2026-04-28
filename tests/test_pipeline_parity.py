@@ -34,6 +34,12 @@ from typing import Any
 
 import pytest
 
+# Every test in this module forks bash + jq subprocesses, which adds
+# real wallclock time on local dev runs. CI keeps running the full
+# suite; locally, ``pytest -m "not slow"`` skips the parity gate when
+# iterating on something unrelated.
+pytestmark = pytest.mark.slow
+
 # Fields the journal row is built from. We compare these between the
 # bash hook output and the backfill output. ``ts`` differs by design
 # (bash stamps now, backfill stamps historical) so it's excluded.

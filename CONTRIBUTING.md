@@ -18,9 +18,10 @@ The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or networ
 pytest tests/                          # everything
 pytest tests/test_canonicalize.py -v   # rule-by-rule taxonomy regression
 pytest tests/test_public_surface.py -v # cross-corpus invariant contract
+pytest -m "not slow"                   # skip the bash + jq parity gate
 ```
 
-The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
+The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. The bash + jq parity tests in `tests/test_pipeline_parity.py` are marked `slow` because they fork subprocess for every case. Skip them with `-m "not slow"` while iterating on something unrelated; CI keeps running the full suite. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
 
 ## Lint
 

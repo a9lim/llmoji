@@ -259,11 +259,13 @@ llmoji/
       hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
                                     # {context: ...} shape)
     paths.py                   # ~/.llmoji home, cache, bundle,
-                               # journals, state.json (per-machine
-                               # submission token). NOT an install
-                               # registry — install state is read live
-                               # from each harness's settings file
-                               # by Provider.status().
+                               # journals, .salt (per-machine
+                               # submission salt; flat 64-hex-char
+                               # file, replaces the pre-1.1.x JSON
+                               # envelope at state.json). NOT an
+                               # install registry — install state is
+                               # read live from each harness's
+                               # settings file by Provider.status().
     analyze.py                 # Stage A + B + bundle write. Buckets
                                # by (source_model, canonical) where
                                # source_model = ScrapeRow.model or
@@ -457,7 +459,7 @@ string and skips. Main and nudge dedup independently.
 Settings writes go through `llmoji._util.atomic_write_text` (tmp
 file + `os.replace`) so a power loss / SIGINT mid-write leaves the
 user's settings file with either the old content or the new — never
-half. The `upload` state.json (per-machine submission token) writes
+half. The `upload` `.salt` file (per-machine submission token) writes
 the same way. JSON-settings providers also batch their main+nudge
 edits into a single read-modify-write cycle per install (via
 `_register_json_settings_batch`), so a SIGKILL between registering
@@ -497,7 +499,12 @@ shared-prefix archives).
 
 Email target keeps `tar_bundle` because a single attachment is what
 the recipient wants; `~/.llmoji/bundle-<ts>.tar.gz` is now an
-email-only artifact.
+email-only artifact. The mailto: handoff goes through
+`webbrowser.open` (stdlib, cross-platform — works on macOS, Linux,
+and Windows without per-platform `open` / `xdg-open` branching).
+Aborts at the confirm prompt return `submitted=False` honestly,
+with the tarball path included so a scripted caller can still find
+the on-disk artifact.
 
 ### Hermes payload contract — source-verified
 

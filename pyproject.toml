@@ -92,6 +92,9 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
 ]
+markers = [
+    "slow: bash + jq subprocess parity tests; skip with -m 'not slow' for fast local iteration",
+]
 
 [tool.ruff]
 line-length = 100
