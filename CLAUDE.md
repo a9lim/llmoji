@@ -603,9 +603,11 @@ Two coupling points:
   adapter, and the generic-JSONL-append contract is the path until
   then.
 - Stage-A synth calls run on a small thread pool (default 2,
-  `$LLMOJI_CONCURRENCY` to override). Both Anthropic and OpenAI SDKs
-  use thread-safe httpx clients; cache writes serialize on the main
-  thread via `as_completed`, so no append interleaving. Default is 2
+  `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Both
+  Anthropic and OpenAI SDKs use thread-safe httpx clients; cache
+  writes serialize on the main thread after futures complete, in
+  deterministic walk order, so the cache file's row order matches
+  the bundle's Stage-B input order. Default is 2
   because the org-level Haiku rate limit is 50 req/min; 4 concurrent
   workers reliably trip it on a multi-hundred-row backfill, and the
   SDK's `max_retries=8` exponential backoff (set explicitly in

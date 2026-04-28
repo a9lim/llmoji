@@ -88,8 +88,8 @@ class Provider:
     Subclasses fill in the small set of attrs that drive
     :meth:`render_hook` substitution, plus a ``main_event`` hint and
     optional nudge attrs. The default :meth:`_register` /
-    :meth:`_unregister` / ``_is_registered`` / ``_is_nudge_registered``
-    use the shared JSON-settings helpers; YAML providers override.
+    :meth:`_unregister` / :meth:`_check_registrations` use the
+    shared JSON-settings helpers; YAML providers override.
     """
 
     name: str = ""
@@ -233,10 +233,10 @@ class Provider:
                 self.nudge_hook_path.unlink()
 
     def status(self) -> ProviderStatus:
-        # ``_check_registrations`` is the batched single-read variant of
-        # ``_is_registered`` + ``_is_nudge_registered``. Default
-        # implementation here loads the settings file once and runs
-        # both checks against it; YAML providers (hermes) override.
+        # ``_check_registrations`` reads the settings file once and
+        # reports both main + nudge registration in a single pass.
+        # Default implementation walks the JSON-settings shape; YAML
+        # providers (hermes) override.
         main_reg, nudge_reg = self._check_registrations()
         main_installed = self.hook_path.exists() and main_reg
         if self.has_nudge:
@@ -292,25 +292,9 @@ class Provider:
             edits.append((self.nudge_event, self.nudge_hook_path))
         self._unregister_json_settings_batch(edits)
 
-    def _is_registered(self) -> bool:
-        return self._is_registered_json_settings(
-            event=self.main_event, hook_path=self.hook_path,
-        )
-
-    def _is_nudge_registered(self) -> bool:
-        if not self.has_nudge:
-            return False
-        assert self.nudge_hook_path is not None
-        return self._is_registered_json_settings(
-            event=self.nudge_event, hook_path=self.nudge_hook_path,
-        )
-
     def _check_registrations(self) -> tuple[bool, bool]:
         """Return ``(main_installed, nudge_installed)`` from a single
-        settings-file read. Used by :meth:`status` instead of two
-        separate ``_is_registered`` / ``_is_nudge_registered`` calls
-        so an installed nudge-bearing provider doesn't trigger two
-        independent file reads per ``status()``.
+        settings-file read.
 
         Default JSON-settings implementation walks the loaded ``hooks``
         dict once and checks both registrations against it. YAML
@@ -432,16 +416,6 @@ class Provider:
             cfg.pop("hooks", None)
         if changed:
             write_json(self.settings_path, cfg)
-
-    def _is_registered_json_settings(
-        self,
-        *,
-        event: str,
-        hook_path: Path,
-    ) -> bool:
-        return self._is_registered_json_settings_batch(
-            [(event, hook_path)],
-        )[0]
 
     def _is_registered_json_settings_batch(
         self, edits: list[tuple[str, Path]],

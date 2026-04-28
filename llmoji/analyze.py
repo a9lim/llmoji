@@ -164,9 +164,10 @@ def _sample(
 
 
 def _resolve_concurrency(explicit: int | None) -> int:
-    """Stage-A worker count: explicit arg → ``$LLMOJI_CONCURRENCY``
-    → :data:`DEFAULT_STAGE_A_CONCURRENCY`. Clamps to ``>=1``. Bad
-    env values fall back silently to the default."""
+    """Stage-A worker count: ``--concurrency`` (CLI) → explicit arg
+    → ``$LLMOJI_CONCURRENCY`` → :data:`DEFAULT_STAGE_A_CONCURRENCY`.
+    Clamps to ``>=1``. Bad env values fall back silently to the
+    default."""
     if explicit is not None:
         return max(1, explicit)
     raw = os.environ.get("LLMOJI_CONCURRENCY")
@@ -548,6 +549,7 @@ def run_analyze(
     backend: str = "anthropic",
     base_url: str | None = None,
     model_id: str | None = None,
+    concurrency: int | None = None,
     print_progress: bool = True,
 ) -> AnalyzeResult:
     """Top-level entry point.
@@ -588,10 +590,12 @@ def run_analyze(
         )
 
     descs_by_cell, n_a, n_cached = _stage_a(
-        synth, buckets, cache_path=cache_path, print_progress=print_progress,
+        synth, buckets, cache_path=cache_path,
+        print_progress=print_progress, max_workers=concurrency,
     )
     synthesized_by_cell, n_b = _stage_b(
-        synth, descs_by_cell, print_progress=print_progress,
+        synth, descs_by_cell,
+        print_progress=print_progress, max_workers=concurrency,
     )
 
     # Lazy import — upload is the only place that touches state.json,
