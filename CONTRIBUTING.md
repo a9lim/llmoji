@@ -59,7 +59,7 @@ Please strip the leading kaomoji from `assistant_text` on parse, the same way th
 ## PRs
 
 - Please don't bump the version in your PR unless the change is intended to ship as a release. The PyPI publish workflow is triggered by a version update.
-- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `Provider`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body — those land in the HF dataset's aggregation rules and want a hand-edit on the dataset card.
+- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `Provider`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset's and need an edit on the dataset card too.
 - The hermes provider in particular wants real-traffic validation. If you run hermes and are willing to share what `extra.*` keys actually arrive on `post_llm_call` and whether `subagent_stop` correlation filters cleanly, please open an issue.
 
 ## Questions
