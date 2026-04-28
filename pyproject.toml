@@ -41,11 +41,17 @@ classifiers = [
 ]
 
 # Lean by design. The package is provider-agnostic data collection
-# plus canonical Haiku synthesis plus bundle/upload. Heavier ML deps
+# plus canonical synthesis plus bundle/upload. Heavier ML deps
 # (torch, sentence-transformers, matplotlib, saklas) live in the
 # research-side `llmoji-study` repo.
+#
+# Three SDKs are runtime deps so any of the three synthesis backends
+# (anthropic, openai-Responses, OpenAI-compatible local Chat
+# Completions) Just Works out of `pip install llmoji`. The local
+# backend reuses the openai SDK with a base_url override.
 dependencies = [
     "anthropic>=0.40",
+    "openai>=1.55",
     "huggingface_hub>=0.25",
 ]
 
@@ -106,8 +112,8 @@ ignore = ["E501", "E741", "E402", "E731"]
 include = [
     "llmoji/__init__.py",
     "llmoji/taxonomy.py",
-    "llmoji/haiku_prompts.py",
-    "llmoji/haiku.py",
+    "llmoji/synth_prompts.py",
+    "llmoji/synth.py",
     "llmoji/scrape.py",
     "llmoji/providers/__init__.py",
     "llmoji/providers/base.py",

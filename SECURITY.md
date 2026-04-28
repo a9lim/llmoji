@@ -20,15 +20,15 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 ### What stays on your machine
 
 - **Raw `user_text` or `assistant_text`** at `~/.<harness>/kaomoji-journal.jsonl`. These hold the raw data for every kaomoji-bearing turn. They never leave your machine.
-- **Per-instance Haiku cache** at `~/.llmoji/cache/per_instance.jsonl`. Each row is a Haiku-paraphrased description of one turn, keyed by content hash. The cache is never bundled and never shipped. `llmoji status` prints its size and entry count; `llmoji cache clear` is the explicit wipe.
+- **Per-instance synthesizer cache** at `~/.llmoji/cache/per_instance.jsonl`. Each row is a synthesizer-paraphrased description of one turn, keyed by content hash plus the synthesizer model id. The cache is never bundled and never shipped. `llmoji status` prints its size and entry count; `llmoji cache clear` is the explicit wipe.
 - **Submission token** at `~/.llmoji/state.json`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
 
 ### What ships when you `upload`
 
-The bundle has two files, both human-readable JSON:
+The bundle is human-readable JSON, laid out flat: one top-level manifest plus one `.jsonl` per source model, no subdirectories.
 
-- **`manifest.json`**: package version, journal counts per provider, kaomoji counts, the Haiku model id used, any included `--notes`, and a salted-hash submitter id.
-- **`descriptions.jsonl`**: one row per kaomoji, with the summary produced by Haiku.
+- **`manifest.json`**: package version, the synthesis backend and model id used, per-source-model row counts, total synthesized rows, list of providers seen, generation timestamp, any included `--notes`, and a salted-hash submitter id.
+- **`<source-model>.jsonl`**: one row per canonical kaomoji as that model used it, with the synthesized meaning. 
 
 The submitter id is a 32-hex-char (128-bit) salted hash of the per-machine token plus the package version. We do not collect HuggingFace usernames or any account-bound identifier.
 
@@ -38,10 +38,10 @@ For frequent kaomoji, the per-face summary pools many instances and so abstracts
 
 - `analyze` prints a per-face preview before declaring done.
 - `upload` re-prompts before committing.
-- The bundle is inspectable in `~/.llmoji/bundle/`
-- The bundle is allowlisted to two files. Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
+- The bundle is inspectable in `~/.llmoji/bundle/`.
+- The bundle is allowlisted: top-level `manifest.json` plus per-model `.jsonl` files at the root. Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
 
-Please review `~/.llmoji/bundle/descriptions.jsonl` before running `upload` if your kaomoji distribution is long-tailed.
+Please review every `~/.llmoji/bundle/<source-model>.jsonl` before running `upload`.
 
 ### Hooks are read-only
 
@@ -49,14 +49,18 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 
 ## Model and API trust
 
-`llmoji analyze` calls the Anthropic API with your `$ANTHROPIC_API_KEY`. The masked-kaomoji prompts and the user/assistant text from your journal are sent to Anthropic for paraphrasing. Please review Anthropic's data handling policy if this matters to you.
+`llmoji analyze` sends the masked-kaomoji prompts and the user and assistant text from your journal to whichever synthesis backend you pick. Three backends are supported and each one routes your data differently. Please review the relevant data-handling policy before running `analyze` against a corpus you care about.
 
-`llmoji upload --target hf` uses your `$HF_TOKEN` to commit the bundle's two loose files to the central dataset in a single atomic commit. The token is not stored or echoed by llmoji; it's read by `huggingface_hub` from your standard HF credential cache.
+- **`--backend anthropic` (default)**: calls the Anthropic API with your `$ANTHROPIC_API_KEY`. Your journal text goes to Anthropic for paraphrasing.
+- **`--backend openai`**: calls the OpenAI Responses API with your `$OPENAI_API_KEY`. Your journal text goes to OpenAI for paraphrasing.
+- **`--backend local`**: calls a local OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp's HTTP server, etc.) at the `--base-url` you pass. Your journal text stays on whatever machine the endpoint runs on; nothing is sent to a third party.
+
+`llmoji upload --target hf` uses your `$HF_TOKEN` to commit the bundle's loose files (one manifest, plus one `<source-model>.jsonl` per source model) to the central dataset in a single atomic commit. The token is not stored or echoed by llmoji; it's read by `huggingface_hub` from your standard HF credential cache.
 
 `llmoji upload --target email` builds a `mailto:` URI with the bundle path printed in the body and asks you to attach the tarball manually.
 
 ## Receiving end
 
-The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`) and becomes publicly downloadable. Please review `~/.llmoji/bundle/descriptions.jsonl` before uploading.
+The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`) and becomes publicly downloadable. Please review every `~/.llmoji/bundle/<source-model>.jsonl` before uploading.
 
 If you upload a bundle and later want it removed from the dataset, please email mx@a9l.im with your submitter id and I'll take down the matching folders.

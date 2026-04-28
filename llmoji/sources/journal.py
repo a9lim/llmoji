@@ -60,11 +60,13 @@ def iter_journal(
         rows (no error — a never-installed provider is a valid
         steady-state).
     source :
-        Stable name for the originating provider. Becomes the
-        ``ScrapeRow.source`` value with a ``"-hook"`` suffix
-        (``"claude_code"`` → ``"claude_code-hook"``). The CLI uses
-        this to generate per-provider breakdowns and to label
-        bundles.
+        Stable name for the originating journal. Used verbatim as
+        ``ScrapeRow.source``. Live-hook callers in
+        :func:`llmoji.cli._gather_rows` pass the ``-hook`` suffix
+        themselves (``"claude_code-hook"``); static-export
+        ``~/.llmoji/journals/<name>.jsonl`` callers pass the bare
+        stem (``"claude_ai_export"``) so the bundle subfolder names
+        don't lie about whether a row came from a live hook.
     """
     p = Path(path)
     if not p.exists():
@@ -94,7 +96,7 @@ def iter_journal(
                 continue
             cwd = row.get("cwd")
             yield ScrapeRow(
-                source=f"{source}-hook",
+                source=source,
                 session_id="",
                 project_slug=_project_slug_from_cwd(cwd),
                 assistant_uuid="",

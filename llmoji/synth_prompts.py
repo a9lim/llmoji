@@ -1,25 +1,30 @@
-"""Locked Haiku prompts for the two-stage description→synthesis
+"""Locked synthesis prompts for the two-stage description→synthesis
 pipeline.
 
-These prompts are part of the v1.0 frozen public API. Bumping any
-string here changes the description text that ships in the bundle,
-which would invalidate cross-corpus aggregation against the central
-HF dataset; treat changes as a major version bump (``llmoji`` 2.0.0).
+The prompts are backend-agnostic: the routing module
+:mod:`llmoji.synth` decides whether to send them through the Anthropic
+SDK, OpenAI's Responses API, or an OpenAI-compatible local Chat
+Completions endpoint, but the prompt strings themselves are part of
+the cross-corpus invariant. Bumping any of the three prompt strings
+changes what a paraphrase says about a kaomoji and so invalidates
+aggregation across submissions; treat that as a major version bump.
 
 Stage A — per-instance description
     Sent once per sampled (kaomoji, user, assistant) instance. The
     leading kaomoji has been replaced by the literal token
-    ``[FACE]`` (see :func:`llmoji.haiku.mask_kaomoji`); Haiku is
-    asked to describe the masked face's mood/affect/stance in 1-2
-    sentences. Two prompt variants — one when ``surrounding_user``
-    is non-empty (~73% of rows in our corpus), one when it isn't.
+    ``[FACE]`` (see :func:`llmoji.synth.mask_kaomoji`); the
+    synthesizer is asked to describe the masked face's mood / affect
+    / stance in 1-2 sentences. Two prompt variants — one when
+    ``surrounding_user`` is non-empty (~73% of rows in our corpus),
+    one when it isn't.
 
-Stage B — per-kaomoji synthesis
-    Pool the Stage A descriptions for one canonical kaomoji form,
-    ask Haiku to synthesize a single 1-2-sentence overall meaning.
-    This is what ships in the bundle (one row per canonical face).
+Stage B — per-(source-model, kaomoji) synthesis
+    Pool the Stage A descriptions for one ``(source_model,
+    canonical_kaomoji)`` cell, ask the synthesizer to synthesize a
+    single 1-2-sentence overall meaning. This is what ships in the
+    bundle (one row per canonical face per source model).
 
-Cluster-label prompt is research-side; not part of v1.0 public API.
+Cluster-label prompt is research-side; not part of the public API.
 """
 
 from __future__ import annotations
@@ -62,7 +67,14 @@ SYNTHESIZE_PROMPT = (
     "Synthesized meaning:"
 )
 
-# Locked Haiku model id for the v1.0 corpus. Bumping invalidates
-# description-corpus parity across submissions; treated as a major
-# version bump.
-HAIKU_MODEL_ID = "claude-haiku-4-5-20251001"
+# Pinned default model ids per backend. These are the snapshots the
+# bundle's manifest stamps into ``synthesis_model_id`` when a user
+# runs ``llmoji analyze`` with the default for that backend; bumping
+# them changes the prose the dataset receives, treat as a major
+# version event.
+#
+# Anthropic Haiku 4.5 was the only locked synthesizer in v1.0; OpenAI
+# joins in 1.1.0. The local backend has no default — the user must
+# pass ``--model`` explicitly.
+DEFAULT_ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"
+DEFAULT_OPENAI_MODEL_ID = "gpt-5.4-mini-2026-03-17"
