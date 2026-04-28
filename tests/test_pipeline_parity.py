@@ -79,23 +79,33 @@ def _assert_parity(
     bf_rows: list[dict[str, Any]],
     expect_row: bool,
 ) -> None:
+    """Both pipelines must produce identical rows in identical order.
+
+    A single fired turn can emit ≥1 row (one per kaomoji-led message
+    in the turn) since the multi-message-per-turn fix landed; the
+    parity contract is that bash and backfill agree row-for-row on
+    parity-critical fields, in chronological order.
+    """
     if not expect_row:
         assert bash_rows == [] and bf_rows == [], (
             f"{desc}: expected both pipelines to skip, got "
             f"bash={bash_rows!r}, backfill={bf_rows!r}"
         )
         return
-    assert len(bash_rows) == 1 and len(bf_rows) == 1, (
-        f"{desc}: expected 1 row each, got "
-        f"bash={len(bash_rows)}, backfill={len(bf_rows)}"
+    assert len(bash_rows) >= 1, f"{desc}: expected ≥1 bash row, got {bash_rows!r}"
+    assert len(bash_rows) == len(bf_rows), (
+        f"{desc}: row count mismatch — "
+        f"bash={len(bash_rows)}, backfill={len(bf_rows)}\n"
+        f"  bash:     {bash_rows!r}\n"
+        f"  backfill: {bf_rows!r}"
     )
-    b, f = bash_rows[0], bf_rows[0]
-    for k in _PARITY_FIELDS:
-        assert b[k] == f[k], (
-            f"{desc} divergence on {k!r}:\n"
-            f"  bash:     {b[k]!r}\n"
-            f"  backfill: {f[k]!r}"
-        )
+    for i, (b, f) in enumerate(zip(bash_rows, bf_rows)):
+        for k in _PARITY_FIELDS:
+            assert b[k] == f[k], (
+                f"{desc} divergence on row {i} field {k!r}:\n"
+                f"  bash:     {b[k]!r}\n"
+                f"  backfill: {f[k]!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +213,11 @@ def test_claude_code_hook_and_backfill_agree(
 # Real Claude Code transcripts persist each assistant content block —
 # text, tool_use, thinking — as its own top-level JSONL entry. A
 # turn that does anything tool-flavored produces many assistant
-# entries. The pre-fix hook keyed off `last(assistant)` and missed
-# every turn whose final assistant entry was a tool_use or thinking
-# (i.e. the model wrote text and then resumed tool work, or the
-# transcript had not yet flushed a trailing text block when Stop
-# fired). These cases pin the fix.
+# entries, and the model can lead each text block with its own
+# kaomoji. Post-fix the hook walks every text-bearing entry in the
+# current turn and emits one row per kaomoji-led entry; non-kaomoji
+# entries are skipped without aborting the rest of the walk. These
+# cases pin the per-entry behavior.
 
 def _claude_turn_events(
     *, blocks: list[dict[str, Any]], user: str = "ping",
@@ -266,18 +276,18 @@ def _claude_turn_events(
     return events
 
 
-_CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], str, bool]] = [
-    # description, blocks, expected_kaomoji, expect_row
+_CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], list[str]]] = [
+    # description, blocks, expected_kaomojis (one per emitted row, in
+    # chronological order; empty list = no rows)
     (
-        "text then tool_use (the original bug — kaomoji-led reply "
-        "followed by more tool work)",
+        "text then tool_use — kaomoji-led reply followed by more "
+        "tool work",
         [
             {"type": "text", "text": "(◕‿◕) here's the answer"},
             {"type": "tool_use", "id": "tu1", "name": "Bash",
              "input": {"command": "ls"}},
         ],
-        "(◕‿◕)",
-        True,
+        ["(◕‿◕)"],
     ),
     (
         "tool_use then text (model investigates first then replies)",
@@ -286,20 +296,46 @@ _CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], str, bool]] = [
              "input": {"file_path": "/x"}},
             {"type": "text", "text": "(´･ω･`) found it"},
         ],
-        "(´･ω･`)",
-        True,
+        ["(´･ω･`)"],
     ),
     (
-        "text → tool_use → text (kaomoji on first, post-tool "
-        "follow-up after — hook should pick first, no double-emit)",
+        "text → tool_use → text (kaomoji on first only; the "
+        "post-tool follow-up has no kaomoji and is skipped — one "
+        "row emitted, not two)",
         [
             {"type": "text", "text": "(◕‿◕) starting"},
             {"type": "tool_use", "id": "tu1", "name": "Bash",
              "input": {"command": "ls"}},
             {"type": "text", "text": "follow-up paragraph."},
         ],
-        "(◕‿◕)",
-        True,
+        ["(◕‿◕)"],
+    ),
+    (
+        "text → tool_use → text BOTH kaomoji-led — the multi-emit "
+        "case the fix exists for; pre-fix only the first kaomoji "
+        "made it into the journal, post-fix both rows land",
+        [
+            {"type": "text", "text": "(◕‿◕) starting"},
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "text", "text": "(´･ω･`) and here's the result"},
+        ],
+        ["(◕‿◕)", "(´･ω･`)"],
+    ),
+    (
+        "kaomoji → tool_use → kaomoji → tool_use → kaomoji "
+        "(verification-heavy turn — three kaomoji-led messages "
+        "interleaved with tool calls, three rows out)",
+        [
+            {"type": "text", "text": "(｀・ω・´) plan"},
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "text", "text": "(⌐■_■) scaffold"},
+            {"type": "tool_use", "id": "tu2", "name": "Read",
+             "input": {"file_path": "/x"}},
+            {"type": "text", "text": "(＾▽＾) shipped"},
+        ],
+        ["(｀・ω・´)", "(⌐■_■)", "(＾▽＾)"],
     ),
     (
         "tool_use → tool_use → text (multi-tool then kaomoji-led "
@@ -311,8 +347,7 @@ _CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], str, bool]] = [
              "input": {"file_path": "/x"}},
             {"type": "text", "text": "[≧▽≦] all clear"},
         ],
-        "[≧▽≦]",
-        True,
+        ["[≧▽≦]"],
     ),
     (
         "tool_use only — no text in turn, no row emitted",
@@ -320,39 +355,38 @@ _CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], str, bool]] = [
             {"type": "tool_use", "id": "tu1", "name": "Bash",
              "input": {"command": "ls"}},
         ],
-        "",
-        False,
+        [],
     ),
     (
-        "non-kaomoji text then tool_use — first text fails kaomoji "
-        "filter, turn skipped (matches live hook semantics)",
+        "non-kaomoji text then tool_use then kaomoji-led text — the "
+        "first text fails the kaomoji filter and is skipped, the "
+        "later kaomoji-led text still emits a row (post-fix; "
+        "pre-fix the first text consumed the slot and the row was "
+        "lost entirely)",
         [
             {"type": "text", "text": "let me check"},
             {"type": "tool_use", "id": "tu1", "name": "Bash",
              "input": {"command": "ls"}},
             {"type": "text", "text": "(◕‿◕) actually here"},
         ],
-        "",
-        False,
+        ["(◕‿◕)"],
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "desc,blocks,expected_kaomoji,expect_row",
+    "desc,blocks,expected_kaomojis",
     _CLAUDE_TURN_SHAPE_CASES,
 )
 def test_claude_code_multi_event_turn_shapes(
     desc: str,
     blocks: list[dict[str, Any]],
-    expected_kaomoji: str,
-    expect_row: bool,
+    expected_kaomojis: list[str],
     tmp_path: Path,
 ) -> None:
-    """Live hook + backfill must agree on which entry in a multi-event
-    turn carries the kaomoji. This is the regression-pin test for
-    the `last(assistant)` → `first text-bearing in current turn`
-    redesign.
+    """Live hook + backfill must agree on every kaomoji-led entry in
+    a multi-event turn — count, order, and content. Pins the
+    per-entry walk against the original "first-text-only" behavior.
     """
     bash, _ = _require_tools()
 
@@ -390,11 +424,13 @@ def test_claude_code_multi_event_turn_shapes(
     for row in bf_rows:
         row.pop("ts", None)
 
+    expect_row = bool(expected_kaomojis)
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
     if expect_row:
-        assert bash_rows[0]["kaomoji"] == expected_kaomoji, (
-            f"{desc}: bash extracted {bash_rows[0]['kaomoji']!r}, "
-            f"expected {expected_kaomoji!r}"
+        bash_kaomojis = [r["kaomoji"] for r in bash_rows]
+        assert bash_kaomojis == expected_kaomojis, (
+            f"{desc}: bash extracted {bash_kaomojis!r}, "
+            f"expected {expected_kaomojis!r}"
         )
 
 
@@ -574,18 +610,27 @@ def test_claude_code_skill_injected_user_filtered(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _codex_rollout_events(
-    *, user_items: list[str], assistant_text: str
+    *, user_items: list[str], agent_messages: list[str],
 ) -> list[dict[str, Any]]:
     """Build a minimal Codex rollout event list for one turn.
 
     ``user_items`` becomes a sequence of ``response_item`` events
     (role=user) in declared order; the synthesis pipeline picks the
     last surviving one after dropping injected prefixes.
+
+    ``agent_messages`` becomes a sequence of
+    ``event_msg.agent_message`` events in declared order. Post-fix
+    the codex hook + backfill walk these and emit one row per
+    kaomoji-led message; pre-fix only the LAST one was captured via
+    ``task_complete.last_agent_message``. ``task_complete`` is still
+    appended for shape-fidelity but its ``last_agent_message`` field
+    is no longer read by either pipeline.
     """
     events: list[dict[str, Any]] = [
         {"type": "session_meta", "payload": {"cwd": "/test"}},
         {
             "type": "turn_context",
+            "timestamp": "2026-04-27T00:00:00Z",
             "payload": {"turn_id": "t1", "model": "gpt-test", "cwd": "/test"},
         },
     ]
@@ -597,14 +642,24 @@ def _codex_rollout_events(
                 "content": [{"type": "input_text", "text": txt}],
             },
         })
+    for i, msg in enumerate(agent_messages):
+        events.append({
+            "type": "event_msg",
+            "timestamp": f"2026-04-27T00:00:{i+1:02d}Z",
+            "payload": {
+                "type": "agent_message",
+                "message": msg,
+                "phase": "final_answer" if i == len(agent_messages) - 1 else "commentary",
+            },
+        })
     events.append({
         "type": "event_msg",
-        "timestamp": "2026-04-27T00:00:00Z",
+        "timestamp": f"2026-04-27T00:00:{len(agent_messages)+1:02d}Z",
         "payload": {
             "type": "task_complete",
             "turn_id": "t1",
-            "last_agent_message": assistant_text,
-            "completed_at": "2026-04-27T00:00:00Z",
+            "last_agent_message": agent_messages[-1] if agent_messages else "",
+            "completed_at": f"2026-04-27T00:00:{len(agent_messages)+1:02d}Z",
         },
     })
     return events
@@ -661,12 +716,15 @@ def test_codex_hook_and_backfill_agree(
     tx_dir.mkdir()
     rollout = tx_dir / "rollout-2026-04-27.jsonl"  # backfill matches rollout-*.jsonl
     events = _codex_rollout_events(
-        user_items=user_items, assistant_text=assistant
+        user_items=user_items, agent_messages=[assistant],
     )
     rollout.write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
-    # Codex Stop event: last_assistant_message + transcript_path
-    # mirrors what the Codex CLI passes the Stop hook in production.
+    # Codex Stop event: transcript_path + the per-turn metadata the
+    # Codex CLI passes in production. ``last_assistant_message`` is
+    # included for shape-fidelity but no longer read by the hook —
+    # the hook walks the rollout for every event_msg.agent_message
+    # in the current turn.
     stop_event = json.dumps({
         "transcript_path": str(rollout),
         "last_assistant_message": assistant,
@@ -698,6 +756,117 @@ def test_codex_hook_and_backfill_agree(
         assert bash_rows[0]["user_text"] == expect_user_text, (
             f"{desc}: bash user_text={bash_rows[0]['user_text']!r}, "
             f"expected {expect_user_text!r}"
+        )
+
+
+# (description, agent_messages, expected_kaomojis)
+#
+# Codex emits one ``event_msg.agent_message`` per model message; a
+# tool-heavy turn writes 5–10 of them. Post-fix the live hook +
+# backfill walk every one and emit one row per kaomoji-led message.
+# Pre-fix only the final message (via ``task_complete.last_agent_
+# message``) was captured. These cases pin the multi-emission
+# behavior — the codex side of the same fix that
+# ``test_claude_code_multi_event_turn_shapes`` pins for claude_code.
+_CODEX_TURN_SHAPE_CASES: list[tuple[str, list[str], list[str]]] = [
+    (
+        "two kaomoji-led messages — both land in the journal",
+        ["(◕‿◕) plan", "(´･ω･`) shipped"],
+        ["(◕‿◕)", "(´･ω･`)"],
+    ),
+    (
+        "five kaomoji-led messages — every one lands (the worked "
+        "example from CLAUDE.md's gotchas section)",
+        [
+            "(｀・ω・´) plan",
+            "(ง •̀_•́) attack",
+            "(⌐■_■) scaffold",
+            "(｡•̀ᴗ-)✧ research",
+            "(＾▽＾) shipped",
+        ],
+        ["(｀・ω・´)", "(ง •̀_•́)", "(⌐■_■)", "(｡•̀ᴗ-)✧", "(＾▽＾)"],
+    ),
+    (
+        "kaomoji + non-kaomoji + kaomoji — the prose middle "
+        "message is skipped, the bookends both land",
+        ["(◕‿◕) plan", "let me check the logs", "(´･ω･`) found it"],
+        ["(◕‿◕)", "(´･ω･`)"],
+    ),
+    (
+        "all-prose turn — zero rows emitted (the model never "
+        "kaomoji'd, fine)",
+        ["let me check", "found something", "shipping the fix"],
+        [],
+    ),
+    (
+        "single kaomoji-led message — degenerate one-row case",
+        ["(◕‿◕) ok"],
+        ["(◕‿◕)"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "desc,agent_messages,expected_kaomojis",
+    _CODEX_TURN_SHAPE_CASES,
+)
+def test_codex_multi_message_turn_shapes(
+    desc: str,
+    agent_messages: list[str],
+    expected_kaomojis: list[str],
+    tmp_path: Path,
+) -> None:
+    """Live hook + backfill must agree on every kaomoji-led
+    agent_message in a multi-message Codex turn — count, order,
+    and content. Pins the per-message walk against the original
+    "task_complete.last_agent_message" behavior.
+    """
+    bash, _ = _require_tools()
+
+    from llmoji.backfill import backfill_codex
+    from llmoji.providers import CodexProvider
+
+    hooks_dir = tmp_path / "hooks"
+    hook_journal = tmp_path / "hook-journal.jsonl"
+    hook = _render_hook(CodexProvider, hook_journal, hooks_dir)
+
+    tx_dir = tmp_path / "tx"
+    tx_dir.mkdir()
+    rollout = tx_dir / "rollout-2026-04-27.jsonl"
+    events = _codex_rollout_events(
+        user_items=["test prompt"], agent_messages=agent_messages,
+    )
+    rollout.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    stop_event = json.dumps({
+        "transcript_path": str(rollout),
+        "model": "gpt-test",
+        "cwd": "/test",
+    })
+    r = subprocess.run(
+        [bash, str(hook)],
+        input=stop_event,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
+    bash_rows = _read_jsonl(hook_journal)
+    for row in bash_rows:
+        row.pop("ts", None)
+
+    bf_journal = tmp_path / "backfill-journal.jsonl"
+    backfill_codex(tx_dir, bf_journal)
+    bf_rows = _read_jsonl(bf_journal)
+    for row in bf_rows:
+        row.pop("ts", None)
+
+    expect_row = bool(expected_kaomojis)
+    _assert_parity(desc, bash_rows, bf_rows, expect_row)
+    if expect_row:
+        bash_kaomojis = [r["kaomoji"] for r in bash_rows]
+        assert bash_kaomojis == expected_kaomojis, (
+            f"{desc}: bash extracted {bash_kaomojis!r}, "
+            f"expected {expected_kaomojis!r}"
         )
 
 

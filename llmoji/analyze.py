@@ -56,10 +56,11 @@ from .haiku_prompts import (
 from .scrape import ScrapeRow
 from .taxonomy import canonicalize_kaomoji
 
-# Stage-A sample cap per canonical kaomoji. Eriskii used 4 for the
-# original Claude-faces work; same number here keeps cross-corpus
-# comparison apples-to-apples. Forms with fewer instances are
-# fully sampled.
+# Stage-A sample cap per canonical kaomoji. ``_sample`` returns
+# ``min(cap, len(rows))`` rows per face — popular faces with
+# hundreds of instances get capped, rare faces get fully sampled.
+# Eriskii used 4 for the original Claude-faces work; same number
+# here keeps cross-corpus comparison apples-to-apples.
 INSTANCE_SAMPLE_CAP = 4
 INSTANCE_SAMPLE_SEED = 0
 
@@ -69,7 +70,13 @@ INSTANCE_SAMPLE_SEED = 0
 # thread pool gives ~Nx wallclock speedup on cache misses with no
 # coordination beyond per-future result handling on the main thread.
 # Override via $LLMOJI_CONCURRENCY (>=1).
-DEFAULT_STAGE_A_CONCURRENCY = 4
+#
+# Default 2 keeps us well under the 50 req/min Haiku org cap once
+# retries kick in. Bumping past 2 starts to trip the cap mid-run on
+# corpora with hundreds of cache misses; the SDK's exponential
+# backoff (max_retries=8) recovers but burns wallclock. Set
+# ``LLMOJI_CONCURRENCY=4+`` if you have a higher rate limit tier.
+DEFAULT_STAGE_A_CONCURRENCY = 2
 
 
 @dataclass

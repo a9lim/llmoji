@@ -4,19 +4,25 @@
 # llmoji/_hooks/claude_code.sh.tmpl. Edits will be lost.
 #
 # Stop hook: read-only journal logger. NEVER blocks.
-# Appends one JSONL row per assistant turn to the configured
-# journal in the canonical 6-field schema:
+# Appends one JSONL row PER kaomoji-led assistant text entry in the
+# current turn. Claude Code persists each assistant content block —
+# text, tool_use, thinking — as its own top-level transcript JSONL
+# entry, so a tool-heavy turn (text → tool_use → text → tool_use →
+# text) emits up to one row per text block. The kaomoji filter
+# decides which entries actually land in the journal; non-kaomoji
+# entries are skipped without bailing the rest of the walk.
 #
+# Schema (canonical 6-field journal row):
 #   ts             ISO-8601 UTC  hook fire time
 #   model          str           active model slug
 #   cwd            str           working directory
-#   kaomoji        str           leading non-letter prefix of last
-#                                assistant message, ≥2 bytes; rows
-#                                without one are skipped (no write)
-#   user_text      str           latest real user turn
-#   assistant_text str           last assistant text MINUS the
-#                                leading kaomoji + surrounding
-#                                whitespace
+#   kaomoji        str           leading non-letter prefix of an
+#                                assistant text entry, ≥2 bytes
+#   user_text      str           latest real user turn (resolved
+#                                once per turn — every row from
+#                                this turn shares the same prompt)
+#   assistant_text str           assistant text MINUS the leading
+#                                kaomoji + surrounding whitespace
 #
 # Consumed by `llmoji analyze` via llmoji.sources.journal.
 set -u
@@ -38,19 +44,12 @@ IS_SIDECHAIN=$(jq -rs '
 ' "$TRANSCRIPT" 2>/dev/null || printf 'false')
 [ "$IS_SIDECHAIN" = "true" ] && exit 0
 
-# Claude Code persists every assistant content block — text,
-# tool_use, thinking — as its OWN top-level entry in the transcript
-# JSONL. A single turn produces many assistant entries; the
-# kaomoji-led text may sit at any position (pre-tool, post-tool, or
-# sandwiched). Naive `last(assistant)` only catches turns that
-# finish with text and never resume — every text-then-more-tools
-# turn was getting silently dropped.
-#
-# Fix: scope to the current turn (the events at-or-after the latest
-# real-user prompt — content-string or text-block, NOT tool_result)
-# and pick the FIRST text-bearing assistant entry. The
-# UserPromptSubmit nudge drives the model to lead with the kaomoji,
-# so the first text in the turn is the kaomoji-bearing reply.
+# Boundary timestamp: latest real user turn. Real user = string content
+# OR text-block array that's NOT a tool_result. Tool-result user events
+# don't open a new conversational turn (they're machine-generated
+# interleaving inside one). Every assistant entry at-or-after this
+# timestamp is part of the current turn; we emit one row per kaomoji-
+# led entry in that window.
 BOUNDARY_TS=$(jq -rs '
   map(select(
     .type == "user"
@@ -66,38 +65,11 @@ BOUNDARY_TS=$(jq -rs '
   | (.timestamp // "")
 ' "$TRANSCRIPT" 2>/dev/null || printf '')
 
-# Reading the transcript twice is wasteful but jq's slurp is cheap
-# (transcripts are tens of KB to a few MB) and isolating each query
-# keeps the script easy to debug.
-MODEL=$(jq -rs --arg b "$BOUNDARY_TS" '
-  map(select(
-    .type == "assistant"
-    and ((.timestamp // "") >= $b)
-    and ((.isSidechain // false) | not)
-    and ((.message.content // []) | any(.type == "text" and ((.text // "") | length > 0)))
-  ))
-  | (.[0] // {})
-  | (.message.model // "")
-' "$TRANSCRIPT" 2>/dev/null || printf '')
-
-ASSISTANT_TEXT=$(jq -rs --arg b "$BOUNDARY_TS" '
-  map(select(
-    .type == "assistant"
-    and ((.timestamp // "") >= $b)
-    and ((.isSidechain // false) | not)
-    and ((.message.content // []) | any(.type == "text" and ((.text // "") | length > 0)))
-  ))
-  | (.[0] // {})
-  | ((.message.content // []) | map(select(.type == "text")) | .[0].text // "")
-' "$TRANSCRIPT" 2>/dev/null || printf '')
-
-[ -z "$ASSISTANT_TEXT" ] && exit 0
-
-# Latest real user turn. Walks every user event, builds a string
-# per event (plain string content OR concatenated text blocks,
-# ignoring tool_result), drops skill-injected payloads, keeps the
-# last surviving non-empty one. Skill-injected prefix list comes
-# from the package taxonomy + provider definition.
+# Latest real user turn resolution — same shape filter as the
+# boundary query but flattened to the user_text we apply to every
+# row from this turn. Skill-injected prefixes (the
+# system_injected_prefixes list on the Provider class) are filtered
+# defensively.
 USER_TEXT=$(jq -rs '
   [ .[]
     | select(.type == "user")
@@ -110,8 +82,35 @@ USER_TEXT=$(jq -rs '
   | last // ""
 ' "$TRANSCRIPT" 2>/dev/null || printf '')
 
-${KAOMOJI_VALIDATE}
-
-${JOURNAL_WRITE}
+# Walk every text-bearing assistant entry in the current turn, emit
+# one journal row per kaomoji-led entry. Each entry maps to ONE
+# message the model wrote — Claude Code persists each content block
+# as its own top-level transcript JSONL entry, so the natural
+# granularity for capture is "one row per text-bearing entry that
+# leads with a kaomoji."
+#
+# jq -c streams one JSON object per matching entry; we read those
+# line-by-line in bash and run the validate + journal-write partials
+# per iteration. The validate partial is rendered with
+# ``SKIP_ACTION=continue`` so a non-kaomoji entry skips its row
+# without aborting the rest of the walk.
+jq -c --arg b "$BOUNDARY_TS" '
+  select(
+    .type == "assistant"
+    and ((.timestamp // "") >= $b)
+    and ((.isSidechain // false) | not)
+    and ((.message.content // []) | any(.type == "text" and ((.text // "") | length > 0)))
+  )
+  | {
+      text:  ((.message.content // []) | map(select(.type == "text")) | .[0].text // ""),
+      model: (.message.model // "")
+    }
+' "$TRANSCRIPT" 2>/dev/null | while IFS= read -r row; do
+  [ -z "$row" ] && continue
+  ASSISTANT_TEXT=$(printf '%s' "$row" | jq -r '.text')
+  MODEL=$(printf         '%s' "$row" | jq -r '.model')
+  ${KAOMOJI_VALIDATE}
+  ${JOURNAL_WRITE}
+done
 
 exit 0
