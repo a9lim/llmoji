@@ -51,3 +51,21 @@ def human_bytes(n: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+def sanitize_model_id_for_path(model_id: str) -> str:
+    """Subfolder-safe encoding of a model id for the per-source-model
+    bundle layout.
+
+    Rules: lowercase, ``/`` → ``__``, ``:`` → ``-``, dots and digits
+    preserved. Empty / falsy input → ``"unknown"`` (defensive — keeps
+    rows whose ``ScrapeRow.model`` is empty from collapsing into an
+    unnamed top-level path).
+
+    Lives here rather than in ``llmoji.synth`` so ``upload.py``'s
+    allowlist walker can reuse it without dragging in the synthesis
+    backend imports.
+    """
+    if not model_id:
+        return "unknown"
+    return model_id.lower().replace("/", "__").replace(":", "-")

@@ -11,7 +11,7 @@
 - [ ] `ruff check .` passes
 - [ ] `pytest tests/` passes
 - [ ] If touching `llmoji/_hooks/`, please confirm `bash -n` validates the rendered output
-- [ ] If touching `llmoji.taxonomy`, `llmoji.haiku_prompts`, the `Provider` interface, the journal schema, or the bundle schema: please flag this as a v1.0 frozen-surface change in the description (gates a major version bump)
+- [ ] If touching `llmoji.taxonomy`, `llmoji.synth_prompts`, the `Provider` interface, the journal schema, or the bundle schema: please flag this as a cross-corpus invariant change in the description (the HF dataset card needs a hand-edit on those)
 
 ## Notes
 

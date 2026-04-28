@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -29,12 +30,12 @@ from typing import Callable, Iterator
 
 from . import paths
 from ._util import human_bytes
-from .haiku import cache_size
 from .providers import PROVIDERS, get_provider
 from .scrape import ScrapeRow
 from .sources.chatgpt_export import iter_chatgpt_export
 from .sources.claude_export import iter_claude_export
 from .sources.journal import iter_journal
+from .synth import cache_size
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +88,21 @@ def _cmd_status(args: argparse.Namespace) -> int:
     n_rows, n_bytes = cache_size(cache_path)
     print()
     print(
-        f"per-instance Haiku cache: {n_rows} entries, "
+        f"per-instance synth cache: {n_rows} entries, "
         f"{human_bytes(n_bytes)} at {cache_path}"
     )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
+        # Bundle layout: manifest.json plus one
+        # <source-model>.jsonl per source model the journal saw,
+        # all at the top level.
         files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
-        print(f"bundle ready at {bundle_dir} ({len(files)} files):")
+        n_data = sum(1 for p in files if p.suffix == ".jsonl")
+        print(
+            f"bundle ready at {bundle_dir} "
+            f"({len(files)} file(s), {n_data} per-source-model "
+            f".jsonl):"
+        )
         for f in files:
             print(f"  - {f.name}  ({human_bytes(f.stat().st_size)})")
     else:
@@ -186,12 +195,19 @@ def _cmd_parse(args: argparse.Namespace) -> int:
 
 def _gather_rows() -> Iterator[ScrapeRow]:
     """Iterate every installed provider's journal + any extra
-    JSONLs under ``~/.llmoji/journals/``."""
+    JSONLs under ``~/.llmoji/journals/``.
+
+    Live-hook journals get a ``-hook`` suffix on the source name
+    (``claude_code-hook``, etc.) so the source field is honest
+    about where the row came from. Static-export journals at
+    ``~/.llmoji/journals/<name>.jsonl`` use the file stem verbatim
+    — they aren't hooks, so the suffix would lie.
+    """
     for name in PROVIDERS:
         p = get_provider(name)
         if not p.journal_path.exists():
             continue
-        yield from iter_journal(p.journal_path, source=p.name)
+        yield from iter_journal(p.journal_path, source=f"{p.name}-hook")
     journals = paths.journals_dir()
     if journals.exists():
         for j in sorted(journals.glob("*.jsonl")):
@@ -200,9 +216,35 @@ def _gather_rows() -> Iterator[ScrapeRow]:
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
-    # Lazy import — analyze needs anthropic, which we don't want to
-    # require for `status` / `install`.
+    # Lazy import — analyze pulls in the chosen backend's SDK,
+    # which we don't want to require for `status` / `install`.
     from .analyze import run_analyze
+
+    backend = args.backend
+    base_url = args.base_url
+    model_id = args.model
+
+    if backend == "local":
+        if not base_url or not model_id:
+            print(
+                "--backend local requires both --base-url and --model "
+                "(or LLMOJI_BASE_URL + LLMOJI_MODEL env vars).",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        # Loud failure beats silent ignore — anthropic and openai
+        # backends always use the pinned snapshot, so passing
+        # --model / --base-url alongside is almost certainly a
+        # mistake.
+        if base_url or model_id:
+            print(
+                f"--backend {backend} doesn't accept --base-url / --model "
+                f"(both are pinned to default snapshots). "
+                f"Drop those flags or switch to --backend local.",
+                file=sys.stderr,
+            )
+            return 2
 
     rows = list(_gather_rows())
     if not rows:
@@ -212,12 +254,18 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    result = run_analyze(rows, notes=args.notes or "")
+    result = run_analyze(
+        rows,
+        notes=args.notes or "",
+        backend=backend,
+        base_url=base_url,
+        model_id=model_id,
+    )
     print()
     print(
         f"analyze done: {result.canonical_unique} canonical kaomoji from "
         f"{result.total_rows} rows; "
-        f"{result.stage_a_calls_made} new Haiku calls, "
+        f"{result.stage_a_calls_made} new synth calls, "
         f"{result.stage_a_calls_cached} cached, "
         f"{result.stage_b_calls_made} syntheses."
     )
@@ -304,11 +352,38 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "analyze",
-        help="scrape + canonicalize + Haiku synthesize → bundle",
+        help="scrape + canonicalize + synthesize → bundle",
     )
     sp.add_argument(
         "--notes", default="",
         help="optional free-form note that lands in manifest.json",
+    )
+    sp.add_argument(
+        "--backend",
+        choices=["anthropic", "openai", "local"],
+        default=os.environ.get("LLMOJI_BACKEND", "anthropic"),
+        help=(
+            "synthesis backend. anthropic (default) and openai use "
+            "their pinned default snapshots; local needs --base-url "
+            "and --model. env: LLMOJI_BACKEND."
+        ),
+    )
+    sp.add_argument(
+        "--base-url",
+        default=os.environ.get("LLMOJI_BASE_URL"),
+        help=(
+            "OpenAI-compatible base URL for --backend local "
+            "(e.g. http://localhost:11434/v1 for Ollama). "
+            "env: LLMOJI_BASE_URL."
+        ),
+    )
+    sp.add_argument(
+        "--model",
+        default=os.environ.get("LLMOJI_MODEL"),
+        help=(
+            "model id for --backend local "
+            "(e.g. llama3.1, qwen2.5:14b). env: LLMOJI_MODEL."
+        ),
     )
     sp.set_defaults(func=_cmd_analyze)
 
