@@ -35,52 +35,62 @@ CWD=$(printf '%s' "$INPUT"         | jq -r '.cwd             // empty' 2>/dev/nu
 [ -z "$TRANSCRIPT" ] && exit 0
 [ ! -f "$TRANSCRIPT" ] && exit 0
 
-# Skip sidechain (subagent) turns — agent-to-agent dispatches are
-# not human-driven and shouldn't mix with the kaomoji-vs-human-prompt
-# corpus. `isSidechain` is set on every event in a Task-spawned
-# session.
-IS_SIDECHAIN=$(jq -rs '
-  map(select(.type == "assistant")) | last | (.isSidechain // false)
-' "$TRANSCRIPT" 2>/dev/null || printf 'false')
-[ "$IS_SIDECHAIN" = "true" ] && exit 0
-
-# Boundary timestamp: latest real user turn. Real user = string content
-# OR text-block array that's NOT a tool_result. Tool-result user events
-# don't open a new conversational turn (they're machine-generated
-# interleaving inside one). Every assistant entry at-or-after this
-# timestamp is part of the current turn; we emit one row per kaomoji-
-# led entry in that window.
-BOUNDARY_TS=$(jq -rs '
-  map(select(
-    .type == "user"
-    and (
-      (.message.content | type) == "string"
-      or (
-        (.message.content | type) == "array"
-        and ((.message.content | any(.type == "tool_result")) | not)
-      )
+# Single transcript read for the three turn-level facts we need:
+#
+#   * is_sidechain — last assistant entry's ``isSidechain`` flag.
+#     Sidechain (subagent) turns are agent-to-agent dispatches that
+#     shouldn't mix with the kaomoji-vs-human-prompt corpus, so we
+#     skip the whole hook fire on a sidechain turn.
+#   * boundary_ts — timestamp of the latest "real" user turn (string
+#     content OR text-block array that isn't a tool_result). Tool-
+#     result user events are machine-generated interleavings inside a
+#     turn, not turn boundaries. The per-entry walk below treats every
+#     assistant entry at-or-after this timestamp as part of the current
+#     turn.
+#   * user_text — the latest real-user message text (string OR text-
+#     block-array, after the injected-prefix filter), applied to every
+#     row this turn produces.
+#
+# Pre-fix the hook ran three separate ``jq -rs`` slurps over the same
+# transcript file, paying the read cost three times. One ``-cs`` call
+# emits a compact JSON blob with all three; the small extractions
+# below are cheap (no file IO).
+META=$(jq -cs '
+  {
+    is_sidechain: (map(select(.type == "assistant")) | last | (.isSidechain // false)),
+    boundary_ts: (
+      map(select(
+        .type == "user"
+        and (
+          (.message.content | type) == "string"
+          or (
+            (.message.content | type) == "array"
+            and ((.message.content | any(.type == "tool_result")) | not)
+          )
+        )
+      ))
+      | last
+      | (.timestamp // "")
+    ),
+    user_text: (
+      [ .[]
+        | select(.type == "user")
+        | .message.content as $c
+        | if   ($c | type) == "string" then $c
+          elif ($c | type) == "array"  then ($c | map(select(.type == "text") | .text // "") | join("\n"))
+          else "" end
+        | select(. != "" and ($INJECTED_PREFIXES_FILTER))
+      ]
+      | last // ""
     )
-  ))
-  | last
-  | (.timestamp // "")
-' "$TRANSCRIPT" 2>/dev/null || printf '')
+  }
+' "$TRANSCRIPT" 2>/dev/null)
+[ -z "$META" ] && META='{}'
 
-# Latest real user turn resolution — same shape filter as the
-# boundary query but flattened to the user_text we apply to every
-# row from this turn. Skill-injected prefixes (the
-# system_injected_prefixes list on the Provider class) are filtered
-# defensively.
-USER_TEXT=$(jq -rs '
-  [ .[]
-    | select(.type == "user")
-    | .message.content as $c
-    | if   ($c | type) == "string" then $c
-      elif ($c | type) == "array"  then ($c | map(select(.type == "text") | .text // "") | join("\n"))
-      else "" end
-    | select(. != "" and ($INJECTED_PREFIXES_FILTER))
-  ]
-  | last // ""
-' "$TRANSCRIPT" 2>/dev/null || printf '')
+IS_SIDECHAIN=$(printf '%s' "$META" | jq -r '.is_sidechain // false')
+[ "$IS_SIDECHAIN" = "true" ] && exit 0
+BOUNDARY_TS=$(printf '%s' "$META" | jq -r '.boundary_ts // ""')
+USER_TEXT=$(printf '%s'   "$META" | jq -r '.user_text   // ""')
 
 # Walk every text-bearing assistant entry in the current turn, emit
 # one journal row per kaomoji-led entry. Each entry maps to ONE

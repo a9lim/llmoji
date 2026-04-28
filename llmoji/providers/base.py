@@ -233,14 +233,16 @@ class Provider:
                 self.nudge_hook_path.unlink()
 
     def status(self) -> ProviderStatus:
-        main_installed = self.hook_path.exists() and self._is_registered()
+        # ``_check_registrations`` is the batched single-read variant of
+        # ``_is_registered`` + ``_is_nudge_registered``. Default
+        # implementation here loads the settings file once and runs
+        # both checks against it; YAML providers (hermes) override.
+        main_reg, nudge_reg = self._check_registrations()
+        main_installed = self.hook_path.exists() and main_reg
         if self.has_nudge:
             assert self.nudge_hook_path is not None
             nudge_hook_path: Path | None = self.nudge_hook_path
-            nudge_installed = (
-                self.nudge_hook_path.exists()
-                and self._is_nudge_registered()
-            )
+            nudge_installed = self.nudge_hook_path.exists() and nudge_reg
             installed = main_installed and nudge_installed
         else:
             nudge_hook_path = None
@@ -302,6 +304,27 @@ class Provider:
         return self._is_registered_json_settings(
             event=self.nudge_event, hook_path=self.nudge_hook_path,
         )
+
+    def _check_registrations(self) -> tuple[bool, bool]:
+        """Return ``(main_installed, nudge_installed)`` from a single
+        settings-file read. Used by :meth:`status` instead of two
+        separate ``_is_registered`` / ``_is_nudge_registered`` calls
+        so an installed nudge-bearing provider doesn't trigger two
+        independent file reads per ``status()``.
+
+        Default JSON-settings implementation walks the loaded ``hooks``
+        dict once and checks both registrations against it. YAML
+        providers (hermes) override since their settings shape needs
+        a different parser anyway.
+        """
+        edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            edits.append((self.nudge_event, self.nudge_hook_path))
+        results = self._is_registered_json_settings_batch(edits)
+        main_reg = results[0]
+        nudge_reg = results[1] if self.has_nudge else False
+        return main_reg, nudge_reg
 
     # --- helpers for JSON-format settings (Claude Code, Codex) ---
 
@@ -416,26 +439,80 @@ class Provider:
         event: str,
         hook_path: Path,
     ) -> bool:
+        return self._is_registered_json_settings_batch(
+            [(event, hook_path)],
+        )[0]
+
+    def _is_registered_json_settings_batch(
+        self, edits: list[tuple[str, Path]],
+    ) -> list[bool]:
+        """Check N (event, hook_path) registrations from one settings
+        read. Returns a parallel ``list[bool]``.
+
+        Used by :meth:`_check_registrations` so a nudge-bearing
+        provider's ``status()`` call performs one file read instead
+        of two.
+        """
+        if not edits:
+            return []
+        n = len(edits)
         if not self.settings_path.exists():
-            return False
+            return [False] * n
         try:
             cfg = _load_json_strict(self.settings_path)
         except SettingsCorruptError:
-            return False
+            return [False] * n
         hooks = cfg.get("hooks")
         if not isinstance(hooks, dict):
-            return False
-        bucket = hooks.get(event)
-        if not isinstance(bucket, list):
-            return False
-        cmd = str(hook_path)
-        for entry in bucket:
-            if not isinstance(entry, dict):
+            return [False] * n
+        out: list[bool] = []
+        for event, hook_path in edits:
+            bucket = hooks.get(event)
+            if not isinstance(bucket, list):
+                out.append(False)
                 continue
-            for h in entry.get("hooks", []) or []:
-                if isinstance(h, dict) and h.get("command") == cmd:
-                    return True
-        return False
+            cmd = str(hook_path)
+            found = False
+            for entry in bucket:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks", []) or []:
+                    if isinstance(h, dict) and h.get("command") == cmd:
+                        found = True
+                        break
+                if found:
+                    break
+            out.append(found)
+        return out
+
+
+class JsonSettingsProvider(Provider):
+    """JSON-settings provider with the shared Claude Code/Codex nudge.
+
+    Both Claude Code and Codex register hooks under a JSON settings
+    file with a byte-identical ``UserPromptSubmit`` envelope (verified
+    at ``codex-rs/hooks/src/events/user_prompt_submit.rs``). They
+    therefore share:
+
+      - the same nudge bash template (``claude_codex_nudge.sh.tmpl``)
+      - the same nudge filename, event, and message wording
+
+    Pulling those four attrs onto a common base eliminates a drift
+    risk: a copy-paste of the nudge string into both providers used
+    to mean the wording could fall out of sync.
+
+    Subclasses (`ClaudeCodeProvider`, `CodexProvider`) still set the
+    per-harness things — paths, settings file, main hook template,
+    and the per-provider ``system_injected_prefixes``.
+    """
+
+    nudge_hook_template = "claude_codex_nudge.sh.tmpl"
+    nudge_hook_filename = "kaomoji-nudge.sh"
+    nudge_event = "UserPromptSubmit"
+    nudge_message = (
+        "Please begin your message with a kaomoji that best represents "
+        "how you feel."
+    )
 
 
 class SettingsCorruptError(RuntimeError):

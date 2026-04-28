@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..scrape import ScrapeRow
-from ..taxonomy import KAOMOJI_START_CHARS, extract
+from ..taxonomy import extract
 
 
 def _project_slug_from_cwd(cwd: str | None) -> str:
@@ -86,7 +86,11 @@ def iter_journal(
             if not prefix:
                 continue
             match = extract(str(prefix))
-            if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
+            # ``extract`` runs the candidate filter (start-char set +
+            # length + bracket balance) internally; a non-empty
+            # ``first_word`` is already validated. Single source of
+            # truth lives in ``taxonomy``.
+            if not match.first_word:
                 continue
             cwd = row.get("cwd")
             yield ScrapeRow(

@@ -187,6 +187,17 @@ class HermesProvider(Provider):
         # marker is present — same check as :meth:`_is_registered`.
         return self._is_registered()
 
+    def _check_registrations(self) -> tuple[bool, bool]:
+        # Single-read override: hermes wires both hooks inside one
+        # marker-fenced stanza, so one file read tells us about both.
+        # Default Provider._check_registrations would still work but
+        # would route through the JSON-settings batch (which is wrong
+        # for YAML); cleaner to override directly.
+        if not self.settings_path.exists():
+            return False, False
+        present = self._MARKER_BEGIN in self.settings_path.read_text()
+        return present, present
+
     @classmethod
     def _has_unmanaged_hooks_top_level(cls, text: str) -> bool:
         """Return True iff the YAML text contains a top-level

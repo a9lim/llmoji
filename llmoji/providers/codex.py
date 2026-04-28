@@ -43,10 +43,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Provider
+from .base import JsonSettingsProvider
 
 
-class CodexProvider(Provider):
+class CodexProvider(JsonSettingsProvider):
     name = "codex"
     hooks_dir = Path.home() / ".codex" / "hooks"
     settings_path = Path.home() / ".codex" / "hooks.json"
@@ -63,12 +63,7 @@ class CodexProvider(Provider):
         "<INSTRUCTIONS>",
     ]
 
-    # Nudge: same shape + wording as the Claude Code side; verified
-    # byte-identical UserPromptSubmit envelope on the Codex side.
-    nudge_hook_template = "claude_codex_nudge.sh.tmpl"
-    nudge_hook_filename = "kaomoji-nudge.sh"
-    nudge_event = "UserPromptSubmit"
-    nudge_message = (
-        "Please begin your message with a kaomoji that best represents "
-        "how you feel."
-    )
+    # Nudge attrs (template / filename / event / message) inherited
+    # from JsonSettingsProvider — same wording + envelope shared with
+    # Claude Code; verified byte-identical UserPromptSubmit envelope
+    # on the Codex side at codex-rs/hooks/src/events/user_prompt_submit.rs.

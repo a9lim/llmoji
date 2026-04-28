@@ -18,7 +18,7 @@ kaomoji-bearing ``assistant_text`` rows that would force
 
 from __future__ import annotations
 
-from ..taxonomy import KAOMOJI_START_CHARS, extract
+from ..taxonomy import extract
 
 
 def kaomoji_lead_strip(text: str) -> tuple[str, str] | None:
@@ -30,9 +30,15 @@ def kaomoji_lead_strip(text: str) -> tuple[str, str] | None:
     Returns ``None`` when the text doesn't open with a kaomoji that
     passes :func:`~llmoji.taxonomy.extract` (so callers can ``continue``
     cleanly in their per-message loop).
+
+    The leading-glyph filter is enforced inside ``extract`` (via
+    :func:`~llmoji.taxonomy.is_kaomoji_candidate`) — a non-empty
+    ``first_word`` already guarantees ``first_word[0]`` is in
+    :data:`~llmoji.taxonomy.KAOMOJI_START_CHARS`. Single source of
+    truth lives in ``taxonomy``; don't re-check here.
     """
     match = extract(text)
-    if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
+    if not match.first_word:
         return None
     body = text.lstrip()
     if body.startswith(match.first_word):

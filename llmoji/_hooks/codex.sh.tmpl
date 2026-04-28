@@ -33,34 +33,49 @@ ROLLOUT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null |
 [ -z "$ROLLOUT" ] && exit 0
 [ ! -f "$ROLLOUT" ] && exit 0
 
-# Find the start of the current turn — index of the latest
-# turn_context event in the rollout. ``turn_context`` fires once at
-# the start of every turn; the last one is for THIS turn (Stop fires
-# after the turn's task_complete). ``// 0`` falls back to the start
-# of the file if there's no turn_context (shouldn't happen in real
-# rollouts, but keeps the walk well-defined).
-START_IDX=$(jq -s '
-  [to_entries[] | select(.value.type == "turn_context") | .key] | last // 0
-' "$ROLLOUT" 2>/dev/null || printf '0')
+# Single rollout read for the two turn-level facts we need:
+#
+#   * start_idx — index of the latest ``turn_context`` event. That
+#     event fires once at the start of every turn; the last one is
+#     for THIS turn (Stop fires after the turn's task_complete).
+#     The per-message walk below slices forward from this index.
+#     ``// 0`` falls back to the start of the file if there's no
+#     turn_context (shouldn't happen in real rollouts, but keeps the
+#     walk well-defined).
+#   * user_text — latest real user response_item in the current
+#     turn's slice. Codex injects AGENTS.md / <environment_context> /
+#     <INSTRUCTIONS> as user-role response_items at session start
+#     (BEFORE turn_context); slicing from turn_context already drops
+#     them, but the prefix filter remains as defense-in-depth in case
+#     Codex changes the placement.
+#
+# Pre-fix the hook ran two separate rollout slurps (one for
+# start_idx, one for user_text) before the per-message walk did its
+# own third read. One ``-cs`` call computes both inline; the small
+# extractions below are cheap.
+META=$(jq -cs '
+  ([to_entries[] | select(.value.type == "turn_context") | .key] | last // 0) as $s
+  | {
+      start_idx: $s,
+      user_text: (
+        .[$s:]
+        | [ .[]
+            | select(.type == "response_item" and (.payload.role // "") == "user")
+            | (.payload.content
+               | if type == "array"
+                 then (map(select(.type == "input_text") | .text // "") | join("\n"))
+                 else "" end)
+            | select(. != "")
+            | select($INJECTED_PREFIXES_FILTER)
+          ]
+        | last // ""
+      )
+    }
+' "$ROLLOUT" 2>/dev/null)
+[ -z "$META" ] && META='{}'
 
-# Latest real user turn for THIS turn. Codex injects AGENTS.md /
-# <environment_context> / <INSTRUCTIONS> as user-role response_items
-# at session start (BEFORE turn_context); slicing from turn_context
-# already drops them, but the prefix filter remains as defense-in-
-# depth in case Codex changes the placement.
-USER_TEXT=$(jq -rs --argjson s "$START_IDX" '
-  .[$s:]
-  | [ .[]
-      | select(.type == "response_item" and (.payload.role // "") == "user")
-      | (.payload.content
-         | if type == "array"
-           then (map(select(.type == "input_text") | .text // "") | join("\n"))
-           else "" end)
-      | select(. != "")
-      | select($INJECTED_PREFIXES_FILTER)
-    ]
-  | last // ""
-' "$ROLLOUT" 2>/dev/null || printf '')
+START_IDX=$(printf '%s' "$META" | jq -r '.start_idx // 0')
+USER_TEXT=$(printf '%s' "$META" | jq -r '.user_text // ""')
 
 # Walk every event_msg.agent_message in the current turn and emit
 # one journal row per kaomoji-led message. ``payload.message`` is
