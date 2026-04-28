@@ -57,6 +57,6 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 
 ## Receiving end
 
-The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`, with `manifest.json` and `descriptions.jsonl` as loose files) and becomes publicly downloadable. Please review `~/.llmoji/bundle/descriptions.jsonl` before uploading.
+The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`) and becomes publicly downloadable. Please review `~/.llmoji/bundle/descriptions.jsonl` before uploading.
 
 If you upload a bundle and later want it removed from the dataset, please email mx@a9l.im with your submitter id and I'll take down the matching folders.
