@@ -284,20 +284,11 @@ existing cache entries from prior `parse + analyze` runs of an
 export will miss after this normalization (export rows now hash
 without the kaomoji). One-time re-call cost on the next analyze.
 
-Pre-package, the live-hook branch of `mask_kaomoji` fell through
-to `return text` and Haiku got a prompt promising a `[FACE]` that
-wasn't in the body — affected every journal row. The unified
-contract makes that class of bug structurally impossible.
+### KAOMOJI_START_CHARS — single source of truth
 
-### KAOMOJI_START_CHARS sync — RESOLVED via templating
-
-Pre-package, the start-char set lived in five places (Python
-validators in this package, the equivalent in `llmoji_study`, and
-inline `case` patterns in two hand-written shell hooks). Now:
-
-- Python single source: `llmoji.taxonomy.KAOMOJI_START_CHARS`
-- Shell hooks: rendered at `install` time from the `.sh.tmpl` files
-  with `${KAOMOJI_START_CASE}` substituted from the Python set.
+- Python: `llmoji.taxonomy.KAOMOJI_START_CHARS`
+- Shell hooks: `${KAOMOJI_START_CASE}` rendered at install time
+  from the same set.
 - `is_kaomoji_candidate` validates Python-side; the rendered case
   filter handles the shell-side first pass.
 
@@ -390,14 +381,9 @@ Three corruption paths are explicitly defended:
    `SettingsCorruptError` and the user has to fix the file by hand
    before `install` will touch it.
 2. **Malformed JSON in `~/.codex/hooks.json`** — same defense as
-   claude_code, same helper. Codex used to live behind a
-   marker-fenced `[hooks.stop]` stanza in `~/.codex/config.toml`,
-   but the canonical home for codex hook registration is
-   `~/.codex/hooks.json` — Claude-style payload, same shape as
-   claude_code, verified at the `codex_hooks` feature flag in
-   `codex-rs/features` (`Stage::Stable`, `default_enabled: true`).
-   The TOML path warned when both representations were present, so
-   we standardize on the JSON file and reuse the JSON helpers.
+   claude_code, same helper. Codex's `codex_hooks` feature flag is
+   `Stage::Stable` + `default_enabled: true`, payload shape is
+   byte-identical to claude_code's, so we reuse the JSON helpers.
 3. **Existing top-level `hooks:` key in `~/.hermes/config.yaml`** —
    appending another `hooks:` makes a duplicate-key YAML doc that
    silently last-write-wins. `HermesProvider._has_unmanaged_hooks_top_level`
@@ -503,29 +489,6 @@ specifics of that turn through. Mitigations:
 The bundle is the only thing that leaves the machine, and the
 inspection gap (`analyze` prints a per-face preview, `upload`
 re-prompts) is the consent boundary.
-
-### Codex puts the kaomoji on the LAST agent message, Claude on the FIRST
-
-Stated again because the templates have to be exactly right on this:
-
-- Claude Code persists each content block — text, tool_use,
-  thinking — as its OWN top-level transcript entry. The
-  kaomoji-prefixed reply is on the first text-bearing entry of
-  the current turn; the live hook + backfill both scope to
-  events at-or-after the latest real-user message (string
-  content OR text-block array, NOT tool_result) and pick the
-  first text-bearing one.
-- Codex emits each agent message as a separate
-  `event_msg.agent_message` event; the kaomoji-bearing summary
-  lands last as `task_complete.last_agent_message`.
-
-The Codex hook + Codex backfill both key on `last_agent_message`,
-NOT on the first agent_message — flipping that would miss every
-multi-step turn's kaomoji. The Claude Code hook + backfill both
-key on the first text-bearing entry of the current turn — flipping
-to `last(assistant)` would miss every turn that resumes tool work
-after the kaomoji-led reply (the v1.0 pre-fix bug, observed
-silently dropping ~6 hours of journal entries on real sessions).
 
 ### Codex `transcript_path` carries the rollout JSONL
 
