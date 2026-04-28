@@ -142,6 +142,23 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 | `codex`       | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
 | `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
 
+### Hermes with custom hooks
+
+`llmoji install hermes` refuses to edit `~/.hermes/config.yaml` when there's an existing populated `hooks:` block. The empty default `hooks: {}` is fine, the installer replaces that in place. The reason for the refusal is that a sibling top-level `hooks:` key would yield a duplicate-key YAML document, and most parsers silently last-write-wins, which would discard one side or the other depending on the parser. Merging into an existing block safely needs a YAML parser dependency, and the package does not pull one in by design.
+
+The bash hook scripts at `~/.hermes/agent-hooks/post-llm-call.sh` and `~/.hermes/agent-hooks/pre-llm-call.sh` get written before the config edit fails, so after a refused install they're already on disk. Please add two entries under your existing `hooks:` block by hand:
+
+```yaml
+hooks:
+  pre_llm_call:
+    - command: "/Users/<you>/.hermes/agent-hooks/pre-llm-call.sh"
+  post_llm_call:
+    - command: "/Users/<you>/.hermes/agent-hooks/post-llm-call.sh"
+  # your existing hook entries stay below, untouched
+```
+
+`llmoji uninstall hermes` will not remove these manually-added entries (the uninstall path only touches the marker-fenced managed block, which a manual install never creates). Please remove the two `command:` lines by hand if you want to fully back out. The hook script files themselves get unlinked by `uninstall` the normal way.
+
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
 
 ---
