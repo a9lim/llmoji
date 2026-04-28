@@ -8,7 +8,7 @@
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
-Llmoji configures your agent to start each message with a kaomoji. It locally saves them, and provides optional tools to summarize and upload the aggregated meaning per face to contribute to a shared database.
+Llmoji configures your agent to start each message with a kaomoji. It locally saves them, and provides tools to summarize and upload the aggregated meaning per face to contribute to a shared database.
 
 The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is where this data is processed.
 
@@ -18,11 +18,11 @@ There are three main commands:
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: loose files; email: tarball)
 
-`analyze` needs a synthesis backend. The default uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs `$HF_TOKEN`. The email path tarballs the bundle and has you attach it manually.
+`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs `$HF_TOKEN`. The email path tarballs the bundle and has you attach it manually.
 
 ---
 
-## What this is for
+## Purpose
 
 The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) collects kaomoji counts and a single summarized description per face per source model, across many users' coding agents. The companion repo processes those descriptions. After you run `analyze`, you can inspect the files yourself under `~/.llmoji/bundle/` before you choose to `upload`.
 
@@ -48,7 +48,7 @@ llmoji upload --target hf                  # commit to a9lim/llmoji
 llmoji upload --target email               # opens mailto:
 ```
 
-You can pick a different synthesis backend:
+You can pick a different backend for `analyze`:
 
 ```bash
 export OPENAI_API_KEY=...
@@ -59,7 +59,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
   --model llama3.1
 ```
 
-`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus synthesis model id. `llmoji cache clear` wipes it.
+`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus s model id. `llmoji cache clear` wipes it.
 
 ---
 
@@ -91,9 +91,9 @@ Llmoji first registers a `UserPromptSubmit` hook that injects a reminder on ever
 {"ts": "...", "model": "...", "cwd": "...", "kaomoji": "(◕‿◕)", "user_text": "...", "assistant_text": "..."}
 ```
 
-### Synthesis pipeline
+### Analysis
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each entry a model wrote, the chosen synthesizer describes that specific instance. Then, it aggregates the descriptions for each unique kaomoji per model and writes an overall meaning. This summarized output is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each entry a source model wrote, the chosen synthesizer model describes that specific instance. Then, it aggregates the descriptions for each unique kaomoji per model and writes an overall meaning. This summarized output is the only thing that ships in the bundle.
 
 The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates everything in a single `analyze` run, so the descriptions across source models are directly comparable.
 
@@ -142,6 +142,8 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 | `codex`       | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
 | `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
 
+`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
+
 ### Hermes with custom hooks
 
 `llmoji install hermes` refuses to edit `~/.hermes/config.yaml` when there's an existing populated `hooks:` block. The empty default `hooks: {}` is fine, the installer replaces that in place. The reason for the refusal is that a sibling top-level `hooks:` key would yield a duplicate-key YAML document, and most parsers silently last-write-wins, which would discard one side or the other depending on the parser. Merging into an existing block safely needs a YAML parser dependency, and the package does not pull one in by design.
@@ -158,8 +160,6 @@ hooks:
 ```
 
 `llmoji uninstall hermes` will not remove these manually-added entries (the uninstall path only touches the marker-fenced managed block, which a manual install never creates). Please remove the two `command:` lines by hand if you want to fully back out. The hook script files themselves get unlinked by `uninstall` the normal way.
-
-`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
 
 ---
 
