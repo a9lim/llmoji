@@ -39,13 +39,15 @@ A first-class provider is one bash hook template under `llmoji/_hooks/` plus one
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON, TOML, and YAML), please add a new format alongside. The settings writer must go through `_atomic_write_text`.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `_atomic_write_text`.
+
+If the harness has a hook that fires before each turn (Claude Code's `UserPromptSubmit`, Hermes' `pre_llm_call`, Codex's `UserPromptSubmit`), please wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_is_nudge_registered`. The nudge is what keeps the journal dense; without it the model drifts away from leading kaomoji over a session.
 
 Please include in the PR:
 
-- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`).
+- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl` or `hermes_nudge.sh.tmpl`.
 - The `Provider` subclass and its `system_injected_prefixes` list (empty if the harness doesn't inject system-role-as-user-text payloads).
-- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path.
+- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage.
 - A short note on the harness's docs version and where the kaomoji lands in the stop payload.
 
 The journal schema does not change for a new provider.

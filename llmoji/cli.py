@@ -46,6 +46,8 @@ def _cmd_install(args: argparse.Namespace) -> int:
     s = p.status()
     print(f"installed {p.name}.")
     print(f"  hook:     {s.hook_path}")
+    if s.nudge_hook_path is not None:
+        print(f"  nudge:    {s.nudge_hook_path}")
     print(f"  settings: {s.settings_path}")
     print(f"  journal:  {s.journal_path}")
     return 0
@@ -83,6 +85,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         )
         print(f"  {marker} {name:<14} {kw:<14} ({rows}{bytes_})")
         print(f"        hook:    {s.hook_path}")
+        if s.nudge_hook_path is not None:
+            nudge_state = "registered" if s.nudge_installed else "missing"
+            print(f"        nudge:   {s.nudge_hook_path} ({nudge_state})")
         print(f"        journal: {s.journal_path}")
     n_rows, n_bytes = cache_size(paths.cache_per_instance_path())
     print()

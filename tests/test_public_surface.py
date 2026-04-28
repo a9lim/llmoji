@@ -216,21 +216,25 @@ def test_corrupt_settings_refused():
             "corrupt config was modified"
         )
 
-        # Codex: existing [hooks.stop]
+        # Codex: malformed hooks.json (mirrors claude_code; both providers
+        # now route through the JSON helpers and Codex stores its hook
+        # registrations at ~/.codex/hooks.json).
         cx = get_provider("codex")
         cx.hooks_dir = td / "codex" / "hooks"
-        cx.settings_path = td / "codex" / "config.toml"
+        cx.settings_path = td / "codex" / "hooks.json"
         cx.journal_path = td / "codex" / "journal.jsonl"
         cx.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        original = '[hooks.stop]\ncommand = "/user/own/hook.sh"\n'
+        original = "{ also not json"
         cx.settings_path.write_text(original)
         try:
             cx.install()
         except SettingsCorruptError:
             pass
         else:
-            raise AssertionError("codex didn't refuse existing [hooks.stop]")
-        assert cx.settings_path.read_text() == original
+            raise AssertionError("codex didn't refuse corrupt JSON")
+        assert cx.settings_path.read_text() == original, (
+            "corrupt config was modified"
+        )
 
 
 def test_mask_kaomoji_prepends_face_token():
@@ -264,12 +268,34 @@ def test_hook_templates_render_to_valid_bash_substitutions():
     Python Template substitution). string.Template's safe_substitute
     handles this — verify. Also bash -n the rendered output so a
     template syntax error fails CI rather than failing silently
-    inside the user's harness post-install."""
+    inside the user's harness post-install.
+
+    Same checks apply to the secondary nudge templates — providers
+    that opt into a nudge get bash -n'd on the rendered output too,
+    so a quoting regression on ``$NUDGE_MESSAGE_QUOTED`` fails CI
+    rather than landing as a no-op in the user's harness.
+    """
     import shutil
     import subprocess
     import tempfile
     from llmoji.providers import get_provider
     bash = shutil.which("bash")
+
+    def _bash_n(label: str, rendered: str) -> None:
+        if not bash:
+            return
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".sh", delete=False,
+        ) as f:
+            f.write(rendered)
+            tmp = f.name
+        r = subprocess.run(
+            [bash, "-n", tmp], capture_output=True, text=True,
+        )
+        assert r.returncode == 0, (
+            f"{label} failed bash -n: {r.stderr}"
+        )
+
     for name in ("claude_code", "codex", "hermes"):
         p = get_provider(name)
         rendered = p.render_hook()
@@ -285,18 +311,61 @@ def test_hook_templates_render_to_valid_bash_substitutions():
                 f"{name} kept literal {placeholder}; "
                 "did substitution drop the placeholder?"
             )
-        # bash -n syntax check on the rendered output — catches
-        # template-edit regressions that don't show up in pure
-        # placeholder checks.
-        if bash:
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".sh", delete=False,
-            ) as f:
-                f.write(rendered)
-                tmp = f.name
-            r = subprocess.run(
-                [bash, "-n", tmp], capture_output=True, text=True,
+        _bash_n(f"{name} main hook", rendered)
+
+        if p.has_nudge:
+            nudge = p.render_nudge_hook()
+            for placeholder in (
+                "${NUDGE_MESSAGE_QUOTED}", "${LLMOJI_VERSION}",
+            ):
+                assert placeholder not in nudge, (
+                    f"{name} nudge kept literal {placeholder}"
+                )
+            # The shell-quoted nudge message should round-trip
+            # through the bash literal back to itself when sourced.
+            assert p.nudge_message in nudge or all(
+                c not in p.nudge_message for c in "'"
+            ), "nudge message lost in template rendering"
+            _bash_n(f"{name} nudge hook", nudge)
+
+
+def test_nudge_install_uninstall_roundtrip():
+    """Nudge hooks install and uninstall cleanly alongside the main
+    hook — no orphan files, no orphan settings entries. Idempotent
+    re-install is a no-op (same as the main-hook contract).
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import get_provider
+
+    for provider_name in ("claude_code", "codex"):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            p = get_provider(provider_name)
+            assert p.has_nudge, (
+                f"{provider_name} should ship a nudge in v1.0"
             )
-            assert r.returncode == 0, (
-                f"{name} hook failed bash -n: {r.stderr}"
-            )
+            p.hooks_dir = td / provider_name / "hooks"
+            p.settings_path = td / provider_name / "settings.json"
+            p.journal_path = td / provider_name / "journal.jsonl"
+
+            p.install()
+            assert p.hook_path.exists()
+            assert p.nudge_hook_path.exists()
+            s = p.status()
+            assert s.installed
+            assert s.nudge_installed
+            assert s.nudge_hook_path == p.nudge_hook_path
+
+            # Idempotent: install twice should yield the same file.
+            settings_after_first = p.settings_path.read_text()
+            p.install()
+            assert p.settings_path.read_text() == settings_after_first
+
+            p.uninstall()
+            assert not p.hook_path.exists()
+            assert not p.nudge_hook_path.exists()
+            s = p.status()
+            assert not s.installed
+            assert not s.nudge_installed

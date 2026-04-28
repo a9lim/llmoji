@@ -39,7 +39,7 @@ For frequent kaomoji, the per-face summary pools many instances and so abstracts
 - `analyze` prints a per-face preview before declaring done.
 - `upload` re-prompts before committing.
 - The bundle is inspectable in `~/.llmoji/bundle/`
-- The bundle is allowlisted to two files: `tar_bundle` refuses to ship if anything else is in the bundle dir.
+- The bundle is allowlisted to two files. Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
 
 Please review `~/.llmoji/bundle/descriptions.jsonl` before running `upload` if your kaomoji distribution is long-tailed.
 
@@ -51,12 +51,12 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 
 `llmoji analyze` calls the Anthropic API with your `$ANTHROPIC_API_KEY`. The masked-kaomoji prompts and the user/assistant text from your journal are sent to Anthropic for paraphrasing. Please review Anthropic's data handling policy if this matters to you.
 
-`llmoji upload --target hf` uses your `$HF_TOKEN` to commit the bundle tarball to the central dataset. The token is not stored or echoed by llmoji; it's read by `huggingface_hub` from your standard HF credential cache.
+`llmoji upload --target hf` uses your `$HF_TOKEN` to commit the bundle's two loose files to the central dataset in a single atomic commit. The token is not stored or echoed by llmoji; it's read by `huggingface_hub` from your standard HF credential cache.
 
 `llmoji upload --target email` builds a `mailto:` URI with the bundle path printed in the body and asks you to attach the tarball manually.
 
 ## Receiving end
 
-The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>.tar.gz`) and becomes publicly downloadable. Please review `~/.llmoji/bundle/descriptions.jsonl` before uploading.
+The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`, with `manifest.json` and `descriptions.jsonl` as loose files) and becomes publicly downloadable. Please review `~/.llmoji/bundle/descriptions.jsonl` before uploading.
 
-If you upload a bundle and later want it removed from the dataset, please email mx@a9l.im with your submitter id and I'll take down the matching tarballs.
+If you upload a bundle and later want it removed from the dataset, please email mx@a9l.im with your submitter id and I'll take down the matching folders.

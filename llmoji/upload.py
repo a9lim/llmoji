@@ -1,16 +1,22 @@
 """Upload a bundle to one of two targets: HF dataset or email.
 
 Both targets are opt-in and require explicit ``--target`` selection;
-no implicit default. Whichever path the user takes, the bundle is
-tarballed first (atomic, content-stable input).
+no implicit default.
 
 HF target:
-    Uses ``huggingface_hub.HfApi`` to commit a single tarball into a
-    contributor-named subfolder of a public dataset
-    (``a9lim/llmoji`` by default). The submitter's identifier is a
-    16-hex-char salted hash of (a per-machine random token + the
-    package version), persisted at ``~/.llmoji/state.json``. We do
-    NOT collect HF usernames or any account-bound identifier — the
+    Uses ``huggingface_hub.HfApi.upload_folder`` to commit the
+    bundle's loose files into a contributor-named, timestamped
+    subfolder of a public dataset (``a9lim/llmoji`` by default). The
+    final repo layout is
+    ``contributors/<hash>/bundle-<ts>/{manifest.json,descriptions.jsonl}``.
+    Loose files (rather than a tarball) so the HF dataset viewer can
+    auto-load ``descriptions.jsonl`` directly via a
+    ``data_files: contributors/**/descriptions.jsonl`` configs entry
+    on the dataset card. ``upload_folder`` does a single atomic
+    commit so partial uploads can't land. The submitter's identifier
+    is a 32-hex-char salted hash of (a per-machine random token +
+    the package version), persisted at ``~/.llmoji/state.json``. We
+    do NOT collect HF usernames or any account-bound identifier; the
     salted hash is just enough to dedup repeat submissions from the
     same machine.
 
@@ -19,7 +25,8 @@ Email target:
     body and instructions to attach manually. We don't ship SMTP.
     The CLI prints the path and opens the user's mail client via
     ``open`` (macOS) or ``xdg-open`` (Linux); the user attaches the
-    tarball themselves.
+    tarball themselves. Email keeps the tarball-as-archive shape
+    because a single attachment is what an email recipient wants.
 """
 
 from __future__ import annotations
@@ -176,35 +183,60 @@ def upload_hf(
     repo: str = DEFAULT_HF_REPO,
     confirm: bool = True,
 ) -> dict[str, Any]:
-    """Upload the bundle as a tarball under
-    ``<contributor>/bundle-<ts>.tar.gz`` in the chosen HF dataset
-    repo. Returns the submission metadata dict."""
-    tarball = tar_bundle(bundle_dir)
-    contributor = _submitter_id()
-    target_path = f"contributors/{contributor}/{tarball.name}"
+    """Upload the bundle's loose files under
+    ``contributors/<hash>/bundle-<ts>/`` in the chosen HF dataset
+    repo. Returns the submission metadata dict.
 
-    print(f"target: HF dataset {repo} → {target_path}")
-    print(f"local tarball: {tarball} ({tarball.stat().st_size} bytes)")
+    Pre-flight: refuse to upload if anything outside
+    :data:`BUNDLE_ALLOWLIST` is in the bundle dir, mirroring the
+    same check :func:`tar_bundle` does (loud failure beats silent
+    leak). ``upload_folder``'s ``allow_patterns`` is a second line
+    of defense against the same class of bug.
+    """
+    extras = _unexpected_bundle_files(bundle_dir)
+    if extras:
+        joined = ", ".join(p.name for p in extras)
+        raise FileExistsError(
+            f"refusing to upload {bundle_dir} — unexpected file(s) "
+            f"{joined!r} are not in the v1.0 bundle allowlist "
+            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
+            f"`llmoji analyze` (which clears the bundle dir)."
+        )
+    files = _bundle_files(bundle_dir)
+    if not files:
+        raise FileNotFoundError(
+            f"no allowlisted files in {bundle_dir} — run "
+            f"`llmoji analyze` first"
+        )
+
+    contributor = _submitter_id()
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    target_prefix = f"contributors/{contributor}/bundle-{ts}"
+
+    print(f"target: HF dataset {repo} → {target_prefix}/")
+    for f in files:
+        print(f"  {f.name} ({f.stat().st_size} bytes)")
     if confirm and not _confirm("submit this bundle?"):
-        print("aborted; tarball left on disk.")
-        return {"submitted": False, "tarball": str(tarball)}
+        print("aborted.")
+        return {"submitted": False}
 
     from huggingface_hub import HfApi
     api = HfApi()
-    api.upload_file(
-        path_or_fileobj=str(tarball),
-        path_in_repo=target_path,
+    api.upload_folder(
+        folder_path=str(bundle_dir),
+        path_in_repo=target_prefix,
         repo_id=repo,
         repo_type="dataset",
         commit_message=f"llmoji bundle from {contributor}",
+        allow_patterns=list(BUNDLE_ALLOWLIST),
     )
-    print(f"submitted to {repo} as {target_path}.")
+    print(f"submitted to {repo} as {target_prefix}/.")
     return {
         "submitted": True,
-        "tarball": str(tarball),
         "repo": repo,
-        "path_in_repo": target_path,
+        "path_in_repo": target_prefix,
         "contributor": contributor,
+        "files": [f.name for f in files],
     }
 
 

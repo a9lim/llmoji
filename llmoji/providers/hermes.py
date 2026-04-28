@@ -111,6 +111,18 @@ class HermesProvider(Provider):
     }
     system_injected_prefixes: list[str] = []
 
+    # Nudge: pre_llm_call with a bare ``{context: ...}`` shape (per
+    # docs, "the only hook whose return value is used"). Different
+    # template from the Claude/Codex shared one — Hermes wraps no
+    # ``hookSpecificOutput`` envelope.
+    nudge_hook_template = "hermes_nudge.sh.tmpl"
+    nudge_hook_filename = "pre-llm-call.sh"
+    nudge_event = "pre_llm_call"
+    nudge_message = (
+        "Please begin your message with a kaomoji that best represents "
+        "how you feel."
+    )
+
     _MARKER_BEGIN = "# >>> llmoji begin (managed) >>>"
     _MARKER_END = "# <<< llmoji end (managed) <<<"
 
@@ -130,7 +142,7 @@ class HermesProvider(Provider):
             LLMOJI_VERSION=_package_version(),
         )
 
-    # --- install / uninstall override (two hooks, one config block) ---
+    # --- install / uninstall override (three hooks, one config block) ---
 
     def install(self) -> None:
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -141,11 +153,15 @@ class HermesProvider(Provider):
         # Companion hook (subagent_stop)
         self.subagent_hook_path.write_text(self.render_subagent_hook())
         self.subagent_hook_path.chmod(0o755)
+        # Nudge hook (pre_llm_call)
+        if self.has_nudge:
+            self.nudge_hook_path.write_text(self.render_nudge_hook())
+            self.nudge_hook_path.chmod(0o755)
         # Init the child-state file so the main hook's `grep -qFx`
         # never errors on a missing file.
         CHILD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         CHILD_STATE_PATH.touch(exist_ok=True)
-        # Register both in config.yaml
+        # Register all three in config.yaml
         self._register()
 
     def uninstall(self) -> None:
@@ -154,6 +170,8 @@ class HermesProvider(Provider):
             self.hook_path.unlink()
         if self.subagent_hook_path.exists():
             self.subagent_hook_path.unlink()
+        if self.has_nudge and self.nudge_hook_path.exists():
+            self.nudge_hook_path.unlink()
         # Leave the child-state file in place; user can `rm
         # ~/.hermes/.llmoji-children` if they want a clean slate.
 
@@ -162,19 +180,22 @@ class HermesProvider(Provider):
     def _stanza(self) -> str:
         # Hermes shell-hooks YAML shape per docs:
         #   hooks:
+        #     pre_llm_call:
+        #       - command: "<nudge>"
         #     post_llm_call:
-        #       - command: "<path>"
+        #       - command: "<main>"
         #     subagent_stop:
-        #       - command: "<path>"
-        return (
-            f"{self._MARKER_BEGIN}\n"
-            "hooks:\n"
-            "  post_llm_call:\n"
-            f'    - command: "{self.hook_path}"\n'
-            "  subagent_stop:\n"
-            f'    - command: "{self.subagent_hook_path}"\n'
-            f"{self._MARKER_END}\n"
-        )
+        #       - command: "<subagent>"
+        lines = [self._MARKER_BEGIN, "hooks:"]
+        if self.has_nudge:
+            lines.append("  pre_llm_call:")
+            lines.append(f'    - command: "{self.nudge_hook_path}"')
+        lines.append("  post_llm_call:")
+        lines.append(f'    - command: "{self.hook_path}"')
+        lines.append("  subagent_stop:")
+        lines.append(f'    - command: "{self.subagent_hook_path}"')
+        lines.append(self._MARKER_END)
+        return "\n".join(lines) + "\n"
 
     def _register(self) -> None:
         existing = (
@@ -218,6 +239,12 @@ class HermesProvider(Provider):
         if not self.settings_path.exists():
             return False
         return self._MARKER_BEGIN in self.settings_path.read_text()
+
+    def _is_nudge_registered(self) -> bool:
+        # Hermes registers all three hooks atomically inside one
+        # marker-fenced YAML stanza, so the nudge is wired up iff the
+        # marker is present — same check as :meth:`_is_registered`.
+        return self._is_registered()
 
     @staticmethod
     def _has_unmanaged_hooks_top_level(text: str) -> bool:

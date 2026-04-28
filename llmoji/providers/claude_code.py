@@ -42,11 +42,35 @@ class ClaudeCodeProvider(Provider):
         "Base directory for this skill:",
     ]
 
+    # Nudge: shared template with Codex (the UserPromptSubmit envelope
+    # is byte-identical between the two harnesses).
+    nudge_hook_template = "claude_codex_nudge.sh.tmpl"
+    nudge_hook_filename = "kaomoji-nudge.sh"
+    nudge_event = "UserPromptSubmit"
+    nudge_message = (
+        "Please begin your message with a kaomoji that best represents "
+        "how you feel."
+    )
+
     def _register(self) -> None:
         self._register_json_settings(event="Stop")
+        self._register_json_settings(
+            event=self.nudge_event,
+            hook_path=self.nudge_hook_path,
+        )
 
     def _unregister(self) -> None:
         self._unregister_json_settings(event="Stop")
+        self._unregister_json_settings(
+            event=self.nudge_event,
+            hook_path=self.nudge_hook_path,
+        )
 
     def _is_registered(self) -> bool:
         return self._is_registered_json_settings(event="Stop")
+
+    def _is_nudge_registered(self) -> bool:
+        return self._is_registered_json_settings(
+            event=self.nudge_event,
+            hook_path=self.nudge_hook_path,
+        )

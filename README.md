@@ -16,9 +16,9 @@ There are three main commands:
 
 - **`llmoji install <provider>`**: write a `Stop` hook into your harness
 - **`llmoji analyze`**: scrape and aggregate your logs
-- **`llmoji upload --target {hf,email}`**: tarball the bundle and ship it
+- **`llmoji upload --target {hf,email}`**: ship the bundle (HF: loose files via a single atomic commit; email: tarball as one attachment)
 
-`analyze` needs an Anthropic API key in `$ANTHROPIC_API_KEY`; `upload --target hf` needs `$HF_TOKEN`. The email path has you attach the tarball manually.
+`analyze` needs an Anthropic API key in `$ANTHROPIC_API_KEY`; `upload --target hf` needs `$HF_TOKEN`. The email path tarballs the bundle and has you attach it manually.
 
 ---
 
@@ -108,11 +108,13 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 `llmoji install <provider>` writes the hook script and registers it with the harness's settings file, idempotently.
 
-| Provider      | Hook event              | Settings format | Notes                                                        |
-|---------------|-------------------------|-----------------|--------------------------------------------------------------|
-| `claude_code` | Stop                    | JSON            | Stable, in daily use.                                        |
-| `codex`       | Stop                    | TOML            | Stable, in daily use.                                        |
-| `hermes`      | post_llm_call plus subagent_stop | YAML   | Implemented from docs; please see hermes notes below.        |
+| Provider      | Hook events                                       | Settings format | Notes                                                  |
+|---------------|---------------------------------------------------|-----------------|--------------------------------------------------------|
+| `claude_code` | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
+| `codex`       | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
+| `hermes`      | post_llm_call, pre_llm_call, subagent_stop        | YAML            | Implemented from docs; please see hermes notes below.  |
+
+The Stop or `post_llm_call` hook is the journal logger. It reads each completed assistant turn, pulls off the leading kaomoji prefix, and appends a row to the harness's `kaomoji-journal.jsonl`. The UserPromptSubmit or `pre_llm_call` hook is a small "nudge" that injects a reminder on every turn, asking the model to begin its reply with a kaomoji. Both are optional, you can `uninstall` either at any time. The nudge is what makes the corpus large enough to be useful; without it the model drifts away from leading kaomoji over a long session.
 
 `install` does not clobber existing config.
 
