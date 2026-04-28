@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from tqdm import tqdm
+
 from . import paths
 from ._util import atomic_write_text, package_version, sanitize_model_id_for_path
 from .scrape import ScrapeRow
@@ -179,19 +181,6 @@ def _resolve_concurrency(explicit: int | None) -> int:
         return DEFAULT_STAGE_A_CONCURRENCY
 
 
-def _print_stage_progress(
-    stage: str,
-    label: str,
-    n_descs: int | None,
-    dt: float,
-    text: str,
-) -> None:
-    """Shared formatter for Stage-A and Stage-B per-call progress lines."""
-    short = text[:70] + ("..." if len(text) > 70 else "")
-    suffix = f" (n={n_descs})" if n_descs is not None else ""
-    print(f"  stage-{stage} {label}{suffix}  ({dt:.1f}s)  {short}")
-
-
 # ---------------------------------------------------------------------------
 # Stage A — per-instance descriptions
 # ---------------------------------------------------------------------------
@@ -280,30 +269,37 @@ def _stage_a(
 
     if pending_by_key:
         workers = _resolve_concurrency(max_workers)
+        if print_progress:
+            print(
+                f"stage A: {n_cached} cache hit(s), "
+                f"{len(pending_by_key)} dispatch(es) "
+                f"({workers} workers)"
+            )
 
-        def _describe_one(prompt: str) -> tuple[str, float]:
-            t0 = time.monotonic()
-            description = synth.call(prompt)
-            dt = time.monotonic() - t0 if print_progress else 0.0
-            return description, dt
+        def _describe_one(prompt: str) -> str:
+            return synth.call(prompt)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_key = {
                 pool.submit(_describe_one, walk[indices[0]]["prompt"]): key
                 for key, indices in pending_by_key.items()
             }
-            for fut in as_completed(future_to_key):
+            iterator = as_completed(future_to_key)
+            if print_progress:
+                iterator = tqdm(
+                    iterator,
+                    total=len(future_to_key),
+                    desc="stage A",
+                    unit="call",
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+            for fut in iterator:
                 key = future_to_key[fut]
-                description, dt = fut.result()
+                description = fut.result()
                 indices = pending_by_key[key]
                 for i in indices:
                     walk[i]["description"] = description
-                if print_progress:
-                    first = walk[indices[0]]
-                    _print_stage_progress(
-                        "A", f"{first['sm']}/{first['canon']}",
-                        None, dt, description,
-                    )
 
     # Serialize: assemble descs_by_cell + append cache in deterministic
     # walk order. Order matters for Stage B because SYNTHESIZE_PROMPT
@@ -376,30 +372,36 @@ def _stage_b(
         return {}, 0
 
     workers = _resolve_concurrency(max_workers)
+    if print_progress:
+        print(f"stage B: {len(pending)} cell(s) ({workers} workers)")
 
     def _synth_one(
         sm: str, canon: str, descs: list[str],
-    ) -> tuple[str, str, str, int, float]:
-        t0 = time.monotonic()
+    ) -> tuple[str, str, str]:
         line = synthesize_descriptions(
             synth, descs,
             synth_prompt_template=SYNTHESIZE_PROMPT,
         )
-        dt = time.monotonic() - t0 if print_progress else 0.0
-        return sm, canon, line, len(descs), dt
+        return sm, canon, line
 
     out: dict[str, dict[str, str]] = defaultdict(dict)
     n_calls = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_synth_one, sm, c, d) for sm, c, d in pending]
-        for fut in as_completed(futures):
-            sm, canon, line, n_descs, dt = fut.result()
+        iterator = as_completed(futures)
+        if print_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(futures),
+                desc="stage B",
+                unit="cell",
+                dynamic_ncols=True,
+                leave=True,
+            )
+        for fut in iterator:
+            sm, canon, line = fut.result()
             out[sm][canon] = line
             n_calls += 1
-            if print_progress:
-                _print_stage_progress(
-                    "B", f"{sm}/{canon}", n_descs, dt, line,
-                )
     return {sm: dict(per_canon) for sm, per_canon in out.items()}, n_calls
 
 
