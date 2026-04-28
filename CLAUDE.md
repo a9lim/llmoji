@@ -180,8 +180,10 @@ llmoji/
   LICENSE                      # MIT (PEP 639 SPDX)
   CLAUDE.md
   .github/                     # dependabot + PR/issue templates +
-                               # ci.yml (ruff + pytest 3.11–3.13 ×
-                               # ubuntu/macos + wheel-import gate) +
+                               # ci.yml (lint + typecheck + test +
+                               # build/wheel-import gate, 3.12 on
+                               # ubuntu-latest; all four required by
+                               # main branch protection) +
                                # release.yml (tag → PyPI → release)
   examples/                    # inspect_bundle.py (audit script);
                                # openclaw_hook.ts (generic-JSONL example)
@@ -570,6 +572,11 @@ Two coupling points:
 
 - Single venv at `.venv/`, pip not uv. `pip install -e ../llmoji`
   during dev; PyPI install at freeze.
+- `main` is branch-protected: PR-only (no direct pushes, including
+  for admins), all four CI jobs (lint / typecheck / test / build)
+  required green, branch up-to-date with main, conversation
+  resolution required, force-push and deletion blocked. Day-to-day
+  work lands on `dev`; merge to main via PR.
 - `~/.llmoji` is the on-disk root for everything the package
   manages; tests can override via `$LLMOJI_HOME`.
 - Hook templates are bash, syntactically validated by `bash -n` in
