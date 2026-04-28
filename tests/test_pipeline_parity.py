@@ -39,6 +39,16 @@ import pytest
 # (bash stamps now, backfill stamps historical) so it's excluded.
 _PARITY_FIELDS = ("kaomoji", "model", "cwd", "user_text", "assistant_text")
 
+# Hermes-specific: the live hook reads ``cwd`` from the post_llm_call
+# payload (= ``Path.cwd()`` of the agent process at fire time); the
+# backfill side reads from ``~/.hermes/sessions/session_*.json``,
+# which doesn't persist cwd at all (the field simply isn't in the
+# session schema; see ``_save_session_log`` in
+# ``hermes-agent/run_agent.py``). Backfilled rows therefore land with
+# cwd="" by design. The two are divergent on cwd by source design,
+# not bug.
+_HERMES_PARITY_FIELDS = tuple(f for f in _PARITY_FIELDS if f != "cwd")
+
 
 def _require_tools() -> tuple[str, str]:
     bash = shutil.which("bash")
@@ -78,6 +88,8 @@ def _assert_parity(
     bash_rows: list[dict[str, Any]],
     bf_rows: list[dict[str, Any]],
     expect_row: bool,
+    *,
+    fields: tuple[str, ...] = _PARITY_FIELDS,
 ) -> None:
     """Both pipelines must produce identical rows in identical order.
 
@@ -85,6 +97,11 @@ def _assert_parity(
     in the turn) since the multi-message-per-turn fix landed; the
     parity contract is that bash and backfill agree row-for-row on
     parity-critical fields, in chronological order.
+
+    ``fields`` defaults to :data:`_PARITY_FIELDS`. Pass a narrower
+    tuple for providers where one field is divergent by design (e.g.
+    Hermes' ``cwd``: live hook reads from payload, backfill source
+    doesn't carry it — see :data:`_HERMES_PARITY_FIELDS`).
     """
     if not expect_row:
         assert bash_rows == [] and bf_rows == [], (
@@ -100,7 +117,7 @@ def _assert_parity(
         f"  backfill: {bf_rows!r}"
     )
     for i, (b, f) in enumerate(zip(bash_rows, bf_rows)):
-        for k in _PARITY_FIELDS:
+        for k in fields:
             assert b[k] == f[k], (
                 f"{desc} divergence on row {i} field {k!r}:\n"
                 f"  bash:     {b[k]!r}\n"
@@ -871,77 +888,154 @@ def test_codex_multi_message_turn_shapes(
 
 
 # ---------------------------------------------------------------------------
-# Hermes — bash-hook-only smoke test (no Python backfill counterpart)
+# Hermes — live hook + backfill, multi-message-per-turn parity
 # ---------------------------------------------------------------------------
 #
-# Hermes has no transcript replay path, so there's nothing to do parity
-# against. We still want CI to catch regressions in the rendered bash
-# hook itself: feed it a synthetic post_llm_call payload, assert the
-# emitted journal row matches the canonical 6-field schema with the
-# expected fields. Covers the gap CLAUDE.md flags as "docs-confirmed
-# but not real-traffic verified."
+# Hermes' live hook walks ``extra.conversation_history`` and emits one
+# row per kaomoji-led assistant message in the current turn (the slice
+# from the latest user-role message to the end of the array). The
+# backfill side reads ``~/.hermes/sessions/session_*.json`` files and
+# walks the persisted ``messages`` list, chunking on user-role
+# boundaries — same per-turn-slice operation as the hook applied to
+# every turn in the session. The two pipelines must agree row-for-row
+# on parity-critical fields per turn.
 
-# (description, assistant_response, user_message, session_id,
-#  child_state_lines, expect_row, expect_kaomoji)
-_HERMES_CASES: list[tuple[str, str, str, str, list[str], bool, str]] = [
-    ("standard kaomoji", "(◕‿◕) sounds good", "thanks", "sess-1", [], True, "(◕‿◕)"),
-    ("multiline body",   "(｡◕‿◕｡)\n\nfollowed by paragraph.", "hi", "sess-2", [], True, "(｡◕‿◕｡)"),
-    ("subagent dropped",
-     "(◕‿◕) child reply", "child prompt", "child-1", ["child-1"], False, ""),
-    ("non-subagent passes through despite child-state file",
-     "(◕‿◕) parent reply", "parent prompt", "parent-1", ["other-child"], True, "(◕‿◕)"),
-    ("prose only",       "Sure thing.", "test", "sess-3", [], False, ""),
-    ("backslash escape", "(\\*_*) trick", "test", "sess-4", [], False, ""),
-    ("oversize span",
-     "(parenthetical sentence going way past thirty-two characters)",
-     "test", "sess-5", [], False, ""),
+
+def _hermes_payload(
+    *,
+    user_message: str,
+    conversation_history: list[dict[str, Any]],
+    session_id: str = "sess-test",
+    cwd: str = "/test",
+    model: str = "hermes-test",
+) -> dict[str, Any]:
+    """Build a synthetic ``post_llm_call`` stdin payload that mirrors
+    what ``hermes-agent/agent/shell_hooks.py:_serialize_payload``
+    produces. ``cwd`` is top-level (= ``Path.cwd()`` of the agent
+    process at hook fire time); the per-turn fields land under
+    ``extra``."""
+    return {
+        "hook_event_name": "post_llm_call",
+        "tool_name": None,
+        "tool_input": None,
+        "session_id": session_id,
+        "cwd": cwd,
+        "extra": {
+            "user_message": user_message,
+            "assistant_response": (
+                conversation_history[-1].get("content") or ""
+                if conversation_history else ""
+            ),
+            "conversation_history": conversation_history,
+            "model": model,
+            "platform": "cli",
+        },
+    }
+
+
+# (description, assistant blocks for the latest turn, expected_kaomojis)
+#
+# Each case builds a one-turn conversation: a leading user message
+# plus the listed assistant content blocks (each becomes a separate
+# message in conversation_history). Empty-content assistant entries
+# represent tool-only turn steps and are skipped by both pipelines.
+_HERMES_TURN_SHAPE_CASES: list[tuple[str, list[str], list[str]]] = [
+    (
+        "standard single kaomoji-led message",
+        ["(◕‿◕) sounds good"],
+        ["(◕‿◕)"],
+    ),
+    (
+        "multiline body — kaomoji on first line still extracted",
+        ["(｡◕‿◕｡)\n\nfollowed by paragraph."],
+        ["(｡◕‿◕｡)"],
+    ),
+    (
+        "two kaomoji-led messages in one turn — both land",
+        ["(◕‿◕) plan", "(´･ω･`) shipped"],
+        ["(◕‿◕)", "(´･ω･`)"],
+    ),
+    (
+        "five kaomoji-led messages in one turn — every one lands "
+        "(verification-heavy turn shape)",
+        [
+            "(｀・ω・´) plan",
+            "(ง •̀_•́) attack",
+            "(⌐■_■) scaffold",
+            "(｡•̀ᴗ-)✧ research",
+            "(＾▽＾) shipped",
+        ],
+        ["(｀・ω・´)", "(ง •̀_•́)", "(⌐■_■)", "(｡•̀ᴗ-)✧", "(＾▽＾)"],
+    ),
+    (
+        "kaomoji + non-kaomoji + kaomoji — prose middle skipped, "
+        "bookends both land",
+        ["(◕‿◕) plan", "let me check the logs", "(´･ω･`) found it"],
+        ["(◕‿◕)", "(´･ω･`)"],
+    ),
+    (
+        "all-prose turn — zero rows emitted",
+        ["let me check", "found something", "shipping the fix"],
+        [],
+    ),
+    (
+        "prose only single message",
+        ["Sure thing."],
+        [],
+    ),
+    (
+        "backslash escape — rejected by validator",
+        ["(\\*_*) trick"],
+        [],
+    ),
+    (
+        "oversize span — rejected by validator",
+        [
+            "(parenthetical sentence going way past thirty-two characters)",
+        ],
+        [],
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "desc,assistant,user,session_id,child_state,expect_row,expect_kaomoji",
-    _HERMES_CASES,
+    "desc,assistant_blocks,expected_kaomojis",
+    _HERMES_TURN_SHAPE_CASES,
 )
-def test_hermes_hook_emits_canonical_row(
+def test_hermes_hook_and_backfill_agree(
     desc: str,
-    assistant: str,
-    user: str,
-    session_id: str,
-    child_state: list[str],
-    expect_row: bool,
-    expect_kaomoji: str,
+    assistant_blocks: list[str],
+    expected_kaomojis: list[str],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Live hook + backfill must agree on every kaomoji-led assistant
+    message in a Hermes turn — count, order, and content. Live hook
+    walks ``extra.conversation_history`` from the post_llm_call
+    payload; backfill walks the persisted ``messages`` array in the
+    session file. Same per-turn-slice operation, same canonical
+    journal-row output.
+    """
     bash, _ = _require_tools()
 
+    from llmoji.backfill import backfill_hermes
     from llmoji.providers import HermesProvider
 
-    # Hermes hook reads $HOME/.hermes/.llmoji-children for sidechain
-    # filtering — point HOME at the tmp dir so the test doesn't see
-    # the real user's child-state file.
-    fake_home = tmp_path / "home"
-    (fake_home / ".hermes").mkdir(parents=True)
-    if child_state:
-        (fake_home / ".hermes" / ".llmoji-children").write_text(
-            "\n".join(child_state) + "\n"
-        )
-    monkeypatch.setenv("HOME", str(fake_home))
+    user_text = "test prompt"
+    conversation_history = [
+        {"role": "user", "content": user_text},
+    ]
+    for txt in assistant_blocks:
+        conversation_history.append({"role": "assistant", "content": txt})
 
+    # --- Live hook side ---
     hooks_dir = tmp_path / "hooks"
     hook_journal = tmp_path / "hook-journal.jsonl"
     hook = _render_hook(HermesProvider, hook_journal, hooks_dir)
 
-    payload = {
-        "hook_event_name": "post_llm_call",
-        "session_id": session_id,
-        "cwd": "/test",
-        "extra": {
-            "assistant_response": assistant,
-            "user_message": user,
-            "model": "hermes-test",
-        },
-    }
+    payload = _hermes_payload(
+        user_message=user_text,
+        conversation_history=conversation_history,
+    )
     r = subprocess.run(
         [bash, str(hook)],
         input=json.dumps(payload),
@@ -954,21 +1048,151 @@ def test_hermes_hook_emits_canonical_row(
         f"{desc}: hermes hook stdout should be '{{}}' for fail-open "
         f"contract; got {r.stdout!r}"
     )
+    bash_rows = _read_jsonl(hook_journal)
+    for row in bash_rows:
+        row.pop("ts", None)
 
+    # --- Backfill side ---
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    session_file = sessions_dir / "session_20260427_000000_test.json"
+    session_file.write_text(json.dumps({
+        "session_id": "20260427_000000_test",
+        "model": "hermes-test",
+        "platform": "cli",
+        "session_start": "2026-04-27T00:00:00",
+        "last_updated": "2026-04-27T00:00:01",
+        "system_prompt": "",
+        "tools": [],
+        "message_count": len(conversation_history),
+        "messages": conversation_history,
+    }))
+
+    bf_journal = tmp_path / "backfill-journal.jsonl"
+    backfill_hermes(sessions_dir, bf_journal)
+    bf_rows = _read_jsonl(bf_journal)
+    for row in bf_rows:
+        row.pop("ts", None)
+
+    expect_row = bool(expected_kaomojis)
+    _assert_parity(
+        desc, bash_rows, bf_rows, expect_row,
+        fields=_HERMES_PARITY_FIELDS,
+    )
+    if expect_row:
+        bash_kaomojis = [r["kaomoji"] for r in bash_rows]
+        assert bash_kaomojis == expected_kaomojis, (
+            f"{desc}: bash extracted {bash_kaomojis!r}, "
+            f"expected {expected_kaomojis!r}"
+        )
+        # Live hook stamps cwd from the payload; backfill leaves it
+        # blank because the session JSON doesn't persist cwd. Pin
+        # both behaviors so a future change to either side trips the
+        # test rather than silently changing the on-disk row shape.
+        assert all(r["cwd"] == "/test" for r in bash_rows), bash_rows
+        assert all(r["cwd"] == "" for r in bf_rows), bf_rows
+
+
+def test_hermes_hook_resolves_user_text_and_drops_prior_turn(
+    tmp_path: Path,
+) -> None:
+    """Multi-turn conversation history: only the latest turn's
+    assistant messages land in the journal. ``user_text`` resolves
+    to the latest user-role message via ``extra.user_message``;
+    earlier turns are walked off the slice.
+
+    Pre-fix (single-message Hermes hook) this distinction didn't
+    matter because the hook never walked history. Post-fix the
+    walker explicitly slices from the latest user-role index, so
+    cross-turn contamination is the regression to guard against.
+    """
+    bash, _ = _require_tools()
+    from llmoji.providers import HermesProvider
+
+    hooks_dir = tmp_path / "hooks"
+    hook_journal = tmp_path / "hook-journal.jsonl"
+    hook = _render_hook(HermesProvider, hook_journal, hooks_dir)
+
+    conversation_history = [
+        # Turn 1 — kaomoji-led, but should NOT appear in journal (not
+        # the current turn).
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": "(´｡• ω •｡`) reply to first"},
+        # Turn 2 — current. Two kaomoji-led messages, both land.
+        {"role": "user", "content": "second prompt"},
+        {"role": "assistant", "content": "(◕‿◕) starting"},
+        {"role": "assistant", "content": "(＾▽＾) done"},
+    ]
+    payload = _hermes_payload(
+        user_message="second prompt",
+        conversation_history=conversation_history,
+    )
+    r = subprocess.run(
+        [bash, str(hook)], input=json.dumps(payload),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
     rows = _read_jsonl(hook_journal)
-    if not expect_row:
-        assert rows == [], f"{desc}: expected no row, got {rows!r}"
-        return
-    assert len(rows) == 1, f"{desc}: expected 1 row, got {len(rows)}"
-    row = rows[0]
-    assert row["kaomoji"] == expect_kaomoji, (
-        f"{desc}: extracted {row['kaomoji']!r}, expected {expect_kaomoji!r}"
-    )
-    assert row["user_text"] == user
-    assert row["model"] == "hermes-test"
-    assert row["cwd"] == "/test"
-    # assistant_text has the leading kaomoji + surrounding whitespace
-    # stripped per the canonical schema
-    assert not row["assistant_text"].startswith(expect_kaomoji), (
-        f"{desc}: assistant_text leaked the kaomoji prefix"
-    )
+    assert [r["kaomoji"] for r in rows] == ["(◕‿◕)", "(＾▽＾)"], rows
+    assert all(r["user_text"] == "second prompt" for r in rows), rows
+
+
+def test_hermes_backfill_walks_every_turn(tmp_path: Path) -> None:
+    """Backfill must emit rows for EVERY kaomoji-led message across
+    EVERY turn in the session — not just the latest. The session JSON
+    holds the cumulative ``messages`` list, so chunking on user-role
+    boundaries gives one slice per turn; backfill walks each.
+
+    Live hook only sees one turn at a time (the current
+    post_llm_call's slice). Backfill rebuilds the full corpus from
+    the persisted file. Tested separately because the live-hook
+    parity tests above only fire one turn.
+    """
+    from llmoji.backfill import backfill_hermes
+
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    session_file = sessions_dir / "session_20260427_000000_test.json"
+
+    # Three turns: kaomoji / mixed-with-tool / prose. Tool-only
+    # assistant entries (content="" + tool_calls) must be skipped
+    # without contaminating the row count.
+    messages = [
+        # Turn 1: single kaomoji
+        {"role": "user", "content": "turn 1"},
+        {"role": "assistant", "content": "(◕‿◕) one"},
+        # Turn 2: kaomoji-led + tool-only + kaomoji-led (the
+        # multi-emit case the post-fix walker exists for)
+        {"role": "user", "content": "turn 2"},
+        {"role": "assistant", "content": "(´･ω･`) thinking"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "tc1", "function": {
+             "name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "content": "ok", "tool_call_id": "tc1"},
+        {"role": "assistant", "content": "(＾▽＾) shipped"},
+        # Turn 3: prose only — no rows
+        {"role": "user", "content": "turn 3"},
+        {"role": "assistant", "content": "Sure thing."},
+    ]
+    session_file.write_text(json.dumps({
+        "session_id": "20260427_000000_test",
+        "model": "hermes-test",
+        "platform": "cli",
+        "session_start": "2026-04-27T00:00:00",
+        "last_updated": "2026-04-27T00:00:01",
+        "system_prompt": "",
+        "tools": [],
+        "message_count": len(messages),
+        "messages": messages,
+    }))
+
+    bf_journal = tmp_path / "bf.jsonl"
+    n = backfill_hermes(sessions_dir, bf_journal)
+    rows = _read_jsonl(bf_journal)
+    assert n == 3 == len(rows), (n, rows)
+    assert [r["kaomoji"] for r in rows] == [
+        "(◕‿◕)", "(´･ω･`)", "(＾▽＾)",
+    ], rows
+    assert [r["user_text"] for r in rows] == [
+        "turn 1", "turn 2", "turn 2",
+    ], rows

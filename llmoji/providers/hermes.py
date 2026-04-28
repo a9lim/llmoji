@@ -1,7 +1,9 @@
 """Hermes (NousResearch hermes-agent) provider.
 
 Implemented against hermes-agent v0.11.0's
-[Event Hooks docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/).
+[Event Hooks docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/),
+cross-checked against the actual source at
+``hermes-agent/agent/shell_hooks.py`` + ``hermes-agent/run_agent.py``.
 The applicable mechanism is **shell hooks** under
 ``~/.hermes/agent-hooks/`` registered via the ``hooks:`` block in
 ``~/.hermes/config.yaml``. (Hermes also supports gateway hooks at
@@ -14,35 +16,29 @@ fail-open / stdout-JSON contract Claude Code and Codex hooks use.)
 The CLI installs **two** hooks for hermes:
 
   - ``post-llm-call.sh`` — main journal logger; fires after every
-    assistant turn that the agent loop completes.
-  - ``subagent-stop.sh`` — companion sidechain registrar; records
-    delegated child session_ids to a state file the main hook
-    consults to drop subagent traffic.
+    assistant turn that the agent loop completes. Walks
+    ``extra.conversation_history`` and emits one journal row per
+    kaomoji-led assistant message in the current turn (one row per
+    kaomoji-led message, same multi-emit shape Claude Code + Codex
+    produce).
+  - ``pre-llm-call.sh`` — UserPromptSubmit-equivalent nudge that
+    injects the kaomoji-reminder context.
 
 Stdin payload (``post_llm_call``)::
 
     {
       "hook_event_name": "post_llm_call",
-      "session_id": "...",
-      "cwd": "...",
+      "tool_name":       null,
+      "tool_input":      null,
+      "session_id":      "...",
+      "cwd":             "...",          # = Path.cwd() of agent process
       "extra": {
-        "user_message":          "...",
-        "assistant_response":    "...",
+        "user_message":          "...",  # original, pre-injection
+        "assistant_response":    "...",  # final response only
+        "conversation_history":  [...],  # full message list (this is
+                                         # what we walk for multi-emit)
         "model":                 "...",
-        "platform":              "...",
-        "conversation_history":  [...]
-      }
-    }
-
-Stdin payload (``subagent_stop``)::
-
-    {
-      "hook_event_name": "subagent_stop",
-      "session_id": "...",          // child session id
-      "extra": {
-        "parent_session_id": "...",
-        "child_role":        "...",
-        "child_status":      "..."
+        "platform":              "..."
       }
     }
 
@@ -51,23 +47,26 @@ timeout never abort the agent loop (fail-open).
 
 Per-provider quirks (vs claude_code / codex):
 
-  - **Single final-text field per turn** (``extra.assistant_response``);
-    no first/last ambiguity.
-  - **Sidechain handling via session correlation:** a companion
-    ``subagent_stop`` hook writes child session_ids to
-    ``~/.hermes/.llmoji-children``; the main ``post_llm_call`` hook
-    drops matching session_ids.
+  - **One row per kaomoji-led assistant message in the current turn**,
+    walked off ``extra.conversation_history``. Pre-fix the hook only
+    read ``extra.assistant_response`` (the final string) and missed
+    every progress message. The slice from the latest user-role
+    message to the end of the array IS the current turn — every
+    assistant entry in that window is a candidate row.
+  - **Subagent (delegate_task) filtering: not viable on the current
+    payload contract.** ``subagent_stop`` fires from the parent
+    agent's process with the **parent's** ``session_id`` (no child
+    id; verified at ``hermes-agent/tools/delegate_tool.py:2120``),
+    and ``post_llm_call`` doesn't expose ``parent_session_id`` either,
+    so neither side carries enough info to filter children from a
+    shell hook. Subagent post_llm_call events therefore land in the
+    journal under their own session_ids. We'll wire a real filter
+    when an upstream payload change makes one possible. The fix
+    we'd want: either (a) ``subagent_stop`` carries the child id, or
+    (b) ``post_llm_call`` exposes ``parent_session_id`` /
+    ``is_subagent``. Both are upstream concerns.
   - ``extra.user_message`` is delivered pre-injection per the
     documented contract — no system-injected prefixes to filter.
-
-⚠ The hermes path was implemented from docs only. The shell hook
-shape is well-documented and other providers' hooks share the same
-``stdin JSON / stdout JSON / fail-open`` skeleton, but live-traffic
-verification of (a) the exact ``extra.*`` keys delivered by
-``post_llm_call``, (b) the companion subagent_stop event firing as
-expected on real ``delegate_task`` traffic, (c) ``user_message``
-arriving clean, would still be useful before claiming the hermes
-provider is battle-tested.
 
 Hermes settings are YAML — same edit-with-marker-block strategy as
 codex's TOML to avoid pulling in a YAML dependency for what
@@ -76,16 +75,11 @@ amounts to a few lines.
 
 from __future__ import annotations
 
-import importlib.resources
 import re
 from pathlib import Path
-from string import Template
 
-from .._util import atomic_write_text, package_version
+from .._util import atomic_write_text
 from .base import Provider, SettingsCorruptError
-
-CHILD_STATE_PATH = Path.home() / ".hermes" / ".llmoji-children"
-SUBAGENT_STOP_HOOK_FILENAME = "subagent-stop.sh"
 
 
 class HermesProvider(Provider):
@@ -96,10 +90,18 @@ class HermesProvider(Provider):
     hook_template = "hermes.sh.tmpl"
     hook_filename = "post-llm-call.sh"
     main_event = "post_llm_call"
-    # Hermes shell hooks must emit stdout JSON; ``{}`` is no-op. The
-    # validate-partial defaults to ``exit 0`` for claude_code/codex,
-    # which would leave hermes silently violating the contract.
-    skip_action = "echo '{}'; exit 0"
+    # The validate partial is inlined inside a per-message
+    # ``while read`` loop in the rendered hook (one iteration per
+    # assistant message in the current turn); ``continue`` is the
+    # right skip action — a non-kaomoji message skips its row
+    # without bailing the rest of the walk. The base default
+    # ``"exit 0"`` would terminate the loop's subshell on the first
+    # non-kaomoji message, dropping every later kaomoji-led message
+    # in the same turn. Same shape as claude_code / codex now that
+    # hermes is multi-emit too. The closing ``echo '{}'; exit 0``
+    # in the template body satisfies the hermes stdout-JSON contract
+    # after the loop completes.
+    skip_action = "continue"
     system_injected_prefixes: list[str] = []
 
     # Nudge: pre_llm_call with a bare ``{context: ...}`` shape (per
@@ -117,58 +119,6 @@ class HermesProvider(Provider):
     _MARKER_BEGIN = "# >>> llmoji begin (managed) >>>"
     _MARKER_END = "# <<< llmoji end (managed) <<<"
 
-    @property
-    def subagent_hook_path(self) -> Path:
-        return self.hooks_dir / SUBAGENT_STOP_HOOK_FILENAME
-
-    # --- hook rendering ---
-
-    def render_subagent_hook(self) -> str:
-        """Render the companion subagent_stop hook."""
-        template_text = importlib.resources.files("llmoji._hooks").joinpath(
-            "hermes_subagent_stop.sh.tmpl"
-        ).read_text()
-        return Template(template_text).safe_substitute(
-            CHILD_STATE_PATH=str(CHILD_STATE_PATH),
-            LLMOJI_VERSION=package_version(),
-        )
-
-    # --- install / uninstall override (three hooks, one config block) ---
-
-    def install(self) -> None:
-        self.hooks_dir.mkdir(parents=True, exist_ok=True)
-        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
-        # Main hook (post_llm_call)
-        self.hook_path.write_text(self.render_hook())
-        self.hook_path.chmod(0o755)
-        # Companion hook (subagent_stop)
-        self.subagent_hook_path.write_text(self.render_subagent_hook())
-        self.subagent_hook_path.chmod(0o755)
-        # Nudge hook (pre_llm_call)
-        if self.has_nudge:
-            assert self.nudge_hook_path is not None
-            self.nudge_hook_path.write_text(self.render_nudge_hook())
-            self.nudge_hook_path.chmod(0o755)
-        # Init the child-state file so the main hook's `grep -qFx`
-        # never errors on a missing file.
-        CHILD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CHILD_STATE_PATH.touch(exist_ok=True)
-        # Register all three in config.yaml
-        self._register()
-
-    def uninstall(self) -> None:
-        self._unregister()
-        if self.hook_path.exists():
-            self.hook_path.unlink()
-        if self.subagent_hook_path.exists():
-            self.subagent_hook_path.unlink()
-        if self.has_nudge:
-            assert self.nudge_hook_path is not None
-            if self.nudge_hook_path.exists():
-                self.nudge_hook_path.unlink()
-        # Leave the child-state file in place; user can `rm
-        # ~/.hermes/.llmoji-children` if they want a clean slate.
-
     # --- YAML stanza ---
 
     def _stanza(self) -> str:
@@ -178,8 +128,6 @@ class HermesProvider(Provider):
         #       - command: "<nudge>"
         #     post_llm_call:
         #       - command: "<main>"
-        #     subagent_stop:
-        #       - command: "<subagent>"
         lines = [self._MARKER_BEGIN, "hooks:"]
         if self.has_nudge:
             assert self.nudge_hook_path is not None
@@ -187,8 +135,6 @@ class HermesProvider(Provider):
             lines.append(f'    - command: "{self.nudge_hook_path}"')
         lines.append("  post_llm_call:")
         lines.append(f'    - command: "{self.hook_path}"')
-        lines.append("  subagent_stop:")
-        lines.append(f'    - command: "{self.subagent_hook_path}"')
         lines.append(self._MARKER_END)
         return "\n".join(lines) + "\n"
 
@@ -236,7 +182,7 @@ class HermesProvider(Provider):
         return self._MARKER_BEGIN in self.settings_path.read_text()
 
     def _is_nudge_registered(self) -> bool:
-        # Hermes registers all three hooks atomically inside one
+        # Hermes registers both hooks atomically inside one
         # marker-fenced YAML stanza, so the nudge is wired up iff the
         # marker is present — same check as :meth:`_is_registered`.
         return self._is_registered()
