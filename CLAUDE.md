@@ -680,8 +680,10 @@ Two coupling points to keep in mind:
   shared corpus on HF is CC-BY-SA-4.0. `llmoji upload --target hf`
   contributes a bundle under CC-BY-SA-4.0, and the package README's
   License section calls this out so contributors aren't surprised.
-  `llmoji-study` is AGPL-3.0-or-later (the network-use clause
-  matters if anyone ever runs the research pipeline as a service).
+  `llmoji-study` is CC-BY-SA-4.0 — it's a research artifact
+  (writeups, figures, analysis pipelines) rather than a distributed
+  program, and matching the corpus license keeps derivative work
+  under one consistent set of terms.
 
 ## Conventions
 
