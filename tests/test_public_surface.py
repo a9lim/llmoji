@@ -133,11 +133,14 @@ def test_bundle_schema():
                 "(╥﹏╥)": "Tearful frustration.",
             },
             providers_seen=["claude_code-hook", "codex-hook"],
+            journal_counts={"claude_code-hook": 10, "codex-hook": 5},
+            submitter_id="0" * 32,
             notes="test",
         )
         manifest = json.loads((bundle / "manifest.json").read_text())
         for k in (
-            "llmoji_version", "generated_at", "providers_seen",
+            "llmoji_version", "haiku_model_id", "submitter_id",
+            "generated_at", "providers_seen", "journal_counts",
             "total_rows_scraped", "total_kaomoji_unique_canonical",
             "notes",
         ):
@@ -164,7 +167,7 @@ def test_bundle_allowlist_rejects_extras():
     import tempfile
 
     from llmoji.analyze import _write_bundle
-    from llmoji.upload import BUNDLE_ALLOWLIST, tar_bundle
+    from llmoji.upload import BUNDLE_ALLOWLIST, BundleAllowlistError, tar_bundle
 
     with tempfile.TemporaryDirectory() as td:
         bundle = Path(td) / "bundle"
@@ -173,13 +176,15 @@ def test_bundle_allowlist_rejects_extras():
             counts_by_canon={"(◕‿◕)": 1},
             synthesized_by_canon={"(◕‿◕)": "smile"},
             providers_seen=[],
+            journal_counts={},
+            submitter_id="0" * 32,
             notes="",
         )
         # Add an extra — tar should refuse.
         (bundle / "stray.txt").write_text("would leak")
         try:
             tar_bundle(bundle, out_path=Path(td) / "out.tgz")
-        except FileExistsError:
+        except BundleAllowlistError:
             pass
         else:
             raise AssertionError("tar_bundle didn't refuse extras")
@@ -351,12 +356,14 @@ def test_nudge_install_uninstall_roundtrip():
             p.journal_path = td / provider_name / "journal.jsonl"
 
             p.install()
+            nudge_path = p.nudge_hook_path
+            assert nudge_path is not None
             assert p.hook_path.exists()
-            assert p.nudge_hook_path.exists()
+            assert nudge_path.exists()
             s = p.status()
             assert s.installed
             assert s.nudge_installed
-            assert s.nudge_hook_path == p.nudge_hook_path
+            assert s.nudge_hook_path == nudge_path
 
             # Idempotent: install twice should yield the same file.
             settings_after_first = p.settings_path.read_text()
@@ -365,7 +372,7 @@ def test_nudge_install_uninstall_roundtrip():
 
             p.uninstall()
             assert not p.hook_path.exists()
-            assert not p.nudge_hook_path.exists()
+            assert not nudge_path.exists()
             s = p.status()
             assert not s.installed
             assert not s.nudge_installed

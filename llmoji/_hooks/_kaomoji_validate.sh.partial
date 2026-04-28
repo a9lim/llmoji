@@ -1,0 +1,32 @@
+# Shared kaomoji validator. Substituted into every provider's main
+# hook by ``Provider.render_hook`` so the validation logic lives in
+# one place.
+#
+# Inputs:
+#   $ASSISTANT_TEXT    the candidate assistant message text
+# Substituted by Python at render time:
+#   ${KAOMOJI_START_CASE}   bash case-glob built from
+#                           llmoji.taxonomy.KAOMOJI_START_CHARS
+#   ${SKIP_ACTION}          per-provider statement that gracefully
+#                           bails out of the hook (e.g. ``exit 0`` or
+#                           ``echo '{}'; exit 0`` for hermes)
+# Outputs:
+#   $KAOMOJI           the validated leading prefix (only valid when
+#                      the script reaches the end of this partial)
+#
+# Mirrors llmoji.taxonomy.is_kaomoji_candidate: ≥2 bytes, ≤32 bytes,
+# first char in KAOMOJI_START_CHARS, no ASCII backslash. The bracket
+# balance check the Python validator does is left to consumers (the
+# Python-side iter_journal validator runs again on read).
+FIRST_LINE=$(printf '%s' "$ASSISTANT_TEXT" | awk 'NF{print; exit}')
+KAOMOJI=$(printf '%s' "$FIRST_LINE" | sed -E -e 's/^[[:space:]]+//' -e 's/[A-Za-z].*$//' -e 's/[[:space:]]+$//')
+if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ] || [ "${#KAOMOJI}" -gt 32 ]; then
+  ${SKIP_ACTION}
+fi
+case "$KAOMOJI" in
+  $KAOMOJI_START_CASE) ;;
+  *) ${SKIP_ACTION} ;;
+esac
+case "$KAOMOJI" in
+  *\\*) ${SKIP_ACTION} ;;
+esac

@@ -19,8 +19,10 @@
 #
 # Sidechain handling: a companion subagent_stop hook (installed
 # alongside this one) writes child session_ids to
-# $CHILD_STATE_PATH. We drop matching session_ids here so subagent
-# turns don't pollute the journal.
+# ~/.hermes/.llmoji-children. We drop matching session_ids here so
+# subagent turns don't pollute the journal.
+#
+# Hermes hook return contract: stdout JSON, {} is no-op, fail-open.
 #
 # Consumed by `llmoji analyze` via llmoji.sources.journal.
 set -u
@@ -49,51 +51,9 @@ if [ -n "$SESSION_ID" ] && [ -f "$CHILD_STATE" ]; then
   fi
 fi
 
-# Kaomoji prefix: same pipeline as the other providers' hooks.
-FIRST_LINE=$(printf '%s' "$ASSISTANT_TEXT" | awk 'NF{print; exit}')
-KAOMOJI=$(printf '%s' "$FIRST_LINE" \
-  | sed -E 's/^[[:space:]]+//' \
-  | sed -E 's/[A-Za-z].*$//' \
-  | sed -E 's/[[:space:]]+$//')
-if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ]; then
-  echo '{}'
-  exit 0
-fi
-case "$KAOMOJI" in
-  $KAOMOJI_START_CASE) ;;
-  *) echo '{}'; exit 0 ;;
-esac
-case "$KAOMOJI" in
-  *\\*) echo '{}'; exit 0 ;;
-esac
-if [ "${#KAOMOJI}" -gt 32 ]; then
-  echo '{}'
-  exit 0
-fi
+${KAOMOJI_VALIDATE}
 
-JOURNAL="$JOURNAL_PATH"
-mkdir -p "$(dirname "$JOURNAL")"
+${JOURNAL_WRITE}
 
-jq -nc \
-  --arg ts             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg model          "$MODEL" \
-  --arg cwd            "$CWD" \
-  --arg kaomoji        "$KAOMOJI" \
-  --arg user_text      "$USER_TEXT" \
-  --arg assistant_text "$ASSISTANT_TEXT" \
-  '{
-    ts:             $ts,
-    model:          $model,
-    cwd:            $cwd,
-    kaomoji:        $kaomoji,
-    user_text:      $user_text,
-    assistant_text: ($assistant_text
-                     | sub("^\\s+"; "")
-                     | ltrimstr($kaomoji)
-                     | sub("^\\s+"; ""))
-  }' \
-  >> "$JOURNAL" 2>/dev/null || true
-
-# Hermes hook return contract: stdout JSON, {} is no-op, fail-open.
 echo '{}'
 exit 0

@@ -31,13 +31,14 @@ import json
 import os
 import random
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 from . import paths
+from ._util import package_version
 from .haiku import (
     append_cache,
     cache_key,
@@ -86,17 +87,20 @@ class AnalyzeResult:
 
 def _bucket_by_canonical(
     rows: Iterable[ScrapeRow],
-) -> tuple[dict[str, list[ScrapeRow]], list[str]]:
-    """Group rows by canonical kaomoji. Returns (buckets, providers_seen)."""
+) -> tuple[dict[str, list[ScrapeRow]], list[str], dict[str, int]]:
+    """Group rows by canonical kaomoji.
+
+    Returns (buckets, providers_seen_sorted, journal_counts_by_source).
+    """
     buckets: dict[str, list[ScrapeRow]] = defaultdict(list)
-    providers: set[str] = set()
+    counts: Counter[str] = Counter()
     for r in rows:
+        counts[r.source] += 1
         canon = canonicalize_kaomoji(r.first_word)
         if not canon:
             continue
         buckets[canon].append(r)
-        providers.add(r.source)
-    return dict(buckets), sorted(providers)
+    return dict(buckets), sorted(counts), dict(counts)
 
 
 def _sample(
@@ -126,6 +130,15 @@ def _resolve_concurrency(explicit: int | None) -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_STAGE_A_CONCURRENCY
+
+
+def _print_stage_progress(
+    stage: str, canon: str, n_descs: int | None, dt: float, text: str,
+) -> None:
+    """Shared formatter for Stage-A and Stage-B per-call progress lines."""
+    short = text[:70] + ("..." if len(text) > 70 else "")
+    suffix = f" (n={n_descs})" if n_descs is not None else ""
+    print(f"  stage-{stage} {canon}{suffix}  ({dt:.1f}s)  {short}")
 
 
 def _stage_a(
@@ -181,7 +194,8 @@ def _stage_a(
     def _describe_one(canon: str, key: str, prompt: str) -> tuple[str, str, str, float]:
         t0 = time.monotonic()
         description = call_haiku(client, prompt, model_id=HAIKU_MODEL_ID)
-        return canon, key, description, time.monotonic() - t0
+        dt = time.monotonic() - t0 if print_progress else 0.0
+        return canon, key, description, dt
 
     n_calls = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -199,8 +213,7 @@ def _stage_a(
             descs_by_canon[canon].append(description)
             n_calls += 1
             if print_progress:
-                short = description[:70] + ("..." if len(description) > 70 else "")
-                print(f"  stage-A {canon}  ({dt:.1f}s)  {short}")
+                _print_stage_progress("A", canon, None, dt, description)
 
     return dict(descs_by_canon), n_calls, n_cached
 
@@ -221,7 +234,7 @@ def _stage_b(
         descs = descs_by_canon[canon]
         if not descs:
             continue
-        t0 = time.time()
+        t0 = time.monotonic()
         synth = synthesize_descriptions(
             client, descs,
             model_id=HAIKU_MODEL_ID,
@@ -229,10 +242,10 @@ def _stage_b(
         )
         out[canon] = synth
         n_calls += 1
-        dt = time.time() - t0
         if print_progress:
-            short = synth[:70] + ("..." if len(synth) > 70 else "")
-            print(f"  stage-B {canon} (n={len(descs)})  ({dt:.1f}s)  {short}")
+            _print_stage_progress(
+                "B", canon, len(descs), time.monotonic() - t0, synth,
+            )
     return out, n_calls
 
 
@@ -242,6 +255,8 @@ def _write_bundle(
     counts_by_canon: dict[str, int],
     synthesized_by_canon: dict[str, str],
     providers_seen: list[str],
+    journal_counts: dict[str, int],
+    submitter_id: str,
     notes: str,
 ) -> None:
     """Write manifest.json + descriptions.jsonl. Loose-files layout
@@ -254,7 +269,6 @@ def _write_bundle(
     that's about to feed `upload`. The two-file schema is the v1.0
     frozen surface (see :data:`llmoji.upload.BUNDLE_ALLOWLIST`).
     """
-    from .providers.base import _package_version
     bundle_dir.mkdir(parents=True, exist_ok=True)
     # Clear loose files in the bundle dir before writing — guarantees
     # the post-`analyze` state is exactly the two-file schema with no
@@ -266,9 +280,12 @@ def _write_bundle(
             p.unlink()
 
     manifest = {
-        "llmoji_version": _package_version(),
+        "llmoji_version": package_version(),
+        "haiku_model_id": HAIKU_MODEL_ID,
+        "submitter_id": submitter_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "providers_seen": providers_seen,
+        "journal_counts": journal_counts,
         "total_rows_scraped": int(sum(counts_by_canon.values())),
         "total_kaomoji_unique_canonical": len(counts_by_canon),
         "notes": notes,
@@ -335,7 +352,7 @@ def run_analyze(
     cache_path = paths.cache_per_instance_path()
 
     rows_list = list(rows)
-    buckets, providers_seen = _bucket_by_canonical(rows_list)
+    buckets, providers_seen, journal_counts = _bucket_by_canonical(rows_list)
     counts_by_canon = {canon: len(rs) for canon, rs in buckets.items()}
 
     if print_progress:
@@ -352,11 +369,17 @@ def run_analyze(
         client, descs_by_canon, print_progress=print_progress,
     )
 
+    # Lazy import — upload is the only place that touches state.json,
+    # but we want the submitter id stamped into the manifest so the
+    # bundle the user inspects matches what would land on HF.
+    from .upload import submitter_id as _submitter_id
     _write_bundle(
         bundle_dir,
         counts_by_canon=counts_by_canon,
         synthesized_by_canon=synthesized_by_canon,
         providers_seen=providers_seen,
+        journal_counts=journal_counts,
+        submitter_id=_submitter_id(),
         notes=notes,
     )
     if print_progress:

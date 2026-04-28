@@ -7,12 +7,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Any, Literal
+from typing import Any
 
+from .._util import package_version, write_json
 from ..taxonomy import KAOMOJI_START_CHARS
-
-KaomojiPosition = Literal["first", "last", "single"]
-SidechainStrategy = Literal["none", "field_flag", "session_correlation"]
 
 
 @dataclass
@@ -64,10 +62,7 @@ def render_injected_prefixes_filter(prefixes: list[str]) -> str:
     payloads.
 
     Each prefix becomes one ``startswith($p)`` test ANDed with NOT.
-    Empty input → empty filter (no-op append in the jq pipeline).
-
-    The output is meant to be interpolated into the templates'
-    ``USER_TEXT`` jq expression position.
+    Empty input → ``true`` (no-op append in the jq pipeline).
     """
     if not prefixes:
         return "true"
@@ -80,48 +75,41 @@ def render_injected_prefixes_filter(prefixes: list[str]) -> str:
     return " and ".join(clauses)
 
 
+def _read_partial(name: str) -> str:
+    """Load a shared bash partial from ``llmoji._hooks/`` (e.g. the
+    kaomoji-validate / journal-write fragments shared across every
+    provider's main hook)."""
+    return importlib.resources.files("llmoji._hooks").joinpath(name).read_text()
+
+
 class Provider:
     """Base class. Subclass for each first-class harness.
 
-    Subclasses fill in:
-
-      - :attr:`name` — short identifier (``"claude_code"``).
-      - :attr:`hooks_dir` — where the harness expects its hook
-        scripts (``~/.claude/hooks``).
-      - :attr:`settings_path` — the harness's settings file.
-      - :attr:`settings_format` — ``"json"`` or ``"yaml"`` for the
-        register/unregister logic.
-      - :attr:`journal_path` — where the live hook appends rows.
-      - :attr:`hook_template` — filename under
-        :mod:`llmoji._hooks` (resolved via importlib.resources).
-      - :attr:`hook_filename` — what to call the rendered hook on
-        disk (the harness's expected filename, e.g.
-        ``kaomoji-log.sh``).
-      - :attr:`kaomoji_position`, :attr:`sidechain_strategy`,
-        :attr:`sidechain_config`, :attr:`system_injected_prefixes`
-        — shape parameters that drive template rendering and (for
-        sidechain_strategy) extra hook logic.
-      - :meth:`_register` / :meth:`_unregister` — settings-file
-        edits to point the harness at the rendered hook. JSON
-        providers can use :meth:`_register_json_settings` /
-        :meth:`_unregister_json_settings` helpers.
+    Subclasses fill in the small set of attrs that drive
+    :meth:`render_hook` substitution, plus a ``main_event`` hint and
+    optional nudge attrs. The default :meth:`_register` /
+    :meth:`_unregister` / ``_is_registered`` / ``_is_nudge_registered``
+    use the shared JSON-settings helpers; YAML providers override.
     """
 
     name: str = ""
     hooks_dir: Path = Path()
     settings_path: Path = Path()
-    settings_format: Literal["json", "yaml"] = "json"
     journal_path: Path = Path()
     hook_template: str = ""
-    hook_filename: str = ""
-    kaomoji_position: KaomojiPosition = "first"
-    sidechain_strategy: SidechainStrategy = "none"
+    hook_filename: str = "kaomoji-log.sh"
+    # The harness event that the main journal-logger hook fires on.
+    # JSON-settings providers (claude_code, codex) register their main
+    # hook against this event via :meth:`_register_json_settings`.
+    main_event: str = "Stop"
+    # Bash skip action used by the kaomoji-validate partial: what to
+    # do when the leading prefix isn't a kaomoji. claude_code/codex
+    # just ``exit 0``; hermes needs to emit ``{}`` first per its
+    # stdout-JSON contract.
+    skip_action: str = "exit 0"
     # Defaults are read but not mutated in-place; subclasses replace
-    # the whole attr with their own class-level dict/list. The
-    # ``type: ignore`` shuts up pyright's mutable-default warning —
-    # we accept the footgun in exchange for not requiring subclasses
-    # to redeclare the field shape.
-    sidechain_config: dict[str, str] = {}  # type: ignore[assignment]
+    # the whole attr with their own class-level list. The
+    # ``type: ignore`` shuts up pyright's mutable-default warning.
     system_injected_prefixes: list[str] = []  # type: ignore[assignment]
 
     # --- nudge hook (optional secondary hook) ---
@@ -133,9 +121,6 @@ class Provider:
     # Context`` envelope; for Hermes it's ``pre_llm_call`` with a
     # bare ``{context: ...}`` shape. Each provider supplies its own
     # template so the response shape stays correct on either side.
-    #
-    # Provider opts in by setting all four attrs. ``has_nudge`` is
-    # the canonical "is this provider configured for a nudge?" check.
     nudge_hook_template: str = ""
     nudge_hook_filename: str = ""
     nudge_event: str = ""
@@ -148,10 +133,11 @@ class Provider:
         return self.hooks_dir / self.hook_filename
 
     @property
-    def nudge_hook_path(self) -> Path:
-        """Path the rendered nudge hook lands at on disk. Only
-        meaningful when :attr:`has_nudge` is True; readers should
-        guard with that property first."""
+    def nudge_hook_path(self) -> Path | None:
+        """Path the rendered nudge hook lands at on disk, or ``None``
+        if the provider doesn't ship a nudge."""
+        if not self.has_nudge:
+            return None
         return self.hooks_dir / self.nudge_hook_filename
 
     @property
@@ -165,22 +151,37 @@ class Provider:
     def render_hook(self) -> str:
         """Read the bash template from package data and substitute the
         provider-specific placeholders. Returns the rendered hook as a
-        string."""
-        template_text = importlib.resources.files("llmoji._hooks").joinpath(
-            self.hook_template
-        ).read_text()
+        string.
+
+        The shared ``${KAOMOJI_VALIDATE}`` and ``${JOURNAL_WRITE}``
+        partials live as their own files under ``llmoji._hooks/`` so
+        every provider's main hook reuses the same validator / writer
+        without duplicating ~50 lines of bash three times. Each
+        partial is pre-rendered with its own placeholder values
+        before being inlined — ``string.Template.safe_substitute``
+        does only one pass, so partials' own ``${...}`` references
+        wouldn't survive a second-stage substitution.
+        """
+        template_text = _read_partial(self.hook_template)
+        validate_partial = _read_partial("_kaomoji_validate.sh.partial")
+        journal_partial = _read_partial("_journal_write.sh.partial")
+        journal_path = str(self.journal_path)
+        kaomoji_validate = Template(validate_partial).safe_substitute(
+            KAOMOJI_START_CASE=render_kaomoji_start_chars_case(),
+            SKIP_ACTION=self.skip_action,
+        )
+        journal_write = Template(journal_partial).safe_substitute(
+            JOURNAL_PATH=journal_path,
+        )
         injected_prefixes_filter = render_injected_prefixes_filter(
             self.system_injected_prefixes
         )
-        injected_prefixes_repr = ", ".join(
-            f'"{_shell_quote(p)}"' for p in self.system_injected_prefixes
-        )
         return Template(template_text).safe_substitute(
-            JOURNAL_PATH=str(self.journal_path),
-            KAOMOJI_START_CASE=render_kaomoji_start_chars_case(),
+            JOURNAL_PATH=journal_path,
+            KAOMOJI_VALIDATE=kaomoji_validate,
+            JOURNAL_WRITE=journal_write,
             INJECTED_PREFIXES_FILTER=injected_prefixes_filter,
-            INJECTED_PREFIXES_LIST=injected_prefixes_repr,
-            LLMOJI_VERSION=_package_version(),
+            LLMOJI_VERSION=package_version(),
         )
 
     def render_nudge_hook(self) -> str:
@@ -189,9 +190,7 @@ class Provider:
         for a nudge — callers should guard with :attr:`has_nudge`."""
         if not self.has_nudge:
             raise RuntimeError(f"{self.name} has no nudge configured")
-        template_text = importlib.resources.files("llmoji._hooks").joinpath(
-            self.nudge_hook_template
-        ).read_text()
+        template_text = _read_partial(self.nudge_hook_template)
         return Template(template_text).safe_substitute(
             # Wrap the message as a bash single-quoted literal —
             # ``_shell_quote`` escapes embedded single quotes via the
@@ -199,7 +198,7 @@ class Provider:
             # here so templates can write ``MSG=$NUDGE_MESSAGE_QUOTED``
             # without worrying about quoting inside the template body.
             NUDGE_MESSAGE_QUOTED=f"'{_shell_quote(self.nudge_message)}'",
-            LLMOJI_VERSION=_package_version(),
+            LLMOJI_VERSION=package_version(),
         )
 
     def install(self) -> None:
@@ -208,15 +207,15 @@ class Provider:
 
         If the provider has a nudge configured (:attr:`has_nudge`),
         the nudge hook is written + registered alongside the main
-        hook in a single ``_register`` call — subclasses are
-        responsible for registering both events when they implement
-        :meth:`_register`.
+        hook. The default :meth:`_register` registers both in a single
+        atomic settings-file write.
         """
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.hook_path.write_text(self.render_hook())
         self.hook_path.chmod(0o755)
         if self.has_nudge:
+            assert self.nudge_hook_path is not None
             self.nudge_hook_path.write_text(self.render_nudge_hook())
             self.nudge_hook_path.chmod(0o755)
         self._register()
@@ -228,12 +227,15 @@ class Provider:
         self._unregister()
         if self.hook_path.exists():
             self.hook_path.unlink()
-        if self.has_nudge and self.nudge_hook_path.exists():
-            self.nudge_hook_path.unlink()
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            if self.nudge_hook_path.exists():
+                self.nudge_hook_path.unlink()
 
     def status(self) -> ProviderStatus:
         main_installed = self.hook_path.exists() and self._is_registered()
         if self.has_nudge:
+            assert self.nudge_hook_path is not None
             nudge_hook_path: Path | None = self.nudge_hook_path
             nudge_installed = (
                 self.nudge_hook_path.exists()
@@ -267,60 +269,61 @@ class Provider:
         )
 
     # --- subclass hooks ---
+    #
+    # Default behavior: register/unregister/check via the JSON-settings
+    # helpers, against ``self.main_event`` for the main hook and
+    # ``self.nudge_event`` for the nudge. Subclasses with a YAML
+    # settings file (hermes) override the four ``_register``-family
+    # methods entirely.
 
     def _register(self) -> None:
-        """Edit ``settings_path`` so the harness knows about the hook.
-        Subclasses implement (typically by calling
-        :meth:`_register_json_settings` for JSON-shaped harnesses)."""
-        raise NotImplementedError
+        edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            edits.append((self.nudge_event, self.nudge_hook_path))
+        self._register_json_settings_batch(edits)
 
     def _unregister(self) -> None:
-        """Inverse of :meth:`_register`. Idempotent."""
-        raise NotImplementedError
+        edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            edits.append((self.nudge_event, self.nudge_hook_path))
+        self._unregister_json_settings_batch(edits)
 
     def _is_registered(self) -> bool:
-        """Cheap check used by :meth:`status` — returns True if the
-        provider's main (journal-logger) hook is wired up in settings."""
-        raise NotImplementedError
+        return self._is_registered_json_settings(
+            event=self.main_event, hook_path=self.hook_path,
+        )
 
     def _is_nudge_registered(self) -> bool:
-        """Cheap check used by :meth:`status` — returns True if the
-        provider's nudge hook is wired up in settings.
-
-        Default returns False. Providers that opt into a nudge MUST
-        override (typically by calling :meth:`_is_registered_json_settings`
-        with ``hook_path=self.nudge_hook_path`` and ``event=self.nudge_event``,
-        or by checking the YAML stanza in the hermes case)."""
-        return False
+        if not self.has_nudge:
+            return False
+        assert self.nudge_hook_path is not None
+        return self._is_registered_json_settings(
+            event=self.nudge_event, hook_path=self.nudge_hook_path,
+        )
 
     # --- helpers for JSON-format settings (Claude Code, Codex) ---
 
-    def _register_json_settings(
-        self,
-        *,
-        event: str,
-        hook_path: Path | None = None,
-        matcher_predicate: dict[str, Any] | None = None,
+    def _register_json_settings_batch(
+        self, edits: list[tuple[str, Path]],
     ) -> None:
-        """Append the hook to a JSON settings file under ``hooks[<event>]``.
+        """Append one or more (event, hook_path) entries to a JSON
+        settings file under ``hooks[<event>]`` in a single atomic
+        read-modify-write cycle.
 
-        The shape Claude Code (and Codex's ``~/.codex/hooks.json``)
-        expects:
+        Shape Claude Code / ``~/.codex/hooks.json`` expect:
         ``{"hooks": {"<Event>": [{"hooks": [{"type": "command",
         "command": "<path>"}]}]}}``.
-
-        ``hook_path`` defaults to ``self.hook_path`` (the main
-        journal-logger). Pass ``self.nudge_hook_path`` to register the
-        secondary nudge hook on a different event in the same file.
 
         Idempotent — re-registering the same hook is a no-op.
 
         Refuses to mutate when the existing settings file is present
         but unparseable (loud failure beats silently wiping a
-        corrupt-but-recoverable config). Same for non-dict payloads
-        — JSON ``[]`` / ``"string"`` / etc.
+        corrupt-but-recoverable config). Same for non-dict payloads.
         """
-        cmd = str(hook_path if hook_path is not None else self.hook_path)
+        if not edits:
+            return
         cfg = _load_json_strict(self.settings_path)
         hooks_field = cfg.get("hooks")
         if hooks_field is not None and not isinstance(hooks_field, dict):
@@ -330,31 +333,36 @@ class Provider:
                 f"not an object",
             )
         hooks = cfg.setdefault("hooks", {})
-        bucket_field = hooks.get(event)
-        if bucket_field is not None and not isinstance(bucket_field, list):
-            raise SettingsCorruptError(
-                self.settings_path,
-                f"existing hooks[{event!r}] is "
-                f"{type(bucket_field).__name__}, not an array",
-            )
-        bucket = hooks.setdefault(event, [])
-        for entry in bucket:
-            if not isinstance(entry, dict):
+        changed = False
+        for event, hook_path in edits:
+            cmd = str(hook_path)
+            bucket_field = hooks.get(event)
+            if bucket_field is not None and not isinstance(bucket_field, list):
+                raise SettingsCorruptError(
+                    self.settings_path,
+                    f"existing hooks[{event!r}] is "
+                    f"{type(bucket_field).__name__}, not an array",
+                )
+            bucket = hooks.setdefault(event, [])
+            already = False
+            for entry in bucket:
+                if not isinstance(entry, dict):
+                    continue
+                for h in entry.get("hooks", []) or []:
+                    if isinstance(h, dict) and h.get("command") == cmd:
+                        already = True
+                        break
+                if already:
+                    break
+            if already:
                 continue
-            for h in entry.get("hooks", []) or []:
-                if isinstance(h, dict) and h.get("command") == cmd:
-                    return  # already registered
-        new_entry: dict[str, Any] = {"hooks": [{"type": "command", "command": cmd}]}
-        if matcher_predicate is not None:
-            new_entry["matcher"] = matcher_predicate
-        bucket.append(new_entry)
-        _write_json(self.settings_path, cfg)
+            bucket.append({"hooks": [{"type": "command", "command": cmd}]})
+            changed = True
+        if changed:
+            write_json(self.settings_path, cfg)
 
-    def _unregister_json_settings(
-        self,
-        *,
-        event: str,
-        hook_path: Path | None = None,
+    def _unregister_json_settings_batch(
+        self, edits: list[tuple[str, Path]],
     ) -> None:
         if not self.settings_path.exists():
             return
@@ -370,36 +378,43 @@ class Provider:
         hooks = cfg.get("hooks")
         if not isinstance(hooks, dict):
             return
-        bucket = hooks.get(event)
-        if not isinstance(bucket, list):
-            return
-        cmd = str(hook_path if hook_path is not None else self.hook_path)
-        kept = []
-        for entry in bucket:
-            if not isinstance(entry, dict):
-                kept.append(entry)
+        changed = False
+        for event, hook_path in edits:
+            bucket = hooks.get(event)
+            if not isinstance(bucket, list):
                 continue
-            inner = [
-                h for h in (entry.get("hooks") or [])
-                if not (isinstance(h, dict) and h.get("command") == cmd)
-            ]
-            if inner:
-                kept.append({**entry, "hooks": inner})
-        if kept:
-            hooks[event] = kept
-        else:
-            hooks.pop(event, None)
+            cmd = str(hook_path)
+            kept = []
+            for entry in bucket:
+                if not isinstance(entry, dict):
+                    kept.append(entry)
+                    continue
+                inner = [
+                    h for h in (entry.get("hooks") or [])
+                    if not (isinstance(h, dict) and h.get("command") == cmd)
+                ]
+                if len(inner) != len(entry.get("hooks") or []):
+                    changed = True
+                if inner:
+                    kept.append({**entry, "hooks": inner})
+            if len(kept) != len(bucket):
+                changed = True
+            if kept:
+                hooks[event] = kept
+            else:
+                hooks.pop(event, None)
         if hooks:
             cfg["hooks"] = hooks
         else:
             cfg.pop("hooks", None)
-        _write_json(self.settings_path, cfg)
+        if changed:
+            write_json(self.settings_path, cfg)
 
     def _is_registered_json_settings(
         self,
         *,
         event: str,
-        hook_path: Path | None = None,
+        hook_path: Path,
     ) -> bool:
         if not self.settings_path.exists():
             return False
@@ -413,7 +428,7 @@ class Provider:
         bucket = hooks.get(event)
         if not isinstance(bucket, list):
             return False
-        cmd = str(hook_path if hook_path is not None else self.hook_path)
+        cmd = str(hook_path)
         for entry in bucket:
             if not isinstance(entry, dict):
                 continue
@@ -427,9 +442,9 @@ class SettingsCorruptError(RuntimeError):
     """Raised when a provider's settings file exists but is not in a
     shape we can edit safely.
 
-    The pre-fix `_read_json` would silently wipe a corrupt-but-
-    valuable settings file by treating it as ``{}``. We'd rather the
-    user see a loud error so they can investigate.
+    Pre-fix the loader returned ``{}`` on parse error and ``install``
+    would silently overwrite a corrupt-but-valuable settings file. We
+    surface a loud error instead so the user can investigate.
     """
 
     def __init__(self, path: Path, why: str) -> None:
@@ -460,34 +475,3 @@ def _load_json_strict(path: Path) -> dict[str, Any]:
             f"top-level JSON value is {type(data).__name__}, not an object",
         )
     return data
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` via tmp-file + rename.
-
-    ``Path.write_text`` truncates and writes in place; an interrupt
-    between truncate and final flush leaves the user's settings file
-    in a partially-written state. ``os.replace`` (the underlying
-    ``Path.replace`` call) is POSIX-atomic on the same filesystem,
-    so the file either has the old content or the new — never half.
-    Used by every provider's settings writer.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".llmoji-tmp")
-    tmp.write_text(content)
-    tmp.replace(path)
-
-
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
-
-
-def _package_version() -> str:
-    """Resolve the installed package version, with a fallback for
-    development checkouts where ``importlib.metadata`` may not see the
-    package yet."""
-    try:
-        from importlib.metadata import version
-        return version("llmoji")
-    except Exception:
-        return "0.0.0+dev"

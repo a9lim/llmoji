@@ -27,14 +27,11 @@ same second. Sub-second-grade dedup is out of scope.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Iterator
 
 from .providers import ClaudeCodeProvider, CodexProvider
 from .taxonomy import is_kaomoji_candidate
-
-_KAOMOJI_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
 def kaomoji_prefix(text: str) -> str:
@@ -56,9 +53,8 @@ def kaomoji_prefix(text: str) -> str:
     if not first_line:
         return ""
     stripped = first_line.lstrip()
-    m = _KAOMOJI_LETTER_RE.search(stripped)
-    prefix = stripped[: m.start()] if m else stripped
-    prefix = prefix.rstrip()
+    cut = next((i for i, c in enumerate(stripped) if "a" <= c.lower() <= "z"), len(stripped))
+    prefix = stripped[:cut].rstrip()
     if not is_kaomoji_candidate(prefix):
         return ""
     return prefix

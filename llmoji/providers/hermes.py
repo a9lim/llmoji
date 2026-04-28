@@ -51,16 +51,14 @@ timeout never abort the agent loop (fail-open).
 
 Per-provider quirks (vs claude_code / codex):
 
-  - **kaomoji_position = "single"**: one final-text field per turn
-    (``extra.assistant_response``); no first/last ambiguity.
-  - **sidechain_strategy = "session_correlation"**: implemented via
-    the companion ``subagent_stop`` hook, which writes child
-    session_ids to ``~/.hermes/.llmoji-children``. The main
-    ``post_llm_call`` hook checks that file and drops matching
-    session_ids.
-  - **system_injected_prefixes = []**: hermes delivers
-    ``extra.user_message`` pre-injection, per the documented
-    contract.
+  - **Single final-text field per turn** (``extra.assistant_response``);
+    no first/last ambiguity.
+  - **Sidechain handling via session correlation:** a companion
+    ``subagent_stop`` hook writes child session_ids to
+    ``~/.hermes/.llmoji-children``; the main ``post_llm_call`` hook
+    drops matching session_ids.
+  - ``extra.user_message`` is delivered pre-injection per the
+    documented contract — no system-injected prefixes to filter.
 
 ⚠ The hermes path was implemented from docs only. The shell hook
 shape is well-documented and other providers' hooks share the same
@@ -79,17 +77,12 @@ amounts to a few lines.
 from __future__ import annotations
 
 import importlib.resources
+import re
 from pathlib import Path
 from string import Template
 
-from .base import (
-    KaomojiPosition,
-    Provider,
-    SettingsCorruptError,
-    SidechainStrategy,
-    _atomic_write_text,
-    _package_version,
-)
+from .._util import atomic_write_text, package_version
+from .base import Provider, SettingsCorruptError
 
 CHILD_STATE_PATH = Path.home() / ".hermes" / ".llmoji-children"
 SUBAGENT_STOP_HOOK_FILENAME = "subagent-stop.sh"
@@ -99,16 +92,14 @@ class HermesProvider(Provider):
     name = "hermes"
     hooks_dir = Path.home() / ".hermes" / "agent-hooks"
     settings_path = Path.home() / ".hermes" / "config.yaml"
-    settings_format = "yaml"
     journal_path = Path.home() / ".hermes" / "kaomoji-journal.jsonl"
     hook_template = "hermes.sh.tmpl"
     hook_filename = "post-llm-call.sh"
-    kaomoji_position: KaomojiPosition = "single"
-    sidechain_strategy: SidechainStrategy = "session_correlation"
-    sidechain_config = {
-        "child_state_path": str(CHILD_STATE_PATH),
-        "correlation_event": "subagent_stop",
-    }
+    main_event = "post_llm_call"
+    # Hermes shell hooks must emit stdout JSON; ``{}`` is no-op. The
+    # validate-partial defaults to ``exit 0`` for claude_code/codex,
+    # which would leave hermes silently violating the contract.
+    skip_action = "echo '{}'; exit 0"
     system_injected_prefixes: list[str] = []
 
     # Nudge: pre_llm_call with a bare ``{context: ...}`` shape (per
@@ -139,7 +130,7 @@ class HermesProvider(Provider):
         ).read_text()
         return Template(template_text).safe_substitute(
             CHILD_STATE_PATH=str(CHILD_STATE_PATH),
-            LLMOJI_VERSION=_package_version(),
+            LLMOJI_VERSION=package_version(),
         )
 
     # --- install / uninstall override (three hooks, one config block) ---
@@ -155,6 +146,7 @@ class HermesProvider(Provider):
         self.subagent_hook_path.chmod(0o755)
         # Nudge hook (pre_llm_call)
         if self.has_nudge:
+            assert self.nudge_hook_path is not None
             self.nudge_hook_path.write_text(self.render_nudge_hook())
             self.nudge_hook_path.chmod(0o755)
         # Init the child-state file so the main hook's `grep -qFx`
@@ -170,8 +162,10 @@ class HermesProvider(Provider):
             self.hook_path.unlink()
         if self.subagent_hook_path.exists():
             self.subagent_hook_path.unlink()
-        if self.has_nudge and self.nudge_hook_path.exists():
-            self.nudge_hook_path.unlink()
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            if self.nudge_hook_path.exists():
+                self.nudge_hook_path.unlink()
         # Leave the child-state file in place; user can `rm
         # ~/.hermes/.llmoji-children` if they want a clean slate.
 
@@ -188,6 +182,7 @@ class HermesProvider(Provider):
         #       - command: "<subagent>"
         lines = [self._MARKER_BEGIN, "hooks:"]
         if self.has_nudge:
+            assert self.nudge_hook_path is not None
             lines.append("  pre_llm_call:")
             lines.append(f'    - command: "{self.nudge_hook_path}"')
         lines.append("  post_llm_call:")
@@ -218,7 +213,7 @@ class HermesProvider(Provider):
                 "hand, or move the file aside and re-run.",
             )
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
-        _atomic_write_text(self.settings_path, existing + sep + self._stanza())
+        atomic_write_text(self.settings_path, existing + sep + self._stanza())
 
     def _unregister(self) -> None:
         if not self.settings_path.exists():
@@ -231,7 +226,7 @@ class HermesProvider(Provider):
         cleaned = before.rstrip() + ("\n" + after.lstrip() if after.strip() else "")
         cleaned = cleaned.rstrip() + "\n" if cleaned.strip() else ""
         if cleaned:
-            _atomic_write_text(self.settings_path, cleaned)
+            atomic_write_text(self.settings_path, cleaned)
         else:
             self.settings_path.unlink()
 
@@ -246,51 +241,17 @@ class HermesProvider(Provider):
         # marker is present — same check as :meth:`_is_registered`.
         return self._is_registered()
 
-    @staticmethod
-    def _has_unmanaged_hooks_top_level(text: str) -> bool:
+    @classmethod
+    def _has_unmanaged_hooks_top_level(cls, text: str) -> bool:
         """Return True iff the YAML text contains a top-level
         ``hooks:`` key not inside our managed marker block.
 
-        Conservative: matches lines that start with ``hooks:`` (no
-        leading whitespace, a colon, then end-of-line or whitespace).
-        That's exactly the top-level YAML key shape Hermes documents.
+        Strategy: cut every ``BEGIN…END`` managed span out of the text
+        and search the remainder for a ``^hooks:`` line. Conservative
+        — matches lines that start with ``hooks:`` with no leading
+        whitespace, which is exactly the top-level YAML key shape
+        Hermes documents.
         """
-        if "\nhooks:" not in ("\n" + text):
-            return False
-        # Find managed spans
-        managed_starts = [
-            i for i in range(len(text))
-            if text.startswith(HermesProvider._MARKER_BEGIN, i)
-        ]
-        managed_ends = [
-            i for i in range(len(text))
-            if text.startswith(HermesProvider._MARKER_END, i)
-        ]
-        spans = []
-        for s, e in zip(managed_starts, managed_ends):
-            if e > s:
-                spans.append((s, e + len(HermesProvider._MARKER_END)))
-        # Walk every "\nhooks:" line-start
-        for line_start in _line_starts_matching(text, "hooks:"):
-            inside = any(s <= line_start < e for s, e in spans)
-            if not inside:
-                return True
-        return False
-
-
-def _line_starts_matching(text: str, prefix: str) -> list[int]:
-    """Return offsets in ``text`` of every line that starts with
-    ``prefix``."""
-    out = []
-    if text.startswith(prefix):
-        out.append(0)
-    idx = 0
-    while True:
-        nl = text.find("\n", idx)
-        if nl < 0:
-            break
-        line_start = nl + 1
-        if text.startswith(prefix, line_start):
-            out.append(line_start)
-        idx = line_start
-    return out
+        pattern = re.escape(cls._MARKER_BEGIN) + r".*?" + re.escape(cls._MARKER_END)
+        unmanaged = re.sub(pattern, "", text, flags=re.DOTALL)
+        return bool(re.search(r"^hooks:", unmanaged, flags=re.MULTILINE))

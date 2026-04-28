@@ -11,30 +11,15 @@ directory and settings file.
 Three things drive the abstraction:
 
   1. Where to write the hook script (``hooks_dir``).
-  2. How to register it (``settings_path`` + ``settings_format``,
-     plus per-provider register/unregister logic in
-     :meth:`Provider.install`/``uninstall``).
+  2. How to register it. JSON-settings providers (Claude Code, Codex)
+     get the default :meth:`Provider._register` /
+     :meth:`Provider._unregister` / ``_is_registered`` /
+     ``_is_nudge_registered`` from the base class — they only need to
+     specify ``main_event``. YAML-settings providers (Hermes)
+     override the four ``_register``-family methods.
   3. Where the journal lives (``journal_path``) — a published
      uniform-schema JSONL the live hook appends to and which
      ``llmoji analyze`` reads.
-
-Two cross-cutting parameters that the hook template needs at
-generation time:
-
-  - ``kaomoji_position`` — does the harness emit one assistant
-    message per turn, multiple where the kaomoji is on the first,
-    or multiple where it's on the last? The shell template's
-    extraction pipeline is keyed on this.
-  - ``sidechain_strategy`` — how to filter subagent dispatches.
-    Three modes:
-
-    * ``"none"`` — harness has no subagent concept (Codex).
-    * ``"field_flag"`` — drop events with a boolean flag set
-      (Claude Code's ``isSidechain``).
-    * ``"session_correlation"`` — track child session IDs from a
-      companion event and drop their stop events (Hermes — the
-      ``post_llm_call`` hook fires for both parent and child
-      sessions; correlate against ``delegate_task``).
 
 Generic-JSONL-append users (motivated OpenClaw owners and similar)
 bypass this abstraction entirely: they handcraft a TS handler that
@@ -46,12 +31,7 @@ iterator. No first-class provider required for them in v1.0.
 
 from __future__ import annotations
 
-from .base import (
-    Provider,
-    ProviderStatus,
-    SidechainStrategy,
-    KaomojiPosition,
-)
+from .base import Provider, ProviderStatus
 from .claude_code import ClaudeCodeProvider
 from .codex import CodexProvider
 from .hermes import HermesProvider
@@ -79,8 +59,6 @@ def get_provider(name: str) -> Provider:
 __all__ = [
     "Provider",
     "ProviderStatus",
-    "SidechainStrategy",
-    "KaomojiPosition",
     "ClaudeCodeProvider",
     "CodexProvider",
     "HermesProvider",

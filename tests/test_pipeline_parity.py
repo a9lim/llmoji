@@ -699,3 +699,107 @@ def test_codex_hook_and_backfill_agree(
             f"{desc}: bash user_text={bash_rows[0]['user_text']!r}, "
             f"expected {expect_user_text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Hermes — bash-hook-only smoke test (no Python backfill counterpart)
+# ---------------------------------------------------------------------------
+#
+# Hermes has no transcript replay path, so there's nothing to do parity
+# against. We still want CI to catch regressions in the rendered bash
+# hook itself: feed it a synthetic post_llm_call payload, assert the
+# emitted journal row matches the canonical 6-field schema with the
+# expected fields. Covers the gap CLAUDE.md flags as "docs-confirmed
+# but not real-traffic verified."
+
+# (description, assistant_response, user_message, session_id,
+#  child_state_lines, expect_row, expect_kaomoji)
+_HERMES_CASES: list[tuple[str, str, str, str, list[str], bool, str]] = [
+    ("standard kaomoji", "(◕‿◕) sounds good", "thanks", "sess-1", [], True, "(◕‿◕)"),
+    ("multiline body",   "(｡◕‿◕｡)\n\nfollowed by paragraph.", "hi", "sess-2", [], True, "(｡◕‿◕｡)"),
+    ("subagent dropped",
+     "(◕‿◕) child reply", "child prompt", "child-1", ["child-1"], False, ""),
+    ("non-subagent passes through despite child-state file",
+     "(◕‿◕) parent reply", "parent prompt", "parent-1", ["other-child"], True, "(◕‿◕)"),
+    ("prose only",       "Sure thing.", "test", "sess-3", [], False, ""),
+    ("backslash escape", "(\\*_*) trick", "test", "sess-4", [], False, ""),
+    ("oversize span",
+     "(parenthetical sentence going way past thirty-two characters)",
+     "test", "sess-5", [], False, ""),
+]
+
+
+@pytest.mark.parametrize(
+    "desc,assistant,user,session_id,child_state,expect_row,expect_kaomoji",
+    _HERMES_CASES,
+)
+def test_hermes_hook_emits_canonical_row(
+    desc: str,
+    assistant: str,
+    user: str,
+    session_id: str,
+    child_state: list[str],
+    expect_row: bool,
+    expect_kaomoji: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bash, _ = _require_tools()
+
+    from llmoji.providers import HermesProvider
+
+    # Hermes hook reads $HOME/.hermes/.llmoji-children for sidechain
+    # filtering — point HOME at the tmp dir so the test doesn't see
+    # the real user's child-state file.
+    fake_home = tmp_path / "home"
+    (fake_home / ".hermes").mkdir(parents=True)
+    if child_state:
+        (fake_home / ".hermes" / ".llmoji-children").write_text(
+            "\n".join(child_state) + "\n"
+        )
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    hooks_dir = tmp_path / "hooks"
+    hook_journal = tmp_path / "hook-journal.jsonl"
+    hook = _render_hook(HermesProvider, hook_journal, hooks_dir)
+
+    payload = {
+        "hook_event_name": "post_llm_call",
+        "session_id": session_id,
+        "cwd": "/test",
+        "extra": {
+            "assistant_response": assistant,
+            "user_message": user,
+            "model": "hermes-test",
+        },
+    }
+    r = subprocess.run(
+        [bash, str(hook)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
+    # Hermes hook contract: stdout must be JSON, ``{}`` for no-op.
+    assert r.stdout.strip() == "{}", (
+        f"{desc}: hermes hook stdout should be '{{}}' for fail-open "
+        f"contract; got {r.stdout!r}"
+    )
+
+    rows = _read_jsonl(hook_journal)
+    if not expect_row:
+        assert rows == [], f"{desc}: expected no row, got {rows!r}"
+        return
+    assert len(rows) == 1, f"{desc}: expected 1 row, got {len(rows)}"
+    row = rows[0]
+    assert row["kaomoji"] == expect_kaomoji, (
+        f"{desc}: extracted {row['kaomoji']!r}, expected {expect_kaomoji!r}"
+    )
+    assert row["user_text"] == user
+    assert row["model"] == "hermes-test"
+    assert row["cwd"] == "/test"
+    # assistant_text has the leading kaomoji + surrounding whitespace
+    # stripped per the canonical schema
+    assert not row["assistant_text"].startswith(expect_kaomoji), (
+        f"{desc}: assistant_text leaked the kaomoji prefix"
+    )

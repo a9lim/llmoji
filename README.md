@@ -87,8 +87,8 @@ Llmoji first registers a `UserPromptSubmit` hook that injects a reminder on ever
 
 `analyze` writes to `~/.llmoji/bundle/`:
 
-- **`manifest.json`**: package version, journal counts per provider, kaomoji counts, the Haiku model id used, anything you include as `--notes`, and the salted submitter id.
-- **`descriptions.jsonl`**: one row per kaomoji, with the summarized meaning.
+- **`manifest.json`**: package version, Haiku model id, salted submitter id, generation timestamp, list of providers seen, per-source journal row counts, totals (rows scraped, canonical kaomoji unique), and anything you include as `--notes`.
+- **`descriptions.jsonl`**: one row per canonical kaomoji, with the synthesized meaning.
 
 ---
 
@@ -142,6 +142,8 @@ For harnesses we don't ship a first-class adapter for (notably OpenClaw):
 - Validate the prefix the same way the package does: `llmoji.taxonomy.is_kaomoji_candidate(prefix)`.
 
 `llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically. Please see [`examples/openclaw_hook.ts`](examples/openclaw_hook.ts) for a worked example.
+
+The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw, mirror the rules in `is_kaomoji_candidate` faithfully — bumping any of them is a major-version event on the package side and your port needs to follow.
 
 ---
 

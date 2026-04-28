@@ -55,51 +55,8 @@ if [ -n "$ROLLOUT" ] && [ -f "$ROLLOUT" ]; then
   ' "$ROLLOUT" 2>/dev/null || printf '')
 fi
 
-# Kaomoji prefix: first non-empty line, strip leading whitespace,
-# drop everything from the first ASCII letter, trim trailing
-# whitespace. ≥2 bytes filters lone "→"/"!"/etc. Skip the journal
-# write entirely on prose-leading turns — null-kaomoji rows are
-# noise.
-FIRST_LINE=$(printf '%s' "$ASSISTANT_TEXT" | awk 'NF{print; exit}')
-KAOMOJI=$(printf '%s' "$FIRST_LINE" \
-  | sed -E 's/^[[:space:]]+//' \
-  | sed -E 's/[A-Za-z].*$//' \
-  | sed -E 's/[[:space:]]+$//')
-if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ]; then
-  exit 0
-fi
-case "$KAOMOJI" in
-  $KAOMOJI_START_CASE) ;;
-  *) exit 0 ;;
-esac
-case "$KAOMOJI" in
-  *\\*) exit 0 ;;
-esac
-if [ "${#KAOMOJI}" -gt 32 ]; then
-  exit 0
-fi
+${KAOMOJI_VALIDATE}
 
-JOURNAL="$JOURNAL_PATH"
-mkdir -p "$(dirname "$JOURNAL")"
-
-jq -nc \
-  --arg ts             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg model          "$MODEL" \
-  --arg cwd            "$CWD" \
-  --arg kaomoji        "$KAOMOJI" \
-  --arg user_text      "$USER_TEXT" \
-  --arg assistant_text "$ASSISTANT_TEXT" \
-  '{
-    ts:             $ts,
-    model:          $model,
-    cwd:            $cwd,
-    kaomoji:        $kaomoji,
-    user_text:      $user_text,
-    assistant_text: ($assistant_text
-                     | sub("^\\s+"; "")
-                     | ltrimstr($kaomoji)
-                     | sub("^\\s+"; ""))
-  }' \
-  >> "$JOURNAL" 2>/dev/null || true
+${JOURNAL_WRITE}
 
 exit 0
