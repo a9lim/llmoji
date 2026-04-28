@@ -137,14 +137,25 @@ def _check_or_raise(bundle_dir: Path, op: str) -> list[Path]:
     return allowlisted
 
 
-def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
-    """Tar the bundle directory. Returns the tarball path.
+def tar_bundle(
+    bundle_dir: Path, *, out_path: Path | None = None,
+) -> tuple[Path, list[Path]]:
+    """Tar the bundle directory. Returns ``(tarball_path, files)``.
 
     Strict allowlist: only ``manifest.json`` at the top level plus
     each ``<source-model>.jsonl`` is included. If the bundle holds
     anything else (subdirs, non-jsonl files, symlinks), raise
     :class:`BundleAllowlistError` — refusing to ship is the safe
     default (the user can `rm` the extras and re-tar).
+
+    Files are added with a flat ``arcname`` (no ``bundle/`` prefix);
+    the bundle dir lives at ``~/.llmoji/bundle/`` on disk and the
+    tarball recipient picks their own destination directory at
+    extract time.
+
+    Returning the file list saves :func:`upload_email` from
+    re-walking the bundle dir to enumerate contents for the email
+    body — same set of files, single allowlist check.
     """
     if out_path is None:
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -152,8 +163,8 @@ def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
     files = _check_or_raise(bundle_dir, "tar")
     with tarfile.open(out_path, "w:gz") as tar:
         for f in files:
-            tar.add(f, arcname=f"bundle/{f.name}")
-    return out_path
+            tar.add(f, arcname=f.name)
+    return out_path, files
 
 
 def _submission_token() -> str:
@@ -291,8 +302,7 @@ def upload_email(
 ) -> dict[str, Any]:
     """Build a mailto URI and open it in the system mail client; the
     user attaches the tarball manually. We don't ship SMTP."""
-    tarball = tar_bundle(bundle_dir)
-    files, _ = _classify_bundle(bundle_dir)
+    tarball, files = tar_bundle(bundle_dir)
     print(f"target: email {to}")
     print(f"local tarball: {tarball} ({tarball.stat().st_size} bytes)")
     if confirm and not _confirm("open your mail client and attach this bundle?"):

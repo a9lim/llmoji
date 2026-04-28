@@ -155,18 +155,17 @@ def append_cache(cache_path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def cache_size(cache_path: Path) -> tuple[int, int]:
-    """Return ``(n_rows, n_bytes)`` for the cache file. Used by
-    ``llmoji status`` so the user knows what's on disk."""
+def cache_size(cache_path: Path) -> int:
+    """Return the cache file's size in bytes.
+
+    Used by ``llmoji status`` so the user knows what's on disk. Pre
+    Wave 4 this also walked the file to count rows; that scan is
+    wasted work on multi-hundred-MB caches and the row count was
+    never load-bearing — bytes is the user-facing number.
+    """
     if not cache_path.exists():
-        return (0, 0)
-    n_bytes = cache_path.stat().st_size
-    n_rows = 0
-    with cache_path.open() as f:
-        for line in f:
-            if line.strip():
-                n_rows += 1
-    return (n_rows, n_bytes)
+        return 0
+    return cache_path.stat().st_size
 
 
 # ---------------------------------------------------------------------------
@@ -185,25 +184,42 @@ class Synthesizer:
     and set to the user-supplied endpoint for ``local``. It feeds
     into :func:`cache_key` so two ``local`` instances pointed at
     different endpoints don't share cache entries.
+
+    Concrete synthesizers all defer SDK-client construction to the
+    first ``call`` so the factory itself can be invoked without
+    environment variables set (constructor side-effects would
+    otherwise force a real ``OPENAI_API_KEY`` just to enumerate
+    backends in tests, ``llmoji status``, etc.). The lazy client is
+    memoized on ``self._client`` behind a per-instance lock —
+    Stage A is multi-threaded and an unguarded check-then-set would
+    race on the first cache-miss wave, instantiating N clients
+    instead of one (and burning N OAuth flows on the openai backend).
+    Subclasses implement :meth:`_make_client` (the SDK import +
+    constructor call); the base class owns the double-checked locking
+    around it.
     """
 
     backend: str = ""
     model_id: str = ""
     base_url: str = ""
 
-    def call(self, prompt: str, *, max_tokens: int = 200) -> str:
+    def __init__(self) -> None:
+        self._client: Any = None
+        self._client_lock = threading.Lock()
+
+    def _make_client(self) -> Any:
         raise NotImplementedError
 
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = self._make_client()
+        return self._client
 
-# Concrete synthesizers all defer SDK-client construction to the
-# first ``call`` so the factory itself can be invoked without
-# environment variables set (constructor side-effects would
-# otherwise force a real ``OPENAI_API_KEY`` just to enumerate
-# backends in tests, ``llmoji status``, etc.). The lazy client is
-# memoized on ``self._client`` behind a per-instance lock —
-# Stage A is multi-threaded and an unguarded check-then-set would
-# race on the first cache-miss wave, instantiating N clients
-# instead of one (and burning N OAuth flows on the openai backend).
+    def call(self, prompt: str, *, max_tokens: int = 200) -> str:
+        del prompt, max_tokens
+        raise NotImplementedError
 
 
 class AnthropicSynthesizer(Synthesizer):
@@ -218,17 +234,12 @@ class AnthropicSynthesizer(Synthesizer):
     backend = "anthropic"
 
     def __init__(self, model_id: str) -> None:
+        super().__init__()
         self.model_id = model_id
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import anthropic
-                    self._client = anthropic.Anthropic(max_retries=8)
-        return self._client
+    def _make_client(self) -> Any:
+        import anthropic
+        return anthropic.Anthropic(max_retries=8)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()
@@ -255,17 +266,12 @@ class OpenAISynthesizer(Synthesizer):
     backend = "openai"
 
     def __init__(self, model_id: str) -> None:
+        super().__init__()
         self.model_id = model_id
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import openai
-                    self._client = openai.OpenAI(max_retries=8)
-        return self._client
+    def _make_client(self) -> Any:
+        import openai
+        return openai.OpenAI(max_retries=8)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()
@@ -292,21 +298,14 @@ class LocalSynthesizer(Synthesizer):
     def __init__(
         self, model_id: str, *, base_url: str, api_key: str = "ollama",
     ) -> None:
+        super().__init__()
         self.model_id = model_id
         self.base_url = base_url
         self._api_key = api_key
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import openai
-                    self._client = openai.OpenAI(
-                        base_url=self.base_url, api_key=self._api_key,
-                    )
-        return self._client
+    def _make_client(self) -> Any:
+        import openai
+        return openai.OpenAI(base_url=self.base_url, api_key=self._api_key)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()

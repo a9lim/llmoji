@@ -198,9 +198,12 @@ llmoji/
     __init__.py                # public surface re-exports
     _util.py                   # atomic_write_text (tmp+rename),
                                # write_json, package_version,
-                               # human_bytes, sanitize_model_id_for_path.
-                               # Kept out of providers.base so the
-                               # dependency graph stays tree-shaped.
+                               # human_bytes, sanitize_model_id_for_path,
+                               # journal_line_dict / scrape_row_to_journal_line
+                               # (canonical 6-field schema source of truth),
+                               # iter_bundle_data_files. Kept out of
+                               # providers.base so the dependency graph
+                               # stays tree-shaped.
     taxonomy.py                # KAOMOJI_START_CHARS + is_kaomoji_candidate
                                # + extract + KaomojiMatch (span-only)
                                # + canonicalize_kaomoji (rules A–P; frozen)

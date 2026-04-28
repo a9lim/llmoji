@@ -409,18 +409,26 @@ def _stage_b(
 
 
 def _clear_bundle_dir(bundle_dir: Path) -> None:
-    """Remove every top-level file AND every top-level subdir from
-    ``bundle_dir``. Stale per-source-model files from prior runs
-    would silently leak into upload otherwise — the bundle is the
-    privacy boundary, so we wipe everything that isn't about to be
-    re-written. Subdirs from older 1.1.0 layouts are also cleared
-    here on first analyze post-upgrade.
+    """Remove every top-level entry from ``bundle_dir``.
+
+    Stale per-source-model files from prior runs would silently leak
+    into upload otherwise — the bundle is the privacy boundary, so
+    we wipe everything that isn't about to be re-written. Subdirs
+    from older 1.1.0 layouts are also cleared here on first analyze
+    post-upgrade.
+
+    Symlinks are unlinked, never followed: a symlinked subdir would
+    cause ``shutil.rmtree`` to walk across the link and delete files
+    outside the bundle dir. ``Path.is_symlink()`` is checked before
+    ``is_dir()`` because a symlink-to-directory satisfies both.
     """
     import shutil
     if not bundle_dir.exists():
         return
     for p in bundle_dir.iterdir():
-        if p.is_file() or p.is_symlink():
+        if p.is_symlink():
+            p.unlink()
+        elif p.is_file():
             p.unlink()
         elif p.is_dir():
             shutil.rmtree(p)

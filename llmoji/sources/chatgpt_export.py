@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ..scrape import ScrapeRow
-from ._common import kaomoji_lead_strip
+from ._common import dedup_by_id_keep_richest, kaomoji_lead_strip
 
 
 def _message_text(msg: dict[str, Any]) -> str:
@@ -231,8 +231,9 @@ def iter_chatgpt_export(
     same heuristic as the Claude.ai reader. The branch walk happens
     once per conversation: scoring + iteration share the same chain.
     """
-    best: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
-    best_score: dict[str, int] = {}
+    candidates: list[
+        tuple[str, tuple[dict[str, Any], list[dict[str, Any]]], int]
+    ] = []
     for export_dir in export_dirs:
         path = Path(export_dir) / "conversations.json"
         if not path.exists():
@@ -248,9 +249,7 @@ def iter_chatgpt_export(
             if not isinstance(cid, str):
                 continue
             chain, score = _conv_chain_and_score(conv)
-            if score > best_score.get(cid, -1):
-                best[cid] = (conv, chain)
-                best_score[cid] = score
+            candidates.append((cid, (conv, chain), score))
 
-    for conv, chain in best.values():
+    for conv, chain in dedup_by_id_keep_richest(candidates).values():
         yield from _iter_conversation_chain(conv, chain)
