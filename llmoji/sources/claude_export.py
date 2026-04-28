@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ..scrape import ScrapeRow
-from ..taxonomy import KAOMOJI_START_CHARS, extract
+from ._common import kaomoji_lead_strip
 
 
 def _message_text(msg: dict[str, Any]) -> str:
@@ -59,20 +59,13 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
         if not text.strip():
             continue
         turn += 1
-        match = extract(text)
-        if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
+        # Validate + strip via the shared helper so this reader and
+        # the ChatGPT one stay in lockstep — see the "Journal-row
+        # contract" gotcha in :file:`CLAUDE.md`.
+        stripped = kaomoji_lead_strip(text)
+        if stripped is None:
             continue
-        # Strip the leading kaomoji + surrounding whitespace from
-        # ``assistant_text`` so the journal-row contract is uniform
-        # across sources: ``kaomoji`` carries the prefix, ``assistant_text``
-        # is the body without it. Live-hook journals already do this
-        # (jq's ``sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")``);
-        # without this strip the export reader would yield kaomoji-bearing
-        # ``assistant_text`` and ``mask_kaomoji`` would need a dual-branch
-        # patch to handle both shapes.
-        body = text.lstrip()
-        if body.startswith(match.first_word):
-            body = body[len(match.first_word):].lstrip()
+        first_word, body = stripped
         # Walk parent_message_uuid back to the nearest human-authored
         # message with non-empty text. Generous hop budget for
         # symmetry with the Claude Code transcript backfill — a
@@ -108,7 +101,7 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             turn_index=turn,
             had_thinking=False,
             assistant_text=body,
-            first_word=match.first_word,
+            first_word=first_word,
             surrounding_user=user_text,
         )
 
@@ -119,10 +112,9 @@ def _conv_content_score(conv: dict[str, Any]) -> int:
     Used to rank duplicate conversations across multiple exports —
     newer Claude.ai exports sometimes drop content for conversations
     earlier exports returned in full. Prefer the version with more
-    filled-in messages.
+    filled-in messages. Caller (:func:`iter_claude_export`) narrows
+    ``conv`` to ``dict`` before invoking.
     """
-    if not isinstance(conv, dict):
-        return 0
     score = 0
     for m in conv.get("chat_messages") or []:
         if not isinstance(m, dict):

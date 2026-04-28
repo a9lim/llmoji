@@ -120,13 +120,14 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ## Static dumps
 
-To pull kaomoji out of a Claude.ai data export:
+To pull kaomoji out of a Claude.ai or ChatGPT data export:
 
 ```bash
 llmoji parse --provider claude.ai ~/Downloads/data-...-batch-0000
+llmoji parse --provider chatgpt ~/Downloads/chatgpt-export
 ```
 
-The export's `conversations.json` is parsed and rows land at `~/.llmoji/journals/claude_ai_export.jsonl`. `llmoji analyze` picks this up alongside the live provider journals.
+Both exports happen to ship a file named `conversations.json`, with different schemas under the same filename; the parsers handle each. Rows land at `~/.llmoji/journals/claude_ai_export.jsonl` or `~/.llmoji/journals/chatgpt_export.jsonl`, and `llmoji analyze` picks them up alongside the live provider journals. The ChatGPT reader walks the message tree from `current_node` along the active branch only, so abandoned regenerations stay out of the corpus.
 
 For Claude Code or Codex history that predates installing the live hook, the historical transcripts (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`) can be replayed into the journals via the `llmoji.backfill` module.
 
