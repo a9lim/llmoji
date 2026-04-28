@@ -262,8 +262,22 @@ def _stage_a(
                     "cached": False, "prompt": prompt, "description": None,
                 })
 
-    pending_indices = [i for i, e in enumerate(walk) if not e["cached"]]
-    if pending_indices:
+    # Group cache misses by key. Two sampled rows can share a key
+    # (same canonical + user_text + assistant_text — common when one
+    # turn's assistant text gets sampled into multiple cells, or when
+    # the journal carries near-duplicate rows). Without this dedupe,
+    # a cold-cache run would dispatch each duplicate separately and
+    # potentially get different descriptions, while a warm-cache
+    # follow-up would read the (single) last-write-wins cache row
+    # for all duplicates — cold and warm would feed Stage B
+    # different lists. One dispatch per unique key keeps cold and
+    # warm in lockstep.
+    pending_by_key: dict[str, list[int]] = defaultdict(list)
+    for i, e in enumerate(walk):
+        if not e["cached"]:
+            pending_by_key[e["key"]].append(i)
+
+    if pending_by_key:
         workers = _resolve_concurrency(max_workers)
 
         def _describe_one(prompt: str) -> tuple[str, float]:
@@ -273,43 +287,52 @@ def _stage_a(
             return description, dt
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_idx = {
-                pool.submit(_describe_one, walk[i]["prompt"]): i
-                for i in pending_indices
+            future_to_key = {
+                pool.submit(_describe_one, walk[indices[0]]["prompt"]): key
+                for key, indices in pending_by_key.items()
             }
-            for fut in as_completed(future_to_idx):
-                i = future_to_idx[fut]
+            for fut in as_completed(future_to_key):
+                key = future_to_key[fut]
                 description, dt = fut.result()
-                walk[i]["description"] = description
+                indices = pending_by_key[key]
+                for i in indices:
+                    walk[i]["description"] = description
                 if print_progress:
+                    first = walk[indices[0]]
                     _print_stage_progress(
-                        "A", f"{walk[i]['sm']}/{walk[i]['canon']}",
+                        "A", f"{first['sm']}/{first['canon']}",
                         None, dt, description,
                     )
 
     # Serialize: assemble descs_by_cell + append cache in deterministic
     # walk order. Order matters for Stage B because SYNTHESIZE_PROMPT
     # numbers the descriptions; if Stage B sees the same list in the
-    # same order across runs, it produces the same prose.
+    # same order across runs, it produces the same prose. The cache
+    # is written once per unique key — duplicate walk entries share
+    # the cached row so a warm-cache rerun resolves all duplicates
+    # to the same description.
     descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
         lambda: defaultdict(list)
     )
     n_calls = 0
+    written_keys: set[str] = set()
     for entry in walk:
         sm = entry["sm"]
         canon = entry["canon"]
         description = entry["description"]
         descs_by_cell[sm][canon].append(description)
-        if not entry["cached"]:
+        key = entry["key"]
+        if not entry["cached"] and key not in written_keys:
             row = {
-                "key": entry["key"],
+                "key": key,
                 "kaomoji": canon,
                 "description": description,
                 "model": synth.model_id,
                 "backend": synth.backend,
             }
             append_cache(cache_path, row)
-            cache[entry["key"]] = row
+            cache[key] = row
+            written_keys.add(key)
             n_calls += 1
 
     return _freeze_two_level(descs_by_cell), n_calls, n_cached
