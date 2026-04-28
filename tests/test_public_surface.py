@@ -1,9 +1,11 @@
-"""Lock the v1.0 frozen public surface.
+"""Lock the public surface (1.1.0 amended from the 1.0 freeze:
+manifest schema, descriptions row schema, the two pinned default
+model ids, and the per-source-model bundle layout were all bumped).
 
-If any test in this file fails, that's a major-version event — the
-HF dataset README declares "v1 corpus only" aggregation rules
-against these invariants. Bumping invalidates cross-corpus
-comparison.
+If any test in this file fails, that's an aggregation-invariant
+event — the HF dataset's aggregation rules pin against these
+schemas, and changing one wants a hand-edit on the dataset card to
+match.
 
 The tests are intentionally conservative — they spot-check shape
 and a few specific values rather than fingerprinting every glyph.
@@ -54,11 +56,92 @@ def test_no_pilot_labels_in_public():
         )
 
 
-def test_haiku_prompts_locked():
-    from llmoji.haiku_prompts import (
+def test_sanitize_model_id_for_path():
+    """Subfolder-name sanitization rule: lowercase, ``/`` → ``__``,
+    ``:`` → ``-``, dots and digits preserved. Empty → ``"unknown"``
+    (defensive — keeps rows with empty ``ScrapeRow.model`` from
+    collapsing into an unnamed top-level path)."""
+    from llmoji._util import sanitize_model_id_for_path
+    assert sanitize_model_id_for_path("") == "unknown"
+    assert sanitize_model_id_for_path("claude-haiku-4-5-20251001") == (
+        "claude-haiku-4-5-20251001"
+    )
+    assert sanitize_model_id_for_path("gpt-5.4-mini-2026-03-17") == (
+        "gpt-5.4-mini-2026-03-17"
+    )
+    assert sanitize_model_id_for_path("meta/llama-3.1:70b") == (
+        "meta__llama-3.1-70b"
+    )
+    # Idempotent on already-sanitized input.
+    once = sanitize_model_id_for_path("Some-Model:Tag/Path")
+    assert sanitize_model_id_for_path(once) == once
+
+
+def test_make_synthesizer_dispatches():
+    """Factory must return a backend-correct Synthesizer subclass
+    with the pinned default model id (anthropic, openai) or the
+    explicit one (local). Construction must NOT make a network
+    call — these objects sit on the call site for the duration of
+    a Stage A pass.
+    """
+    from llmoji.synth import (
+        AnthropicSynthesizer,
+        LocalSynthesizer,
+        OpenAISynthesizer,
+        make_synthesizer,
+    )
+    from llmoji.synth_prompts import (
+        DEFAULT_ANTHROPIC_MODEL_ID,
+        DEFAULT_OPENAI_MODEL_ID,
+    )
+
+    # Anthropic — pinned snapshot.
+    s = make_synthesizer("anthropic")
+    assert isinstance(s, AnthropicSynthesizer)
+    assert s.backend == "anthropic"
+    assert s.model_id == DEFAULT_ANTHROPIC_MODEL_ID
+
+    # OpenAI — pinned snapshot.
+    s = make_synthesizer("openai")
+    assert isinstance(s, OpenAISynthesizer)
+    assert s.backend == "openai"
+    assert s.model_id == DEFAULT_OPENAI_MODEL_ID
+
+    # Local — explicit base_url + model_id required.
+    s = make_synthesizer(
+        "local",
+        base_url="http://localhost:11434/v1",
+        model_id="llama3.1",
+    )
+    assert isinstance(s, LocalSynthesizer)
+    assert s.backend == "local"
+    assert s.model_id == "llama3.1"
+
+    # Local without --base-url / --model → ValueError (CLI converts
+    # to argparse-level error in real flow; the factory raises
+    # directly).
+    try:
+        make_synthesizer("local")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("local backend without args didn't raise")
+
+    # Unknown backend → ValueError.
+    try:
+        make_synthesizer("nonsense")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown backend didn't raise")
+
+
+def test_synth_prompts_locked():
+    from llmoji.synth_prompts import (
+        DEFAULT_ANTHROPIC_MODEL_ID,
+        DEFAULT_OPENAI_MODEL_ID,
         DESCRIBE_PROMPT_NO_USER,
         DESCRIBE_PROMPT_WITH_USER,
-        HAIKU_MODEL_ID,
         SYNTHESIZE_PROMPT,
     )
     # All three prompts include the [FACE] mask token reference or a
@@ -67,8 +150,11 @@ def test_haiku_prompts_locked():
     assert "{masked_text}" in DESCRIBE_PROMPT_WITH_USER
     assert "{masked_text}" in DESCRIBE_PROMPT_NO_USER
     assert "{descriptions}" in SYNTHESIZE_PROMPT
-    # Locked Haiku model id.
-    assert HAIKU_MODEL_ID == "claude-haiku-4-5-20251001"
+    # Locked default model ids per backend. Bumping either is a
+    # cross-corpus invariant change — the dataset's submitted prose
+    # depends on which snapshot produced it.
+    assert DEFAULT_ANTHROPIC_MODEL_ID == "claude-haiku-4-5-20251001"
+    assert DEFAULT_OPENAI_MODEL_ID == "gpt-5.4-mini-2026-03-17"
 
 
 def test_scrape_row_schema():
@@ -115,9 +201,10 @@ def test_bundle_schema():
     """The bundle is the only thing that leaves the user's machine.
     Lock the schema by writing a fake bundle and re-reading it.
 
-    Manifest must be well-formed JSON with the documented keys;
-    descriptions.jsonl must be one row per canonical kaomoji with
-    the four documented keys.
+    Manifest must be well-formed JSON with the documented keys.
+    Per-source-model subfolders each carry one ``descriptions.jsonl``
+    with one row per canonical kaomoji; row keys = the three
+    documented keys.
     """
     from llmoji.analyze import _write_bundle
     from pathlib import Path
@@ -127,69 +214,236 @@ def test_bundle_schema():
         bundle = Path(td)
         _write_bundle(
             bundle,
-            counts_by_canon={"(｡◕‿◕｡)": 12, "(╥﹏╥)": 3},
-            synthesized_by_canon={
-                "(｡◕‿◕｡)": "Warm reassurance.",
-                "(╥﹏╥)": "Tearful frustration.",
+            counts_by_cell={
+                "claude-sonnet-4-5-20250929": {"(｡◕‿◕｡)": 12, "(╥﹏╥)": 3},
+                "gpt-5.4-mini-2026-03-17": {"(｡◕‿◕｡)": 7},
+            },
+            synthesized_by_cell={
+                "claude-sonnet-4-5-20250929": {
+                    "(｡◕‿◕｡)": "Warm reassurance.",
+                    "(╥﹏╥)": "Tearful frustration.",
+                },
+                "gpt-5.4-mini-2026-03-17": {
+                    "(｡◕‿◕｡)": "Polite enthusiasm.",
+                },
             },
             providers_seen=["claude_code-hook", "codex-hook"],
-            journal_counts={"claude_code-hook": 10, "codex-hook": 5},
+            model_counts={
+                "claude-sonnet-4-5-20250929": 15,
+                "gpt-5.4-mini-2026-03-17": 7,
+            },
             submitter_id="0" * 32,
+            synth_backend="anthropic",
+            synth_model_id="claude-haiku-4-5-20251001",
             notes="test",
         )
         manifest = json.loads((bundle / "manifest.json").read_text())
         for k in (
-            "llmoji_version", "haiku_model_id", "submitter_id",
-            "generated_at", "providers_seen", "journal_counts",
-            "total_rows_scraped", "total_kaomoji_unique_canonical",
-            "notes",
+            "llmoji_version", "synthesis_model_id", "synthesis_backend",
+            "submitter_id", "generated_at", "providers_seen",
+            "model_counts", "total_synthesized_rows", "notes",
         ):
             assert k in manifest, f"missing manifest key: {k}"
+        # Removed keys must NOT come back.
+        for gone in (
+            "haiku_model_id", "journal_counts", "total_rows_scraped",
+            "total_kaomoji_unique_canonical",
+        ):
+            assert gone not in manifest, (
+                f"{gone!r} should be removed in 1.1.0 but still present"
+            )
+        # total_synthesized_rows = sum across folders (face appearing
+        # in 2 folders contributes 2).
+        assert manifest["total_synthesized_rows"] == 3
+        assert manifest["synthesis_backend"] == "anthropic"
+        assert manifest["synthesis_model_id"] == "claude-haiku-4-5-20251001"
 
-        rows = [
-            json.loads(l)
-            for l in (bundle / "descriptions.jsonl").read_text().splitlines()
-            if l.strip()
+        # One subfolder per source model, sanitized name.
+        subdirs = sorted(p.name for p in bundle.iterdir() if p.is_dir())
+        assert subdirs == [
+            "claude-sonnet-4-5-20250929",
+            "gpt-5.4-mini-2026-03-17",
         ]
-        assert len(rows) == 2
-        for r in rows:
-            assert set(r) == {
-                "kaomoji", "count", "haiku_synthesis_description",
-                "llmoji_version",
-            }
+        for sub in subdirs:
+            descriptions = bundle / sub / "descriptions.jsonl"
+            assert descriptions.exists()
+            rows = [
+                json.loads(l)
+                for l in descriptions.read_text().splitlines()
+                if l.strip()
+            ]
+            assert rows, f"empty descriptions.jsonl in {sub}/"
+            for r in rows:
+                assert set(r) == {
+                    "kaomoji", "count", "synthesis_description",
+                }, f"unexpected row keys in {sub}/: {set(r)}"
 
 
 def test_bundle_allowlist_rejects_extras():
-    """`tar_bundle` must refuse to ship anything outside
-    {manifest.json, descriptions.jsonl} — that's the v1.0 frozen
-    bundle schema. Loud failure beats silent leak."""
+    """`tar_bundle` must refuse to ship anything outside the
+    structural allowlist (top-level ``manifest.json`` + each
+    ``<source-model>/descriptions.jsonl``). Loud failure beats
+    silent leak — covered both for an extra top-level file AND a
+    stray file inside a model subfolder.
+    """
     from pathlib import Path
     import tempfile
 
     from llmoji.analyze import _write_bundle
-    from llmoji.upload import BUNDLE_ALLOWLIST, BundleAllowlistError, tar_bundle
+    from llmoji.upload import (
+        BUNDLE_SUBDIR_FILE,
+        BUNDLE_TOPLEVEL_ALLOWLIST,
+        BundleAllowlistError,
+        tar_bundle,
+    )
 
-    with tempfile.TemporaryDirectory() as td:
-        bundle = Path(td) / "bundle"
+    def _fresh_bundle(td: Path) -> Path:
+        bundle = td / "bundle"
         _write_bundle(
             bundle,
-            counts_by_canon={"(◕‿◕)": 1},
-            synthesized_by_canon={"(◕‿◕)": "smile"},
+            counts_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": 1}},
+            synthesized_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": "smile"}},
             providers_seen=[],
-            journal_counts={},
+            model_counts={},
             submitter_id="0" * 32,
+            synth_backend="anthropic",
+            synth_model_id="claude-haiku-4-5-20251001",
             notes="",
         )
-        # Add an extra — tar should refuse.
+        return bundle
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # 1. extra top-level file
+        bundle = _fresh_bundle(td)
         (bundle / "stray.txt").write_text("would leak")
         try:
-            tar_bundle(bundle, out_path=Path(td) / "out.tgz")
+            tar_bundle(bundle, out_path=td / "out1.tgz")
         except BundleAllowlistError:
             pass
         else:
-            raise AssertionError("tar_bundle didn't refuse extras")
-        # Allowlist itself is the frozen pair.
-        assert set(BUNDLE_ALLOWLIST) == {"manifest.json", "descriptions.jsonl"}
+            raise AssertionError(
+                "tar_bundle didn't refuse extra top-level file",
+            )
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # 2. extra file inside a model subfolder
+        bundle = _fresh_bundle(td)
+        sub = bundle / "claude-haiku-4-5-20251001"
+        (sub / "extra.txt").write_text("inner stash")
+        try:
+            tar_bundle(bundle, out_path=td / "out2.tgz")
+        except BundleAllowlistError:
+            pass
+        else:
+            raise AssertionError(
+                "tar_bundle didn't refuse extra subdir file",
+            )
+
+    # Allowlist constants are the frozen shape.
+    assert BUNDLE_TOPLEVEL_ALLOWLIST == ("manifest.json",)
+    assert BUNDLE_SUBDIR_FILE == "descriptions.jsonl"
+
+
+def test_bundle_allowlist_rejects_symlinks_and_empty_subdirs():
+    """Symlinks bypass the file/dir contract because ``Path.is_file``
+    follows them; the allowlist must explicitly reject symlinks at
+    every layer. Empty model subdirs misrepresent which models
+    contributed; reject those too.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.analyze import _write_bundle
+    from llmoji.upload import BundleAllowlistError, tar_bundle
+
+    def _fresh(td: Path) -> Path:
+        bundle = td / "bundle"
+        _write_bundle(
+            bundle,
+            counts_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": 1}},
+            synthesized_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": "smile"}},
+            providers_seen=[],
+            model_counts={},
+            submitter_id="0" * 32,
+            synth_backend="anthropic",
+            synth_model_id="claude-haiku-4-5-20251001",
+            notes="",
+        )
+        return bundle
+
+    # 1. Symlinked manifest at top level.
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        bundle = _fresh(td)
+        # Replace the real manifest with a symlink pointing somewhere else.
+        target = td / "leak.json"
+        target.write_text("{}")
+        (bundle / "manifest.json").unlink()
+        (bundle / "manifest.json").symlink_to(target)
+        try:
+            tar_bundle(bundle, out_path=td / "out.tgz")
+        except BundleAllowlistError:
+            pass
+        else:
+            raise AssertionError(
+                "tar_bundle didn't refuse symlinked manifest",
+            )
+
+    # 2. Empty model subdir (descriptions.jsonl removed).
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        bundle = _fresh(td)
+        sub = bundle / "claude-haiku-4-5-20251001"
+        (sub / "descriptions.jsonl").unlink()
+        try:
+            tar_bundle(bundle, out_path=td / "out.tgz")
+        except BundleAllowlistError:
+            pass
+        else:
+            raise AssertionError(
+                "tar_bundle didn't refuse empty model subdir",
+            )
+
+
+def test_write_bundle_rejects_slug_collision():
+    """Two distinct ``ScrapeRow.model`` strings that sanitize to
+    the same subfolder slug must NOT both write to the same
+    ``descriptions.jsonl`` — that would silently overwrite. Loud
+    failure beats a half-shipped bundle.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.analyze import _write_bundle
+
+    with tempfile.TemporaryDirectory() as td:
+        bundle = Path(td) / "bundle"
+        try:
+            _write_bundle(
+                bundle,
+                counts_by_cell={
+                    "Some-Model:Tag": {"(◕‿◕)": 1},
+                    "some-model-tag": {"(◕‿◕)": 1},
+                },
+                synthesized_by_cell={
+                    "Some-Model:Tag": {"(◕‿◕)": "a"},
+                    "some-model-tag": {"(◕‿◕)": "b"},
+                },
+                providers_seen=[],
+                model_counts={},
+                submitter_id="0" * 32,
+                synth_backend="anthropic",
+                synth_model_id="claude-haiku-4-5-20251001",
+                notes="",
+            )
+        except ValueError as e:
+            assert "slug collision" in str(e), str(e)
+        else:
+            raise AssertionError(
+                "_write_bundle didn't refuse slug collision",
+            )
 
 
 def test_corrupt_settings_refused():
@@ -250,7 +504,7 @@ def test_mask_kaomoji_prepends_face_token():
     ``mask_kaomoji`` therefore just prepends ``[FACE] `` so Haiku
     sees the ``[FACE] <body>`` shape the DESCRIBE prompts promise.
     """
-    from llmoji.haiku import MASK_TOKEN, mask_kaomoji
+    from llmoji.synth import MASK_TOKEN, mask_kaomoji
 
     # Stripped-body row (the only journal-row shape under the v1.0
     # contract): mask token gets prepended with a separating space.

@@ -47,46 +47,89 @@ from ._util import atomic_write_text, package_version
 DEFAULT_HF_REPO = "a9lim/llmoji"
 DEFAULT_EMAIL_TO = "mx@a9l.im"
 
-# Strict allowlist of files the bundle is permitted to ship.
-# Anything else in `~/.llmoji/bundle/` is treated as user-added or
-# stale and refused (loud failure beats silent leak). The two-file
-# bundle schema is part of the v1.0 frozen public surface; bumping
-# this list is a major version bump.
-BUNDLE_ALLOWLIST: tuple[str, ...] = (
-    "manifest.json",
-    "descriptions.jsonl",
-)
+# Strict allowlist of files the bundle is permitted to ship. The
+# bundle is structural now (1.1.0): one ``manifest.json`` at the
+# top level plus one ``<source-model>/descriptions.jsonl`` per
+# source-model subfolder. Anything else — extra top-level files,
+# extra files inside a model subfolder, deeper nesting — is treated
+# as user-added or stale and refused (loud failure beats silent
+# leak).
+BUNDLE_TOPLEVEL_ALLOWLIST: tuple[str, ...] = ("manifest.json",)
+BUNDLE_SUBDIR_FILE: str = "descriptions.jsonl"
 
 
 class BundleAllowlistError(RuntimeError):
     """Raised by ``tar_bundle`` / ``upload_hf`` when the bundle
-    directory holds files outside :data:`BUNDLE_ALLOWLIST`. Loud
-    failure is the correct response — silently dropping the extras
-    on the way out would leak whatever the user stashed there."""
+    directory holds anything outside the allowed shape (a top-level
+    ``manifest.json`` plus per-source-model
+    ``<slug>/descriptions.jsonl`` files). Loud failure is the
+    correct response — silently dropping the extras on the way out
+    would leak whatever the user stashed there."""
 
 
 def _classify_bundle(bundle_dir: Path) -> tuple[list[Path], list[Path]]:
     """Single-pass walk. Returns ``(allowlisted_files, extras)``,
     each sorted. Missing dir → both lists empty.
+
+    Allowlisted files = a real ``manifest.json`` at the top level
+    plus each ``<subdir>/descriptions.jsonl``, where each subdir
+    contains exactly one file (named BUNDLE_SUBDIR_FILE) and
+    nothing else. There is no recursion past one level.
+
+    Symlinks are rejected at every layer — ``Path.is_file()`` and
+    ``Path.is_dir()`` follow symlinks, so a symlinked
+    ``manifest.json`` or ``<model>/descriptions.jsonl`` would
+    otherwise pass the allowlist check and shuffle whatever the
+    link points at into the upload. Loud failure beats following
+    a footgun.
+
+    Output ordering: ``manifest.json`` first, then per-subdir
+    descriptions.jsonl files sorted by subdir name.
     """
     if not bundle_dir.exists():
         return [], []
-    allowed_set = set(BUNDLE_ALLOWLIST)
+    toplevel_allowed = set(BUNDLE_TOPLEVEL_ALLOWLIST)
     allowlisted: list[Path] = []
     extras: list[Path] = []
+    subdir_files: list[Path] = []
     for p in sorted(bundle_dir.iterdir()):
-        if not p.is_file():
-            continue
-        if p.name in allowed_set:
-            allowlisted.append(p)
-        else:
+        if p.is_symlink():
             extras.append(p)
-    # Re-sort allowlisted by allowlist order so iteration is stable
-    # even if the OS returns the names in a different order than
-    # they appear in the v1.0 schema.
+            continue
+        if p.is_file():
+            if p.name in toplevel_allowed:
+                allowlisted.append(p)
+            else:
+                extras.append(p)
+            continue
+        if p.is_dir():
+            children = sorted(p.iterdir())
+            # An empty subdir has no descriptions.jsonl to ship —
+            # mark the dir itself as an extra so the bundle isn't
+            # misrepresenting which models contributed.
+            if not children:
+                extras.append(p)
+                continue
+            for child in children:
+                if (
+                    not child.is_symlink()
+                    and child.is_file()
+                    and child.name == BUNDLE_SUBDIR_FILE
+                ):
+                    subdir_files.append(child)
+                else:
+                    extras.append(child)
+            continue
+        # Sockets, FIFOs, anything else → extras.
+        extras.append(p)
+    # Stable ordering: manifest first, then subdir descriptions in
+    # subdir-name order.
     by_name = {p.name: p for p in allowlisted}
-    allowlisted = [by_name[n] for n in BUNDLE_ALLOWLIST if n in by_name]
-    return allowlisted, extras
+    ordered: list[Path] = [
+        by_name[n] for n in BUNDLE_TOPLEVEL_ALLOWLIST if n in by_name
+    ]
+    ordered.extend(subdir_files)
+    return ordered, extras
 
 
 def _check_or_raise(bundle_dir: Path, op: str) -> list[Path]:
@@ -95,11 +138,12 @@ def _check_or_raise(bundle_dir: Path, op: str) -> list[Path]:
     :class:`FileNotFoundError` for an empty bundle."""
     allowlisted, extras = _classify_bundle(bundle_dir)
     if extras:
-        joined = ", ".join(p.name for p in extras)
+        joined = ", ".join(str(p.relative_to(bundle_dir)) for p in extras)
         raise BundleAllowlistError(
-            f"refusing to {op} {bundle_dir} — unexpected file(s) "
-            f"{joined!r} are not in the v1.0 bundle allowlist "
-            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
+            f"refusing to {op} {bundle_dir} — unexpected entr(y/ies) "
+            f"{joined!r} not in the bundle allowlist (top-level "
+            f"{BUNDLE_TOPLEVEL_ALLOWLIST!r} + each subdir's "
+            f"{BUNDLE_SUBDIR_FILE!r}). Remove them or re-run "
             f"`llmoji analyze` (which clears the bundle dir)."
         )
     if not allowlisted:
@@ -113,11 +157,14 @@ def _check_or_raise(bundle_dir: Path, op: str) -> list[Path]:
 def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
     """Tar the bundle directory. Returns the tarball path.
 
-    Strict allowlist: only ``manifest.json`` and
-    ``descriptions.jsonl`` are included. If the bundle directory
-    holds any other files, raise :class:`BundleAllowlistError` —
-    refusing to ship is the safe default (the user can `rm` the
-    extras and re-tar).
+    Strict allowlist: only ``manifest.json`` at the top level plus
+    each ``<source-model>/descriptions.jsonl`` is included. If the
+    bundle holds anything else, raise
+    :class:`BundleAllowlistError` — refusing to ship is the safe
+    default (the user can `rm` the extras and re-tar).
+
+    Arcnames preserve the source-model subfolder so the recipient
+    sees the same layout the sender inspected.
     """
     if out_path is None:
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -125,7 +172,8 @@ def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
     files = _check_or_raise(bundle_dir, "tar")
     with tarfile.open(out_path, "w:gz") as tar:
         for f in files:
-            tar.add(f, arcname=f"bundle/{f.name}")
+            rel = f.relative_to(bundle_dir).as_posix()
+            tar.add(f, arcname=f"bundle/{rel}")
     return out_path
 
 
@@ -198,11 +246,17 @@ def upload_hf(
     ``contributors/<hash>/bundle-<ts>/`` in the chosen HF dataset
     repo. Returns the submission metadata dict.
 
-    Pre-flight: refuse to upload if anything outside
-    :data:`BUNDLE_ALLOWLIST` is in the bundle dir, mirroring the
-    same check :func:`tar_bundle` does (loud failure beats silent
-    leak). ``upload_folder``'s ``allow_patterns`` is a second line
-    of defense against the same class of bug.
+    Pre-flight: refuse to upload if anything outside the structural
+    allowlist (top-level ``manifest.json`` + per-subdir
+    ``descriptions.jsonl``) is in the bundle dir, mirroring
+    :func:`tar_bundle` (loud failure beats silent leak).
+    ``upload_folder``'s ``allow_patterns`` is a second line of
+    defense against the same class of bug.
+
+    The dataset card's existing ``data_files:
+    contributors/**/descriptions.jsonl`` glob handles the new
+    nested layout automatically (``**`` is recursive), so no card
+    update is required for the auto-loader path.
     """
     files = _check_or_raise(bundle_dir, "upload")
     contributor = submitter_id()
@@ -211,7 +265,10 @@ def upload_hf(
 
     print(f"target: HF dataset {repo} → {target_prefix}/")
     for f in files:
-        print(f"  {f.name} ({f.stat().st_size} bytes)")
+        print(
+            f"  {f.relative_to(bundle_dir).as_posix()} "
+            f"({f.stat().st_size} bytes)"
+        )
     if confirm and not _confirm("submit this bundle?"):
         print("aborted.")
         return {"submitted": False}
@@ -224,7 +281,14 @@ def upload_hf(
         repo_id=repo,
         repo_type="dataset",
         commit_message=f"llmoji bundle from {contributor}",
-        allow_patterns=list(BUNDLE_ALLOWLIST),
+        # Top-level manifest + every per-source-model
+        # ``<slug>/descriptions.jsonl``. The structural allowlist
+        # check above is the primary defense; this is the second
+        # line.
+        allow_patterns=[
+            *BUNDLE_TOPLEVEL_ALLOWLIST,
+            f"*/{BUNDLE_SUBDIR_FILE}",
+        ],
     )
     print(f"submitted to {repo} as {target_prefix}/.")
     return {
@@ -232,7 +296,7 @@ def upload_hf(
         "repo": repo,
         "path_in_repo": target_prefix,
         "contributor": contributor,
-        "files": [f.name for f in files],
+        "files": [f.relative_to(bundle_dir).as_posix() for f in files],
     }
 
 
@@ -263,7 +327,8 @@ def upload_email(
         "Bundle contents:\n"
     )
     for f in files:
-        body += f"  - {f.name} ({f.stat().st_size} bytes)\n"
+        rel = f.relative_to(bundle_dir).as_posix()
+        body += f"  - {rel} ({f.stat().st_size} bytes)\n"
     body += "\nPaste this email into your mail client and attach the tarball manually.\n"
 
     mailto = "mailto:" + to + "?" + urllib.parse.urlencode({

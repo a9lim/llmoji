@@ -18,13 +18,13 @@ There are three main commands:
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: loose files; email: tarball)
 
-`analyze` needs an Anthropic API key in `$ANTHROPIC_API_KEY`; `upload --target hf` needs `$HF_TOKEN`. The email path tarballs the bundle and has you attach it manually.
+`analyze` needs a synthesis backend. The default uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs `$HF_TOKEN`. The email path tarballs the bundle and has you attach it manually.
 
 ---
 
 ## What this is for
 
-The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) collects kaomoji counts and a single summarized description per face, across many users' coding agents. The companion repo processes those descriptions. After you run `analyze`, you can inspect the files yourself at `~/.llmoji/bundle/descriptions.jsonl` before you choose to `upload`. 
+The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) collects kaomoji counts and a single summarized description per face per source model, across many users' coding agents. The companion repo processes those descriptions. After you run `analyze`, you can inspect the files yourself under `~/.llmoji/bundle/` before you choose to `upload`.
 
 ---
 
@@ -42,13 +42,24 @@ After letting it run for a week or so:
 ```bash
 export ANTHROPIC_API_KEY=...
 llmoji status                              # check what's been logged
-llmoji analyze                             # scrape + canonicalize + Haiku summarize
+llmoji analyze                             # scrape + canonicalize + summarize
 llmoji upload --target hf                  # commit to a9lim/llmoji
 # or:
 llmoji upload --target email               # opens mailto:
 ```
 
-`analyze` caches Haiku descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content-hash. `llmoji cache clear` wipes it.
+You can pick a different synthesis backend:
+
+```bash
+export OPENAI_API_KEY=...
+llmoji analyze --backend openai            # GPT-5.4 mini via the Responses API
+# or:
+llmoji analyze --backend local \           # any OpenAI-compatible endpoint
+  --base-url http://localhost:11434/v1 \
+  --model llama3.1
+```
+
+`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus synthesis model id. `llmoji cache clear` wipes it.
 
 ---
 
@@ -58,7 +69,8 @@ llmoji upload --target email               # opens mailto:
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is two packages: `anthropic` and `huggingface_hub`. Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependency footprint is three packages: `anthropic`, `openai`, and `huggingface_hub`. Hooks run in `bash` and need `jq`.
+
 From source:
 
 ```bash
@@ -79,26 +91,45 @@ Llmoji first registers a `UserPromptSubmit` hook that injects a reminder on ever
 {"ts": "...", "model": "...", "cwd": "...", "kaomoji": "(◕‿◕)", "user_text": "...", "assistant_text": "..."}
 ```
 
-### Haiku pipeline
+### Synthesis pipeline
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each (kaomoji, user, assistant) row saved, it uses Haiku to describe that specific instance. Then, it aggregates each unique kaomoji's descriptions and uses Haiku again to summarize an overall meaning. This summarized output is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. Rows bucket by `(source_model, canonical_kaomoji)`, where `source_model` is the model that wrote the kaomoji-bearing turn (Sonnet, Haiku, GPT-5.4, a local model, etc.). For each row in a bucket, the chosen synthesizer describes that specific instance. Then, it pools the per-instance descriptions for one cell and produces a single one or two sentence overall meaning for that kaomoji as that source model used it. The synthesized output is the only thing that ships in the bundle.
+
+The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates every cell in a single `analyze` run, so the descriptions across source models are directly comparable.
+
+| Backend     | API                                          | Default model                  |
+|-------------|----------------------------------------------|--------------------------------|
+| `anthropic` | Anthropic SDK, `messages.create`             | `claude-haiku-4-5-20251001`    |
+| `openai`    | OpenAI SDK, Responses API                    | `gpt-5.4-mini-2026-03-17`      |
+| `local`     | OpenAI-compatible Chat Completions endpoint  | (set via `--model`)            |
 
 ### Bundle structure
 
 `analyze` writes to `~/.llmoji/bundle/`:
 
-- **`manifest.json`**: package version, Haiku model id, salted submitter id, generation timestamp, list of providers seen, per-source journal row counts, totals (rows scraped, canonical kaomoji unique), and anything you include as `--notes`.
-- **`descriptions.jsonl`**: one row per canonical kaomoji, with the synthesized meaning.
+```
+~/.llmoji/bundle/
+  manifest.json
+  claude-sonnet-4-5-20250929/
+    descriptions.jsonl
+  claude-haiku-4-5-20251001/
+    descriptions.jsonl
+  gpt-5.4-mini-2026-03-17/
+    descriptions.jsonl
+```
+
+- **`manifest.json`**: package version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
+- **`<source-model>/descriptions.jsonl`**: one row per canonical kaomoji as that source model used it, with the synthesized meaning. Subfolder names are sanitized (lowercase, slashes become double-underscores, colons become hyphens).
 
 ---
 
 ## Privacy
 
-| Tier                                  | Where                                | Shipped on `upload`? |
-|---------------------------------------|--------------------------------------|----------------------|
-| Raw user and assistant text           | `~/.<harness>/kaomoji-journal.jsonl` | Never                |
-| Per-instance Haiku paraphrase         | `~/.llmoji/cache/per_instance.jsonl` | Never                |
-| Overall Haiku summaries and counts    | `~/.llmoji/bundle/`                  | Yes                  |
+| Tier                                       | Where                                | Shipped on `upload`? |
+|--------------------------------------------|--------------------------------------|----------------------|
+| Raw user and assistant text                | `~/.<harness>/kaomoji-journal.jsonl` | Never                |
+| Per-instance synthesizer paraphrase        | `~/.llmoji/cache/per_instance.jsonl` | Never                |
+| Synthesized summaries and counts per model | `~/.llmoji/bundle/`                  | Yes                  |
 
 Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
@@ -144,7 +175,7 @@ For harnesses we don't ship a first-class adapter for (notably OpenClaw):
 
 `llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically. Please see [`examples/openclaw_hook.ts`](examples/openclaw_hook.ts) for a worked example.
 
-The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw, mirror the rules in `is_kaomoji_candidate` faithfully — bumping any of them is a major-version event on the package side and your port needs to follow.
+The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw, please mirror the rules in `is_kaomoji_candidate` faithfully. Bumping any of them is a cross-corpus invariant change on the package side and your port needs to follow.
 
 ---
 
@@ -152,13 +183,13 @@ The Python module `llmoji.taxonomy` is the single source of truth for the valida
 
 ```bash
 pytest tests/                      # everything
-pytest tests/test_canonicalize.py  # rule-by-rule regression for canonicalize_kaomoji + extract
-pytest tests/test_public_surface.py  # locks the v1.0 contract
+pytest tests/test_canonicalize.py  # rule-by-rule regression for canonicalize_kaomoji and extract
+pytest tests/test_public_surface.py  # locks the cross-corpus invariant contract
 ```
 
 The full suite runs anywhere. CI runs `ruff check .` and `pytest` on every PR.
 
-The public-surface test exercises taxonomy invariants, haiku-prompt content checks, provider rendering plus `bash -n` validation of every hook template, the bundle allowlist, the corrupt-config refusal paths, and the unified `mask_kaomoji` prepend contract. The canonicalize tests run rule-by-rule.
+The public-surface test exercises taxonomy invariants, synth-prompt content checks, the synthesizer factory dispatch, provider rendering plus `bash -n` validation of every hook template, the bundle allowlist, the corrupt-config refusal paths, and the unified `mask_kaomoji` prepend contract. The canonicalize tests run rule-by-rule.
 
 ---
 
