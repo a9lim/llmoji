@@ -38,23 +38,57 @@ IS_SIDECHAIN=$(jq -rs '
 ' "$TRANSCRIPT" 2>/dev/null || printf 'false')
 [ "$IS_SIDECHAIN" = "true" ] && exit 0
 
-# Last assistant message: model + first text block. Reading the
-# transcript twice is wasteful but jq's slurp is cheap (transcripts
-# are tens of KB to a few MB) and isolating each query keeps the
-# script easy to debug.
-MODEL=$(jq -rs '
-  map(select(.type == "assistant")) | last | (.message.model // "")
+# Claude Code persists every assistant content block — text,
+# tool_use, thinking — as its OWN top-level entry in the transcript
+# JSONL. A single turn produces many assistant entries; the
+# kaomoji-led text may sit at any position (pre-tool, post-tool, or
+# sandwiched). Naive `last(assistant)` only catches turns that
+# finish with text and never resume — every text-then-more-tools
+# turn was getting silently dropped.
+#
+# Fix: scope to the current turn (the events at-or-after the latest
+# real-user prompt — content-string or text-block, NOT tool_result)
+# and pick the FIRST text-bearing assistant entry. The
+# UserPromptSubmit nudge drives the model to lead with the kaomoji,
+# so the first text in the turn is the kaomoji-bearing reply.
+BOUNDARY_TS=$(jq -rs '
+  map(select(
+    .type == "user"
+    and (
+      (.message.content | type) == "string"
+      or (
+        (.message.content | type) == "array"
+        and ((.message.content | any(.type == "tool_result")) | not)
+      )
+    )
+  ))
+  | last
+  | (.timestamp // "")
 ' "$TRANSCRIPT" 2>/dev/null || printf '')
 
-# Claude Code assistant content is one event with interleaved
-# `text + tool_use + text` content blocks. The kaomoji-prefixed
-# reply is the FIRST text block; later text is post-tool
-# continuation, irrelevant to kaomoji analysis.
-ASSISTANT_TEXT=$(jq -rs '
-  map(select(.type == "assistant"))
-  | last
-  | .message.content
-  | (if type == "array" then (map(select(.type == "text")) | .[0].text // "") else (. // "") end)
+# Reading the transcript twice is wasteful but jq's slurp is cheap
+# (transcripts are tens of KB to a few MB) and isolating each query
+# keeps the script easy to debug.
+MODEL=$(jq -rs --arg b "$BOUNDARY_TS" '
+  map(select(
+    .type == "assistant"
+    and ((.timestamp // "") >= $b)
+    and ((.isSidechain // false) | not)
+    and ((.message.content // []) | any(.type == "text" and ((.text // "") | length > 0)))
+  ))
+  | (.[0] // {})
+  | (.message.model // "")
+' "$TRANSCRIPT" 2>/dev/null || printf '')
+
+ASSISTANT_TEXT=$(jq -rs --arg b "$BOUNDARY_TS" '
+  map(select(
+    .type == "assistant"
+    and ((.timestamp // "") >= $b)
+    and ((.isSidechain // false) | not)
+    and ((.message.content // []) | any(.type == "text" and ((.text // "") | length > 0)))
+  ))
+  | (.[0] // {})
+  | ((.message.content // []) | map(select(.type == "text")) | .[0].text // "")
 ' "$TRANSCRIPT" 2>/dev/null || printf '')
 
 [ -z "$ASSISTANT_TEXT" ] && exit 0

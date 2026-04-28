@@ -306,17 +306,33 @@ If you find another copy of the set, delete it and route through
 
 ### Per-provider kaomoji position
 
-- **Claude Code**: kaomoji on the **first** text block of an
-  assistant content array. Later text is post-tool-call continuation,
-  irrelevant. The hook reads `[0].text`.
+- **Claude Code**: kaomoji on the **first** text-bearing entry of
+  the current turn. Claude Code persists each assistant content
+  block — text, tool_use, thinking — as its OWN top-level entry in
+  the transcript JSONL; one turn produces many assistant entries.
+  The hook scopes to events at-or-after the latest real-user
+  message (string content OR text-block array, NOT tool_result),
+  picks the first text-bearing assistant entry, and reads its
+  first text block. Naive `last(assistant)` only catches turns
+  that finish on text and never resume — every text-then-tools
+  turn was getting silently dropped pre-fix. (The original gotcha
+  comment claiming "one event with interleaved text + tool_use +
+  text content blocks" described the API response shape, not the
+  on-disk transcript shape — they don't match.)
 - **Codex**: kaomoji on the **last** agent message of a turn. Each
   agent message is its own `event_msg.agent_message` event;
   progress messages come first. The hook keys on
-  `task_complete.last_agent_message`.
-- **Hermes**: **single** final-text field per turn. No first/last
-  ambiguity.
+  `task_complete.last_agent_message`, which Codex itself surfaces
+  on the Stop payload — no transcript walking, harness curates the
+  field.
+- **Hermes**: **single** final-text field per turn
+  (`extra.assistant_response`). No first/last ambiguity, harness
+  curates.
 
-Flipping any of these would miss every multi-step turn's kaomoji.
+Codex + Hermes are structurally immune to the Claude Code bug
+because their Stop payloads carry the final assistant text as a
+named field. Claude Code's only delivers `transcript_path`, so
+the hook owns the find-the-right-block job.
 
 ### Nudge hooks — what gives the corpus its size
 
@@ -492,16 +508,24 @@ re-prompts) is the consent boundary.
 
 Stated again because the templates have to be exactly right on this:
 
-- Claude Code's assistant message is one event with interleaved
-  `text + tool_use + text` content blocks; the kaomoji-prefixed
-  reply is always the FIRST text block.
+- Claude Code persists each content block — text, tool_use,
+  thinking — as its OWN top-level transcript entry. The
+  kaomoji-prefixed reply is on the first text-bearing entry of
+  the current turn; the live hook + backfill both scope to
+  events at-or-after the latest real-user message (string
+  content OR text-block array, NOT tool_result) and pick the
+  first text-bearing one.
 - Codex emits each agent message as a separate
   `event_msg.agent_message` event; the kaomoji-bearing summary
   lands last as `task_complete.last_agent_message`.
 
 The Codex hook + Codex backfill both key on `last_agent_message`,
 NOT on the first agent_message — flipping that would miss every
-multi-step turn's kaomoji.
+multi-step turn's kaomoji. The Claude Code hook + backfill both
+key on the first text-bearing entry of the current turn — flipping
+to `last(assistant)` would miss every turn that resumes tool work
+after the kaomoji-led reply (the v1.0 pre-fix bug, observed
+silently dropping ~6 hours of journal entries on real sessions).
 
 ### Codex `transcript_path` carries the rollout JSONL
 
