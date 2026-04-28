@@ -5,9 +5,11 @@ Run after ``llmoji analyze``::
 
     python examples/inspect_bundle.py
 
-Prints the manifest summary plus one line per canonical kaomoji. This
-is what would ship on ``llmoji upload`` (and nothing else: the bundle
-is allowlisted to ``manifest.json`` and ``descriptions.jsonl``).
+Prints the manifest summary plus one section per source-model
+subfolder, with each canonical kaomoji's row inside. This is what
+would ship on ``llmoji upload`` (and nothing else: the bundle is
+allowlisted to ``manifest.json`` at the top level plus each
+``<source-model>/descriptions.jsonl``).
 """
 
 from __future__ import annotations
@@ -21,9 +23,8 @@ from llmoji import paths
 def main() -> int:
     bundle = paths.bundle_dir()
     manifest_path = bundle / "manifest.json"
-    descriptions_path = bundle / "descriptions.jsonl"
 
-    if not manifest_path.exists() or not descriptions_path.exists():
+    if not manifest_path.exists():
         print(
             f"no bundle at {bundle}; run `llmoji analyze` first.",
             file=sys.stderr,
@@ -33,38 +34,49 @@ def main() -> int:
     manifest = json.loads(manifest_path.read_text())
     print(f"bundle: {bundle}")
     print(f"  llmoji version:    {manifest.get('llmoji_version', '?')}")
-    print(f"  haiku model:       {manifest.get('haiku_model_id', '?')}")
+    print(f"  synthesis backend: {manifest.get('synthesis_backend', '?')}")
+    print(f"  synthesis model:   {manifest.get('synthesis_model_id', '?')}")
     print(f"  generated at:      {manifest.get('generated_at', '?')}")
     print(f"  submitter id:      {manifest.get('submitter_id', '?')}")
-    print(f"  total rows:        {manifest.get('total_rows_scraped', '?')}")
     print(
-        f"  canonical unique:  "
-        f"{manifest.get('total_kaomoji_unique_canonical', '?')}"
+        f"  total synth rows:  "
+        f"{manifest.get('total_synthesized_rows', '?')}"
     )
     if providers := manifest.get("providers_seen"):
         print(f"  providers:         {', '.join(providers)}")
-    if journal_counts := manifest.get("journal_counts"):
-        print("  journal counts:")
-        for src, n in sorted(journal_counts.items()):
-            print(f"    {src:<24} {n} rows")
+    if model_counts := manifest.get("model_counts"):
+        print("  model counts:")
+        for src_model, n in sorted(model_counts.items()):
+            print(f"    {src_model:<40} {n} rows")
     if notes := manifest.get("notes"):
         print(f"  notes:             {notes}")
     print()
 
-    print("descriptions.jsonl (the only prose that ships):")
+    subdirs = sorted(p for p in bundle.iterdir() if p.is_dir())
+    if not subdirs:
+        print("no source-model subfolders — bundle is empty.")
+        return 2
+
+    print("descriptions (the only prose that ships):")
     print()
-    with descriptions_path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
+    for sub in subdirs:
+        descriptions_path = sub / "descriptions.jsonl"
+        if not descriptions_path.exists():
+            print(f"  [{sub.name}/]  (missing descriptions.jsonl)")
+            continue
+        rows = [
+            json.loads(line)
+            for line in descriptions_path.read_text().splitlines()
+            if line.strip()
+        ]
+        print(f"  ── {sub.name}  ({len(rows)} faces) ──")
+        for row in rows:
             kao = row.get("kaomoji", "?")
             count = row.get("count", "?")
-            desc = row.get("haiku_synthesis_description", "")
-            print(f"  {kao}   ({count} occurrences)")
-            print(f"      {desc}")
-            print()
+            desc = row.get("synthesis_description", "")
+            print(f"    {kao}   ({count} occurrences)")
+            print(f"        {desc}")
+        print()
 
     return 0
 

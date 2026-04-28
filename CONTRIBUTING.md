@@ -17,7 +17,7 @@ The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or networ
 ```bash
 pytest tests/                          # everything
 pytest tests/test_canonicalize.py -v   # rule-by-rule taxonomy regression
-pytest tests/test_public_surface.py -v # v1.0 frozen-surface contract
+pytest tests/test_public_surface.py -v # cross-corpus invariant contract
 ```
 
 The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
@@ -59,7 +59,7 @@ Please strip the leading kaomoji from `assistant_text` on parse, the same way th
 ## PRs
 
 - Please don't bump the version in your PR unless the change is intended to ship as a release. The PyPI publish workflow is triggered by a version update.
-- Anything that touches `llmoji.taxonomy`, `llmoji.haiku_prompts`, `Provider`, the journal schema, or the bundle schema is a v1.0 frozen-surface change and gates a major version bump. Please flag it explicitly in the PR body.
+- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `Provider`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body — those land in the HF dataset's aggregation rules and want a hand-edit on the dataset card.
 - The hermes provider in particular wants real-traffic validation. If you run hermes and are willing to share what `extra.*` keys actually arrive on `post_llm_call` and whether `subagent_stop` correlation filters cleanly, please open an issue.
 
 ## Questions
