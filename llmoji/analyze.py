@@ -321,7 +321,14 @@ def run_analyze(
     """Top-level entry point. Lazy-imports anthropic so the rest of
     the package stays importable without an API key set."""
     import anthropic
-    client = anthropic.Anthropic()
+    # max_retries=8 (SDK default is 2). A full re-analyze on a
+    # multi-hundred-row corpus can sustain a 429 wave for tens of
+    # seconds when the org-level Haiku 50 req/min cap kicks in;
+    # default retries can't ride that out and the run aborts mid-
+    # Stage-A. The SDK honors the response's Retry-After header
+    # and uses exponential backoff between retries — bumping the
+    # cap is the right knob.
+    client = anthropic.Anthropic(max_retries=8)
 
     paths.ensure_home()
     bundle_dir = paths.bundle_dir()
