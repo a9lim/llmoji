@@ -93,24 +93,18 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
-        # Bundle is structural now (1.1.0): manifest.json at the top
-        # level + one <model>/descriptions.jsonl per source-model
-        # subfolder. Show both layers.
-        top_files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
-        subdirs = sorted(p for p in bundle_dir.iterdir() if p.is_dir())
+        # Bundle layout: manifest.json plus one
+        # <source-model>.jsonl per source model the journal saw,
+        # all at the top level.
+        files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
+        n_data = sum(1 for p in files if p.suffix == ".jsonl")
         print(
             f"bundle ready at {bundle_dir} "
-            f"({len(top_files)} top-level file(s), "
-            f"{len(subdirs)} model subfolder(s)):"
+            f"({len(files)} file(s), {n_data} per-source-model "
+            f".jsonl):"
         )
-        for f in top_files:
+        for f in files:
             print(f"  - {f.name}  ({human_bytes(f.stat().st_size)})")
-        for d in subdirs:
-            sub_files = sorted(p for p in d.iterdir() if p.is_file())
-            sizes = ", ".join(
-                f"{p.name} {human_bytes(p.stat().st_size)}" for p in sub_files
-            )
-            print(f"  - {d.name}/  ({sizes or 'empty'})")
     else:
         print("no bundle (run `llmoji analyze`).")
 
