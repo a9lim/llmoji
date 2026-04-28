@@ -32,6 +32,7 @@ from ._util import human_bytes
 from .haiku import cache_size
 from .providers import PROVIDERS, get_provider
 from .scrape import ScrapeRow
+from .sources.chatgpt_export import iter_chatgpt_export
 from .sources.claude_export import iter_claude_export
 from .sources.journal import iter_journal
 
@@ -116,14 +117,20 @@ def _cmd_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _parse_claude_ai(args: argparse.Namespace) -> int:
+def _write_journal_rows(rows: Iterator[ScrapeRow], out_name: str) -> int:
+    """Persist a stream of :class:`ScrapeRow` to a journal JSONL.
+
+    Used by every static-export parser: the row-to-6-field
+    journal-line mapping is identical across formats, only the
+    upstream :class:`ScrapeRow` iterator + output filename differ.
+    """
     paths.ensure_home()
-    out_path = paths.journals_dir() / "claude_ai_export.jsonl"
+    out_path = paths.journals_dir() / out_name
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     n = 0
     with out_path.open("w") as f:
-        for row in iter_claude_export([Path(p) for p in args.paths]):
+        for row in rows:
             r = {
                 "ts": row.timestamp,
                 "model": row.model or "",
@@ -138,10 +145,25 @@ def _parse_claude_ai(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_claude_ai(args: argparse.Namespace) -> int:
+    return _write_journal_rows(
+        iter_claude_export([Path(p) for p in args.paths]),
+        "claude_ai_export.jsonl",
+    )
+
+
+def _parse_chatgpt(args: argparse.Namespace) -> int:
+    return _write_journal_rows(
+        iter_chatgpt_export([Path(p) for p in args.paths]),
+        "chatgpt_export.jsonl",
+    )
+
+
 # Registry of static-dump parsers. Adding a new format = add an
 # entry. The CLI dispatches off ``--provider`` against this dict.
 _PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "claude.ai": _parse_claude_ai,
+    "chatgpt": _parse_chatgpt,
 }
 
 

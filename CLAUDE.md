@@ -33,7 +33,8 @@ End-user pipeline:
             ┌──────────────┐  canonicalize   ┌─────────────────┐
             │ llmoji.      │ ◀────────────── │ llmoji.sources. │
             │ taxonomy     │   per row       │ journal /       │
-            └──────┬───────┘                 │ claude_export   │
+            └──────┬───────┘                 │ claude_export / │
+                   │                         │ chatgpt_export  │
                    │                         └─────────────────┘
                    ▼
            ┌──────────────────┐                ┌──────────────┐
@@ -168,8 +169,9 @@ flag names beyond `--target {hf,email}`, etc.
 llmoji install <provider>      write hook + register; idempotent
 llmoji uninstall <provider>    inverse; idempotent (journal preserved)
 llmoji status                  installed providers, journal sizes, paths
-llmoji parse --provider <n> P  ingest a static export dump (e.g.
-                               claude.ai conversations.json) into
+llmoji parse --provider <n> P  ingest a static export dump
+                               (claude.ai or chatgpt
+                               conversations.json) into
                                ~/.llmoji/journals/
 llmoji analyze [--notes …]     scrape + canonicalize + Haiku
                                synthesize → ~/.llmoji/bundle/
@@ -243,9 +245,22 @@ llmoji/
     scrape.py              # ScrapeRow + iter_all chain helper
                            # (span-only schema; no affect labels)
     sources/
+      _common.py           # kaomoji_lead_strip — validate-and-strip
+                           # helper shared by every static-export
+                           # reader. Single source of truth for the
+                           # journal-row contract on the export side
+                           # (assistant_text never carries the kaomoji).
       journal.py           # generic kaomoji-journal reader (any
                            # provider's ~/.<harness>/kaomoji-journal.jsonl)
       claude_export.py     # Claude.ai conversations.json reader
+                           # (linear chat_messages array)
+      chatgpt_export.py    # OpenAI ChatGPT conversations.json reader.
+                           # Same filename as Claude's, different
+                           # schema: a tree of message nodes keyed by
+                           # id, with current_node pointing at the
+                           # active leaf. Walks mapping[current_node]
+                           # up via parent for the displayed branch;
+                           # regenerated/edited siblings stay invisible.
     backfill.py            # one-shot transcript→journal replays
                            # for Claude Code + Codex
     providers/
@@ -328,13 +343,17 @@ llmoji/
 
 ### Journal-row contract: `assistant_text` never carries the kaomoji
 
-Every source — bash hooks, Claude.ai export reader, generic-JSONL
-contract — must persist `assistant_text` with the leading kaomoji
-already stripped. The prefix lives separately in the row's
-`kaomoji` field. The bash hooks enforce this via jq's
-`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")`;
-`llmoji.sources.claude_export` does the equivalent in Python after
-`taxonomy.extract`.
+Every source — bash hooks, Claude.ai export reader, ChatGPT export
+reader, generic-JSONL contract — must persist `assistant_text` with
+the leading kaomoji already stripped. The prefix lives separately
+in the row's `kaomoji` field. The bash hooks enforce this via jq's
+`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")`; the two
+static-export readers route through
+`llmoji.sources._common.kaomoji_lead_strip`, which wraps
+`taxonomy.extract` and returns `(first_word, body)` ready to drop
+into a `ScrapeRow`. Future export readers should reach for the
+shared helper rather than re-implementing the dance — drift between
+sources is what the helper exists to prevent.
 
 `mask_kaomoji` consequently has a single branch: prepend
 `"[FACE] "` to whatever's there. No source-shape dispatch, no
