@@ -22,7 +22,8 @@ Three first-class backends:
 Cache layout (one JSONL line per cached call):
 
     {
-      "key":          sha256(synth_model_id + "\\0" + canonical_kaomoji
+      "key":          sha256(synth_model_id + "\\0" + backend
+                            + "\\0" + base_url + "\\0" + canonical_kaomoji
                             + "\\0" + user + "\\0" + assistant)[:16],
       "kaomoji":      canonical kaomoji,
       "description":  synthesizer output,
@@ -30,10 +31,11 @@ Cache layout (one JSONL line per cached call):
       "backend":      "anthropic" | "openai" | "local",
     }
 
-The synth model id is part of the cache key — switching backends
-silently returning stale paraphrases from the prior backend would
-be a correctness bug. One-time recompute cost on the first analyze
-after upgrade (existing entries silently miss).
+Backend + base_url + model_id are all in the key — switching
+backends or pointing a local backend at a different endpoint can't
+silently return paraphrases from the prior call. One-time recompute
+cost on the first analyze after upgrade (existing entries miss
+cleanly because the key shape changed).
 
 The cache file lives at ``~/.llmoji/cache/per_instance.jsonl`` by
 default; the path is parameterized so tests can use a tmpdir.
@@ -77,6 +79,8 @@ def mask_kaomoji(text: str, first_word: str) -> str:
 
 def cache_key(
     synth_model_id: str,
+    backend: str,
+    base_url: str,
     canonical_kaomoji: str,
     user_text: str,
     assistant_text: str,
@@ -88,12 +92,23 @@ def cache_key(
     probability against a 64-bit space). The cache is private to
     one machine; no security boundary depends on the hash.
 
-    The synthesizer model id is folded in so two different backends
-    (or the same backend on different snapshots) don't share cache
-    entries — the prose differs by model, so the key has to too.
+    Backend and base_url are folded in alongside the model id so two
+    backends sharing a model name (e.g. ``local`` running an Ollama
+    tag that collides with a remote id) — or one ``local`` instance
+    pointed at two different endpoints — don't share cache entries.
+    The prose differs by backend; the key has to too.
+
+    If a future federated/shared cache lands, bump from the truncated
+    16-hex prefix to the full SHA-256 hexdigest — collision
+    probability scales quadratically with corpus size and 64 bits is
+    only safe at single-machine scale.
     """
     h = hashlib.sha256()
     h.update((synth_model_id or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((backend or "").encode("utf-8"))
+    h.update(b"\0")
+    h.update((base_url or "").encode("utf-8"))
     h.update(b"\0")
     h.update(canonical_kaomoji.encode("utf-8"))
     h.update(b"\0")
@@ -157,10 +172,16 @@ class Synthesizer:
     calls it from N threads (the Anthropic httpx client and OpenAI's
     httpx client are both thread-safe), so subclasses must keep
     ``call`` reentrant.
+
+    ``base_url`` is empty for the hosted backends (anthropic, openai)
+    and set to the user-supplied endpoint for ``local``. It feeds
+    into :func:`cache_key` so two ``local`` instances pointed at
+    different endpoints don't share cache entries.
     """
 
     backend: str = ""
     model_id: str = ""
+    base_url: str = ""
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         raise NotImplementedError
@@ -264,7 +285,7 @@ class LocalSynthesizer(Synthesizer):
         self, model_id: str, *, base_url: str, api_key: str = "ollama",
     ) -> None:
         self.model_id = model_id
-        self._base_url = base_url
+        self.base_url = base_url
         self._api_key = api_key
         self._client: Any = None
         self._client_lock = threading.Lock()
@@ -275,7 +296,7 @@ class LocalSynthesizer(Synthesizer):
                 if self._client is None:
                     import openai
                     self._client = openai.OpenAI(
-                        base_url=self._base_url, api_key=self._api_key,
+                        base_url=self.base_url, api_key=self._api_key,
                     )
         return self._client
 

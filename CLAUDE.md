@@ -99,9 +99,14 @@ the factory has no env-var dependency at construction time.
   (deterministic seed `f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`),
   mask the kaomoji to `[FACE]`, call the synthesizer with
   `DESCRIBE_PROMPT_WITH_USER` or `DESCRIBE_PROMPT_NO_USER`. Cache
-  keyed by `sha256(synth_model_id + "\0" + canonical + "\0" + user
-  + "\0" + assistant)[:16]` at `~/.llmoji/cache/per_instance.jsonl`.
-  Switching synth model misses cleanly (no stale cross-model hits).
+  keyed by `sha256(synth_model_id + "\0" + backend + "\0" + base_url
+  + "\0" + canonical + "\0" + user + "\0" + assistant)[:16]` at
+  `~/.llmoji/cache/per_instance.jsonl`. Switching synth model OR
+  backend OR (for `local`) endpoint misses cleanly. Within a wave,
+  cache-miss API calls dispatch on a small thread pool but the
+  serial walk that builds Stage B's input + appends the cache file
+  runs in deterministic order — re-runs against the same journal
+  feed Stage B identical descriptions in identical order.
 - **Stage B (per cell)**: pool Stage A descriptions, synthesize a
   single 1–2-sentence overall meaning via `SYNTHESIZE_PROMPT`. The
   Stage B line is the **only** thing that ships — it lands in that
@@ -309,6 +314,17 @@ Python: `llmoji.taxonomy.KAOMOJI_START_CHARS`. Shell:
 `is_kaomoji_candidate` validates Python-side; the rendered case
 filter handles the shell-side first pass. If you find another copy
 of the set, delete it and route through `llmoji.taxonomy`.
+
+`is_kaomoji_candidate` enforces: length 2..32, first char in
+`KAOMOJI_START_CHARS`, no ASCII backslash, no run of 4+ ASCII
+letters. Bracket-balance is *not* enforced — real corpus output is
+sometimes unbalanced (closing glyph isn't strictly the matching
+bracket), and the length cap + 4-letter-run + backslash filters
+together carry the prose-rejection role. `_leading_bracket_span`
+still uses depth-walking to *locate* the closing bracket on
+bracket-leading inputs, but falls back to a whitespace-delimited
+word (capped at the length limit) when the depth-walker doesn't
+close cleanly.
 
 ### Per-provider kaomoji capture — N rows per turn
 
