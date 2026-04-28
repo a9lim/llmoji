@@ -191,7 +191,8 @@ llmoji/
                                # main branch protection) +
                                # release.yml (tag → PyPI → release)
   examples/                    # inspect_bundle.py (audit script);
-                               # openclaw_hook.ts (generic-JSONL example)
+                               # openclaw_plugin/ (definePluginEntry plugin);
+                               # opencode_plugin.ts (generic-JSONL example)
   llmoji/
     py.typed                   # PEP 561 marker
     __init__.py                # public surface re-exports
@@ -552,12 +553,20 @@ mirrors this.
 ### Generic JSONL contract for unsupported harnesses
 
 Motivated users on harnesses we don't ship a first-class adapter for
-(notably OpenClaw — TS-shaped hooks taking the payload as a function
-argument, not stdin) can write directly to
-`~/.llmoji/journals/<name>.jsonl` against the canonical 6-field
-schema. `llmoji analyze` picks them up automatically alongside
-managed providers' journals. OpenClaw first-class is post-v1.0;
-worked example lives at `examples/openclaw_hook.ts`.
+can write directly to `~/.llmoji/journals/<name>.jsonl` against the
+canonical 6-field schema. `llmoji analyze` picks them up
+automatically alongside managed providers' journals. Two worked
+examples ship in the repo:
+
+- `examples/opencode_plugin.ts` — generic-JSONL-append contract for
+  opencode (TS-only plugin host). One row per kaomoji-bearing
+  assistant turn, written to `~/.llmoji/journals/opencode.jsonl`.
+- `examples/openclaw_plugin/` — a real `definePluginEntry`-based
+  OpenClaw plugin (`index.ts` + `openclaw.plugin.json`); demonstrates
+  the same generic-JSONL contract on a different host.
+
+A first-class TS-plugin adapter for either harness is a post-1.0
+concern — bash-rendered hooks are the v1.0 first-class shape.
 
 ### HF dataset card is a separate hand-maintained surface
 
