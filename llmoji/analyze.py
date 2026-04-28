@@ -15,9 +15,12 @@ End-user pipeline (no GPU, no embedding, no axes):
      :func:`llmoji.synth.mask_kaomoji` and call the chosen backend
      via the :class:`~llmoji.synth.Synthesizer` instance with
      :data:`llmoji.synth_prompts.DESCRIBE_PROMPT_*`. Cache by
-     content-hash + synth model id so re-runs of ``analyze`` skip
-     rows already described — both for cost and so unchanged rows
-     produce identical bundles.
+     content-hash + synth model id + backend so re-runs of
+     ``analyze`` skip rows already described — for cost, and so a
+     re-run feeds Stage B identical descriptions in the same order
+     regardless of cache state. (Synthesizer prose itself is
+     model-dependent and may not be byte-stable on a fresh call,
+     but the cache pins it for any given input.)
   3. Stage B (per-cell synthesis): pool Stage A descriptions for
      each ``(source_model, canonical_kaomoji)`` cell; call
      :func:`llmoji.synth.synthesize_descriptions` with
@@ -41,7 +44,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from . import paths
 from ._util import atomic_write_text, package_version, sanitize_model_id_for_path
@@ -210,20 +213,20 @@ def _stage_a(
 
     Cache-miss API calls run on a small thread pool (``max_workers``
     or ``$LLMOJI_CONCURRENCY``, default 2). Both SDK clients are
-    thread-safe; cache appends happen serially on the main thread as
-    futures complete, so there's no append interleaving to worry
-    about.
+    thread-safe; cache appends happen serially on the main thread
+    after all dispatched futures complete, in deterministic walk
+    order, so the bundle and the cache file are identical regardless
+    of the order futures finish in.
     """
     cache = load_cache(cache_path)
-    descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
     n_cached = 0
-    # (source_model, canonical, cache_key, prompt) for cache misses.
-    pending: list[tuple[str, str, str, str]] = []
 
-    # Pass 1: walk every sampled row, satisfy from cache where
-    # possible, queue misses for parallel dispatch.
+    # Walk every sampled row in deterministic (sorted source_model,
+    # sorted canonical, _sample-stable) order. Each entry records
+    # whether it was a cache hit (carries ``description`` directly)
+    # or a miss (carries ``prompt`` to be dispatched). After dispatch
+    # the misses are populated with their ``description`` in place.
+    walk: list[dict[str, Any]] = []
     for source_model in sorted(buckets):
         per_canon = buckets[source_model]
         for canon in sorted(per_canon):
@@ -235,10 +238,16 @@ def _stage_a(
             for r in sampled:
                 user_text = (r.surrounding_user or "").strip()
                 assistant = r.assistant_text or ""
-                key = cache_key(synth.model_id, canon, user_text, assistant)
+                key = cache_key(
+                    synth.model_id, synth.backend, synth.base_url,
+                    canon, user_text, assistant,
+                )
                 hit = cache.get(key)
                 if hit and "description" in hit:
-                    descs_by_cell[source_model][canon].append(hit["description"])
+                    walk.append({
+                        "sm": source_model, "canon": canon, "key": key,
+                        "cached": True, "description": hit["description"],
+                    })
                     n_cached += 1
                     continue
                 masked = mask_kaomoji(assistant, r.first_word)
@@ -248,44 +257,60 @@ def _stage_a(
                     )
                 else:
                     prompt = DESCRIBE_PROMPT_NO_USER.format(masked_text=masked)
-                pending.append((source_model, canon, key, prompt))
+                walk.append({
+                    "sm": source_model, "canon": canon, "key": key,
+                    "cached": False, "prompt": prompt, "description": None,
+                })
 
-    if not pending:
-        return _freeze_two_level(descs_by_cell), 0, n_cached
+    pending_indices = [i for i, e in enumerate(walk) if not e["cached"]]
+    if pending_indices:
+        workers = _resolve_concurrency(max_workers)
 
-    workers = _resolve_concurrency(max_workers)
+        def _describe_one(prompt: str) -> tuple[str, float]:
+            t0 = time.monotonic()
+            description = synth.call(prompt)
+            dt = time.monotonic() - t0 if print_progress else 0.0
+            return description, dt
 
-    def _describe_one(
-        sm: str, canon: str, key: str, prompt: str,
-    ) -> tuple[str, str, str, str, float]:
-        t0 = time.monotonic()
-        description = synth.call(prompt)
-        dt = time.monotonic() - t0 if print_progress else 0.0
-        return sm, canon, key, description, dt
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_idx = {
+                pool.submit(_describe_one, walk[i]["prompt"]): i
+                for i in pending_indices
+            }
+            for fut in as_completed(future_to_idx):
+                i = future_to_idx[fut]
+                description, dt = fut.result()
+                walk[i]["description"] = description
+                if print_progress:
+                    _print_stage_progress(
+                        "A", f"{walk[i]['sm']}/{walk[i]['canon']}",
+                        None, dt, description,
+                    )
 
+    # Serialize: assemble descs_by_cell + append cache in deterministic
+    # walk order. Order matters for Stage B because SYNTHESIZE_PROMPT
+    # numbers the descriptions; if Stage B sees the same list in the
+    # same order across runs, it produces the same prose.
+    descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     n_calls = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_describe_one, sm, canon, k, p)
-            for sm, canon, k, p in pending
-        ]
-        for fut in as_completed(futures):
-            sm, canon, key, description, dt = fut.result()
+    for entry in walk:
+        sm = entry["sm"]
+        canon = entry["canon"]
+        description = entry["description"]
+        descs_by_cell[sm][canon].append(description)
+        if not entry["cached"]:
             row = {
-                "key": key,
+                "key": entry["key"],
                 "kaomoji": canon,
                 "description": description,
                 "model": synth.model_id,
                 "backend": synth.backend,
             }
             append_cache(cache_path, row)
-            cache[key] = row
-            descs_by_cell[sm][canon].append(description)
+            cache[entry["key"]] = row
             n_calls += 1
-            if print_progress:
-                _print_stage_progress(
-                    "A", f"{sm}/{canon}", None, dt, description,
-                )
 
     return _freeze_two_level(descs_by_cell), n_calls, n_cached
 

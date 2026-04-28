@@ -15,9 +15,14 @@ Extractor notes:
   - `extract` returns a `KaomojiMatch` containing the validated
     leading kaomoji span (or `""` if the input doesn't look like a
     kaomoji-prefixed message).
-  - The fallback is a balanced-paren span, so whitespace-padded
-    kaomoji like ``(｡˃ ᵕ ˂ )`` surface with a human-readable
-    `first_word` even when no exact taxonomy entry exists.
+  - For bracket-leading inputs the extractor prefers a balanced-paren
+    span — that's how whitespace-padded kaomoji like ``(｡˃ ᵕ ˂ )``
+    surface intact. When the bracket span doesn't close cleanly
+    inside the length cap (real corpus output is sometimes
+    unbalanced), it falls back to a whitespace-delimited word so the
+    leading kaomoji still surfaces. The `is_kaomoji_candidate`
+    validator no longer enforces bracket balance — the length cap +
+    4-letter-run + backslash filters carry the prose-rejection role.
   - For research-side label lookups, see
     ``llmoji_study.taxonomy_labels.extract_with_label``.
 """
@@ -70,8 +75,13 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
         ``(\\*´∀｀\\*)`` came from a model emitting a literal ``\\*``
         that it treated as Markdown escape)
       - no run of 4+ consecutive ASCII letters (prose)
-      - if starts with an opening bracket from `_OPEN_BRACKETS`,
-        the span must be bracket-balanced
+
+    Bracket balance is *not* enforced. Real corpus output is
+    sometimes unbalanced — variant kaomoji where the closing glyph
+    isn't strictly the matching bracket — and the previous balance
+    check over-rejected valid entries. The length cap, the
+    4-letter-run rule, and the backslash filter together carry the
+    prose-rejection role.
     """
     if not (2 <= len(s) <= max_len):
         return False
@@ -80,20 +90,6 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     if "\\" in s:
         return False
     if _LETTER_RUN_RE.search(s):
-        return False
-    # Require bracket balance regardless of leading char. Catches
-    # `(unclosed` AND `ヽ(^`-style truncations where a non-bracket
-    # leader like `ヽ` precedes an unclosed inner `(` — the sed-cut
-    # at first ASCII letter can chop these mid-bracket.
-    depth = 0
-    for c in s:
-        if c in _OPEN_BRACKETS:
-            depth += 1
-        elif c in _CLOSE_BRACKETS:
-            depth -= 1
-            if depth < 0:
-                return False
-    if depth != 0:
         return False
     return True
 
@@ -113,19 +109,25 @@ class KaomojiMatch:
 
 
 def _leading_bracket_span(text: str) -> str:
-    """Return the leading balanced-paren span of `text`, or the
-    first whitespace-delimited word if `text` doesn't start with a
-    bracket.
+    """Return the leading kaomoji span of `text`.
 
-    Handles kaomoji with internal whitespace (the model sometimes
-    emits ``(｡˃ ᵕ ˂ )`` — spaces and all) by matching on bracket
-    balance rather than splitting on the first space.
+    For bracket-leading inputs, prefer a balanced-paren span — that's
+    how whitespace-padded kaomoji like ``(｡˃ ᵕ ˂ )`` surface intact.
+    When the depth-walker hits the length cap or short-circuits on a
+    `depth < 0` without ever closing, fall back to a
+    whitespace-delimited word capped at ``_KAOMOJI_MAX_LEN``. Real
+    corpus output is sometimes unbalanced (closing glyph isn't
+    strictly the matching bracket); the fallback keeps those
+    entries instead of dropping them on the floor.
+
+    For non-bracket-leading inputs (``ヽ``, ``ᕕ``, etc.), the span
+    is just the first whitespace-delimited word capped at the length
+    limit.
 
     Returns `""` when the candidate fails `is_kaomoji_candidate` —
-    unbalanced brackets, prose, markdown-escape artifacts, oversize
-    spans all collapse to the empty string rather than producing
-    nonsense `first_word` values that downstream consumers would
-    have to re-filter.
+    prose, markdown-escape artifacts, oversize spans collapse to the
+    empty string rather than producing nonsense ``first_word``
+    values that downstream consumers would have to re-filter.
     """
     stripped = text.lstrip()
     if not stripped:
@@ -133,6 +135,7 @@ def _leading_bracket_span(text: str) -> str:
     candidate = ""
     if stripped[0] in _OPEN_BRACKETS:
         depth = 0
+        closed = False
         for i, c in enumerate(stripped):
             if c in _OPEN_BRACKETS:
                 depth += 1
@@ -140,15 +143,24 @@ def _leading_bracket_span(text: str) -> str:
                 depth -= 1
                 if depth == 0:
                     candidate = stripped[: i + 1]
+                    closed = True
                     break
                 if depth < 0:
                     break
             if i + 1 >= _KAOMOJI_MAX_LEN:
-                # Span ran past the length cap before closing —
-                # reject. Without this guard, balanced-paren prose
-                # like `(Backgrounddebugscriptcompleted...)` returns
-                # the whole sentence as a `first_word`.
+                # Past the length cap with no clean close.
                 break
+        if not closed:
+            # Unbalanced bracket-leading kaomoji — fall back to a
+            # whitespace-delimited word (capped at _KAOMOJI_MAX_LEN)
+            # so we don't drop real corpus entries whose closing
+            # glyph isn't the matching bracket.
+            idx = 0
+            while idx < len(stripped) and not stripped[idx].isspace():
+                idx += 1
+                if idx >= _KAOMOJI_MAX_LEN:
+                    break
+            candidate = stripped[:idx]
     else:
         idx = 0
         while idx < len(stripped) and not stripped[idx].isspace():
