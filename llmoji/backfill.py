@@ -36,11 +36,16 @@ same second. Sub-second-grade dedup is out of scope.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterator
 
+from ._util import journal_line_dict
 from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
+from .sources._common import walk_parents_for_user_text
 from .taxonomy import is_kaomoji_candidate
+
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 
 
 def _flush_rows(rows: list[dict[str, Any]], journal: Path) -> int:
@@ -66,9 +71,8 @@ def kaomoji_prefix(text: str) -> str:
     everything from the first ASCII letter, trim trailing whitespace,
     then validate via :func:`~llmoji.taxonomy.is_kaomoji_candidate`
     (≥2 bytes, ≤32 bytes, starts with ``KAOMOJI_START_CHARS``, no
-    backslash, no 4+-letter run, balanced brackets if applicable).
-    Returns ``""`` for prose, markdown-escape artifacts, and other
-    garbage.
+    backslash, no 4+-letter run). Returns ``""`` for prose,
+    markdown-escape artifacts, and other garbage.
     """
     first_line = ""
     for line in text.splitlines():
@@ -78,7 +82,8 @@ def kaomoji_prefix(text: str) -> str:
     if not first_line:
         return ""
     stripped = first_line.lstrip()
-    cut = next((i for i, c in enumerate(stripped) if "a" <= c.lower() <= "z"), len(stripped))
+    m = _ASCII_LETTER_RE.search(stripped)
+    cut = m.start() if m else len(stripped)
     prefix = stripped[:cut].rstrip()
     if not is_kaomoji_candidate(prefix):
         return ""
@@ -141,49 +146,51 @@ _CLAUDE_CODE_INJECTED_PREFIXES: tuple[str, ...] = tuple(
 )
 
 
+def _claude_code_text_extractor(ev: dict[str, Any]) -> str:
+    """Extract the text payload of a Claude Code transcript user
+    event. Strings pass through; list-shaped content blocks return
+    the first non-empty ``"text"`` block. Non-text blocks (tool_use,
+    tool_result, image) collapse to ``""`` so the parent walker
+    keeps climbing past them.
+    """
+    m = ev.get("message", {})
+    content = m.get("content") if isinstance(m, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                txt = b.get("text") or ""
+                if txt.strip():
+                    return str(txt)
+    return ""
+
+
 def _resolve_user_text_claude(
     start_uuid: str | None,
     by_uuid: dict[str, dict[str, Any]],
-    max_hops: int = 1000,
 ) -> str:
-    """Walk parentUuid backward to the nearest human-typed user text.
+    """Claude Code parent-walk for the originating user prompt.
 
-    Skips tool_result parents (they have type=='user' but content is
-    machine-generated) AND skill-injected content (slash-command
-    activations dump the skill body as a user-role message).
-
-    The hop budget is generous because a tool-heavy turn easily
-    chains dozens of `assistant tool_use → user tool_result` pairs
-    between the kaomoji-led text and the originating user prompt.
-    Pre-bump the cap was 5, which dropped `user_text` on ~17% of
-    real-corpus rows. The cap exists only to bound a pathological
-    uuid cycle — anything higher than the longest plausible turn
-    is fine.
+    Thin wrapper around the shared
+    :func:`llmoji.sources._common.walk_parents_for_user_text`. Skips
+    tool_result parents (they have ``type=="user"`` but content is
+    machine-generated) and skill-injected content (slash-command
+    activations dump the skill body as a user-role message). The
+    hop budget is generous because a tool-heavy turn easily chains
+    dozens of ``assistant tool_use → user tool_result`` pairs
+    between the kaomoji-led text and the originating user prompt;
+    pre-bump the cap was 5, which dropped ``user_text`` on ~17% of
+    real-corpus rows.
     """
-    uuid = start_uuid
-    for _ in range(max_hops):
-        if uuid is None:
-            return ""
-        ev = by_uuid.get(uuid)
-        if ev is None:
-            return ""
-        if ev.get("type") == "user":
-            m = ev.get("message", {})
-            content = m.get("content") if isinstance(m, dict) else None
-            text = ""
-            if isinstance(content, str) and content.strip():
-                text = content
-            elif isinstance(content, list):
-                for b in content:
-                    if isinstance(b, dict) and b.get("type") == "text":
-                        txt = b.get("text") or ""
-                        if txt.strip():
-                            text = txt
-                            break
-            if text and not text.startswith(_CLAUDE_CODE_INJECTED_PREFIXES):
-                return text
-        uuid = ev.get("parentUuid")
-    return ""
+    return walk_parents_for_user_text(
+        start_uuid,
+        by_uuid,
+        parent_field="parentUuid",
+        role_check=lambda node: node.get("type") == "user",
+        text_extractor=_claude_code_text_extractor,
+        injected_prefixes=_CLAUDE_CODE_INJECTED_PREFIXES,
+    )
 
 
 def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
@@ -235,14 +242,14 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
         if not prefix:
             continue
         user_text = _resolve_user_text_claude(ev.get("parentUuid"), by_uuid)
-        yield {
-            "ts": str(ev.get("timestamp") or ""),
-            "model": str(m.get("model") or ""),
-            "cwd": str(ev.get("cwd") or ""),
-            "kaomoji": prefix,
-            "user_text": user_text,
-            "assistant_text": strip_leading_kaomoji(text, prefix),
-        }
+        yield journal_line_dict(
+            ts=str(ev.get("timestamp") or ""),
+            model=str(m.get("model") or ""),
+            cwd=str(ev.get("cwd") or ""),
+            kaomoji=prefix,
+            user_text=user_text,
+            assistant_text=strip_leading_kaomoji(text, prefix),
+        )
 
 
 def backfill_claude_code(transcript_root: Path, journal: Path) -> int:
@@ -359,14 +366,14 @@ def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
             continue
         ctx = turn_ctx.get(current_turn_id, {})
         ts = ev.get("timestamp") or ""
-        yield {
-            "ts": str(ts),
-            "model": ctx.get("model", ""),
-            "cwd": ctx.get("cwd", session_cwd),
-            "kaomoji": prefix,
-            "user_text": latest_user,
-            "assistant_text": strip_leading_kaomoji(text, prefix),
-        }
+        yield journal_line_dict(
+            ts=str(ts),
+            model=ctx.get("model", ""),
+            cwd=ctx.get("cwd", session_cwd),
+            kaomoji=prefix,
+            user_text=latest_user,
+            assistant_text=strip_leading_kaomoji(text, prefix),
+        )
 
 
 def backfill_codex(rollouts_root: Path, journal: Path) -> int:
@@ -468,14 +475,14 @@ def _replay_hermes_session(path: Path) -> Iterator[dict[str, Any]]:
             prefix = kaomoji_prefix(content)
             if not prefix:
                 continue
-            yield {
-                "ts": ts,
-                "model": model,
-                "cwd": cwd,
-                "kaomoji": prefix,
-                "user_text": user_text,
-                "assistant_text": strip_leading_kaomoji(content, prefix),
-            }
+            yield journal_line_dict(
+                ts=ts,
+                model=model,
+                cwd=cwd,
+                kaomoji=prefix,
+                user_text=user_text,
+                assistant_text=strip_leading_kaomoji(content, prefix),
+            )
 
 
 def backfill_hermes(sessions_root: Path, journal: Path) -> int:

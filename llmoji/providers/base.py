@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
@@ -249,19 +250,21 @@ class Provider:
             nudge_installed = False
             installed = main_installed
         journal_exists = self.journal_path.exists()
-        journal_rows = 0
-        journal_bytes = 0
-        if journal_exists:
-            journal_bytes = self.journal_path.stat().st_size
-            with self.journal_path.open() as f:
-                for line in f:
-                    if line.strip():
-                        journal_rows += 1
+        # ``status()`` reports byte-size only — counting rows requires
+        # walking the whole file and ``analyze`` re-walks it via
+        # ``iter_journal`` immediately after, so the per-row scan
+        # here is wasted work on multi-hundred-MB journals. The
+        # ``journal_rows`` field stays on :class:`ProviderStatus` for
+        # backwards compat with callers that still read it; it just
+        # never increments past zero in this default impl.
+        journal_bytes = (
+            self.journal_path.stat().st_size if journal_exists else 0
+        )
         return ProviderStatus(
             name=self.name,
             installed=installed,
             journal_exists=journal_exists,
-            journal_rows=journal_rows,
+            journal_rows=0,
             journal_bytes=journal_bytes,
             hook_path=self.hook_path,
             settings_path=self.settings_path,
@@ -311,6 +314,15 @@ class Provider:
         return main_reg, nudge_reg
 
     # --- helpers for JSON-format settings (Claude Code, Codex) ---
+    #
+    # All three batch helpers walk the same nested shape:
+    #   cfg["hooks"][event][i]["hooks"][j]
+    # where the leaf at ``[j]`` is ``{"type": "command", "command":
+    # "<path>"}``. The dict/list/dict/dict isinstance gauntlet lives
+    # in :func:`_iter_leaf_commands` so the three helpers can speak
+    # in terms of "valid leaf entries" without re-implementing the
+    # validation. Malformed sub-shapes are skipped silently — they
+    # pass through unchanged in :meth:`_unregister_json_settings_batch`.
 
     def _register_json_settings_batch(
         self, edits: list[tuple[str, Path]],
@@ -339,7 +351,7 @@ class Provider:
                 f"existing 'hooks' field is {type(hooks_field).__name__}, "
                 f"not an object",
             )
-        hooks = cfg.setdefault("hooks", {})
+        hooks: dict[str, Any] = cfg.setdefault("hooks", {})
         changed = False
         for event, hook_path in edits:
             cmd = str(hook_path)
@@ -350,18 +362,8 @@ class Provider:
                     f"existing hooks[{event!r}] is "
                     f"{type(bucket_field).__name__}, not an array",
                 )
-            bucket = hooks.setdefault(event, [])
-            already = False
-            for entry in bucket:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and h.get("command") == cmd:
-                        already = True
-                        break
-                if already:
-                    break
-            if already:
+            bucket: list[Any] = hooks.setdefault(event, [])
+            if any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket)):
                 continue
             bucket.append({"hooks": [{"type": "command", "command": cmd}]})
             changed = True
@@ -391,28 +393,40 @@ class Provider:
             if not isinstance(bucket, list):
                 continue
             cmd = str(hook_path)
-            kept = []
-            for entry in bucket:
-                if not isinstance(entry, dict):
+            # Group the indices to drop by their owning entry so each
+            # entry's ``hooks`` list is rebuilt at most once.
+            drops_per_entry: dict[int, set[int]] = {}
+            for entry_idx, hook_idx, leaf_cmd in _iter_leaf_commands(bucket):
+                if leaf_cmd == cmd:
+                    drops_per_entry.setdefault(entry_idx, set()).add(hook_idx)
+            if not drops_per_entry:
+                continue
+            kept: list[Any] = []
+            for entry_idx, entry in enumerate(bucket):
+                drops = drops_per_entry.get(entry_idx)
+                if drops is None or not isinstance(entry, dict):
+                    # No matches in this entry, OR entry isn't a dict
+                    # we can rewrite — preserve as-is.
                     kept.append(entry)
                     continue
+                # Rebuild the entry's ``hooks`` list, dropping matched
+                # indices. Malformed siblings (non-dicts, dicts without
+                # ``command``) are kept unchanged because the walker
+                # only emitted indices for valid-and-matching leaves.
+                inner_field = entry.get("hooks") or []
                 inner = [
-                    h for h in (entry.get("hooks") or [])
-                    if not (isinstance(h, dict) and h.get("command") == cmd)
+                    h for j, h in enumerate(inner_field)
+                    if j not in drops
                 ]
-                if len(inner) != len(entry.get("hooks") or []):
-                    changed = True
                 if inner:
                     kept.append({**entry, "hooks": inner})
-            if len(kept) != len(bucket):
-                changed = True
+                # else: entry collapsed to empty hooks list, drop it
+            changed = True
             if kept:
                 hooks[event] = kept
             else:
                 hooks.pop(event, None)
-        if hooks:
-            cfg["hooks"] = hooks
-        else:
+        if not hooks:
             cfg.pop("hooks", None)
         if changed:
             write_json(self.settings_path, cfg)
@@ -446,17 +460,9 @@ class Provider:
                 out.append(False)
                 continue
             cmd = str(hook_path)
-            found = False
-            for entry in bucket:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and h.get("command") == cmd:
-                        found = True
-                        break
-                if found:
-                    break
-            out.append(found)
+            out.append(
+                any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket))
+            )
         return out
 
 
@@ -505,6 +511,39 @@ class SettingsCorruptError(RuntimeError):
         )
         self.path = path
         self.why = why
+
+
+def _iter_leaf_commands(
+    bucket: list[Any],
+) -> Iterator[tuple[int, int, str]]:
+    """Walk a JSON-settings event bucket and yield ``(entry_idx,
+    hook_idx, command)`` for every valid leaf hook entry.
+
+    The shape this validates is
+    ``bucket[entry_idx]["hooks"][hook_idx]["command"]``:
+
+    - each ``entry`` must be a dict
+    - ``entry["hooks"]`` must be a list (a missing/falsy value is
+      treated as empty)
+    - each leaf ``h`` must be a dict whose ``"command"`` is a string
+
+    Anything that fails the gauntlet is skipped silently. Used by
+    the three batch helpers as the single source of truth for "what
+    counts as a valid registration?" — concentrating the isinstance
+    chain here means a shape-validation tweak only happens once.
+    """
+    for entry_idx, entry in enumerate(bucket):
+        if not isinstance(entry, dict):
+            continue
+        inner = entry.get("hooks") or []
+        if not isinstance(inner, list):
+            continue
+        for hook_idx, h in enumerate(inner):
+            if not isinstance(h, dict):
+                continue
+            cmd = h.get("command")
+            if isinstance(cmd, str):
+                yield entry_idx, hook_idx, cmd
 
 
 def _load_json_strict(path: Path) -> dict[str, Any]:
