@@ -130,7 +130,6 @@ def _format_timestamp(ct: Any) -> str:
 
 
 def _iter_conversation_chain(
-    conv: dict[str, Any],
     chain: list[dict[str, Any]],
 ) -> Iterator[ScrapeRow]:
     """Yield :class:`ScrapeRow` per kaomoji-led assistant message in
@@ -146,13 +145,6 @@ def _iter_conversation_chain(
     """
     if not chain:
         return
-    session_id = str(conv.get("id") or conv.get("conversation_id") or "")
-    project_slug = str(conv.get("title") or "") or "(unnamed)"
-    # turn_index = 0-based position among assistant messages with
-    # non-empty text in the active branch — independent of the
-    # kaomoji filter, mirroring claude_export's semantics so a row
-    # of two consecutive non-kaomoji turns doesn't compress.
-    turn = -1
     last_user_text = ""
     for node in chain:
         role = _node_role(node)
@@ -167,7 +159,6 @@ def _iter_conversation_chain(
         text = _message_text(msg)
         if not text.strip():
             continue
-        turn += 1
         stripped = kaomoji_lead_strip(text)
         if stripped is None:
             continue
@@ -175,16 +166,9 @@ def _iter_conversation_chain(
         model = (msg.get("metadata") or {}).get("model_slug")
         yield ScrapeRow(
             source="chatgpt-export",
-            session_id=session_id,
-            project_slug=project_slug,
-            assistant_uuid=str(msg.get("id") or node.get("id") or ""),
-            parent_uuid=node.get("parent"),
             model=str(model) if model else None,
             timestamp=_format_timestamp(msg.get("create_time")),
             cwd=None,
-            git_branch=None,
-            turn_index=turn,
-            had_thinking=False,
             assistant_text=body,
             first_word=first_word,
             surrounding_user=last_user_text,
@@ -231,9 +215,7 @@ def iter_chatgpt_export(
     same heuristic as the Claude.ai reader. The branch walk happens
     once per conversation: scoring + iteration share the same chain.
     """
-    candidates: list[
-        tuple[str, tuple[dict[str, Any], list[dict[str, Any]]], int]
-    ] = []
+    candidates: list[tuple[str, list[dict[str, Any]], int]] = []
     for export_dir in export_dirs:
         path = Path(export_dir) / "conversations.json"
         if not path.exists():
@@ -249,7 +231,7 @@ def iter_chatgpt_export(
             if not isinstance(cid, str):
                 continue
             chain, score = _conv_chain_and_score(conv)
-            candidates.append((cid, (conv, chain), score))
+            candidates.append((cid, chain, score))
 
-    for conv, chain in dedup_by_id_keep_richest(candidates).values():
-        yield from _iter_conversation_chain(conv, chain)
+    for chain in dedup_by_id_keep_richest(candidates).values():
+        yield from _iter_conversation_chain(chain)

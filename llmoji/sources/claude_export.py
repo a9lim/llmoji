@@ -48,21 +48,12 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
     by_uuid: dict[str, dict[str, Any]] = {
         m["uuid"]: m for m in msgs if isinstance(m.get("uuid"), str)
     }
-    session_id = str(conv.get("uuid") or "")
-    project_slug = str(conv.get("name") or "") or "(unnamed)"
-    # turn_index = 0-based position among assistant messages we
-    # actually consider (have non-empty text). Independent of whether
-    # the row passes the kaomoji filter — that way two consecutive
-    # filtered-out kaomoji-less assistant turns don't compress to the
-    # same index.
-    turn = -1
     for m in msgs:
         if m.get("sender") != "assistant":
             continue
         text = _message_text(m)
         if not text.strip():
             continue
-        turn += 1
         # Validate + strip via the shared helper so this reader and
         # the ChatGPT one stay in lockstep — see the "Journal-row
         # contract" gotcha in :file:`CLAUDE.md`.
@@ -85,16 +76,9 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
         )
         yield ScrapeRow(
             source="claude-ai-export",
-            session_id=session_id,
-            project_slug=project_slug,
-            assistant_uuid=str(m.get("uuid") or ""),
-            parent_uuid=parent_uuid,
             model=None,
             timestamp=str(m.get("created_at") or ""),
             cwd=None,
-            git_branch=None,
-            turn_index=turn,
-            had_thinking=False,
             assistant_text=body,
             first_word=first_word,
             surrounding_user=user_text,
