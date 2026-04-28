@@ -37,15 +37,18 @@ The bundle on disk between `analyze` and `upload` is the deliberate
 inspection gap — the user `cat`s each `<source-model>.jsonl` before
 deciding to ship.
 
-### Provider abstraction
+### HookInstaller abstraction
 
-`llmoji.providers.Provider` is the base class, one subclass per
-first-class harness. JSON-settings providers (`ClaudeCodeProvider`,
-`CodexProvider`) inherit from `JsonSettingsProvider` (also in
-`base.py`), which supplies the default
-`_register` / `_unregister` / `_is_registered` /
-`_is_nudge_registered` against any `settings.json`-shaped file.
-YAML-settings providers (`HermesProvider`) override the four.
+`llmoji.providers.HookInstaller` is the base class, one subclass
+per first-class harness. JSON-settings providers
+(`ClaudeCodeProvider`, `CodexProvider`) inherit from
+`JsonSettingsHookInstaller` (also in `base.py`), which supplies the
+default `_register` / `_unregister` / `_check_registrations`
+against any `settings.json`-shaped file. YAML-settings providers
+(`HermesProvider`) override the three. Renamed from `Provider` in
+1.1.x — the abstraction is about installing hooks, not about being
+a generic "provider"; the `providers/` directory name stays because
+concrete subclasses correspond to user-facing harness providers.
 
 Each provider declares: `hooks_dir`, `settings_path`, `journal_path`,
 `main_event`, `skip_action` (`continue` for claude_code/codex —
@@ -66,7 +69,7 @@ two **shared partials** every main hook inlines:
   tail. Substituted with `${JOURNAL_PATH}`, inserted as
   `${JOURNAL_WRITE}`.
 
-`Provider.render_hook()` runs `string.Template.safe_substitute`
+`HookInstaller.render_hook()` runs `string.Template.safe_substitute`
 twice — once on each partial with its own placeholders, once on
 the main template with `JOURNAL_PATH`, `KAOMOJI_VALIDATE`,
 `JOURNAL_WRITE`, `INJECTED_PREFIXES_FILTER`, `LLMOJI_VERSION`. Two
@@ -99,9 +102,14 @@ the factory has no env-var dependency at construction time.
   (deterministic seed `f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`),
   mask the kaomoji to `[FACE]`, call the synthesizer with
   `DESCRIBE_PROMPT_WITH_USER` or `DESCRIBE_PROMPT_NO_USER`. Cache
-  keyed by `sha256(synth_model_id + "\0" + canonical + "\0" + user
-  + "\0" + assistant)[:16]` at `~/.llmoji/cache/per_instance.jsonl`.
-  Switching synth model misses cleanly (no stale cross-model hits).
+  keyed by `sha256(synth_model_id + "\0" + backend + "\0" + base_url
+  + "\0" + canonical + "\0" + user + "\0" + assistant)[:16]` at
+  `~/.llmoji/cache/per_instance.jsonl`. Switching synth model OR
+  backend OR (for `local`) endpoint misses cleanly. Within a wave,
+  cache-miss API calls dispatch on a small thread pool but the
+  serial walk that builds Stage B's input + appends the cache file
+  runs in deterministic order — re-runs against the same journal
+  feed Stage B identical descriptions in identical order.
 - **Stage B (per cell)**: pool Stage A descriptions, synthesize a
   single 1–2-sentence overall meaning via `SYNTHESIZE_PROMPT`. The
   Stage B line is the **only** thing that ships — it lands in that
@@ -125,12 +133,18 @@ and update the HF dataset card to match.
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
   `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot).
-- **`llmoji.scrape.ScrapeRow`** schema (in-memory row shape).
 - **6-field unified journal row schema** (on-disk JSONL):
-  `{ts, model, cwd, kaomoji, user_text, assistant_text}`.
+  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. This is
+  the cross-corpus invariant; `llmoji.scrape.ScrapeRow` is in-memory
+  only (lean 7-field shape: `source, model, timestamp, cwd,
+  assistant_text, first_word, surrounding_user`) and free to
+  evolve. Pre-1.1.x carried richer ScrapeRow metadata (`session_id`,
+  `parent_uuid`, `project_slug`, etc.) for would-be research-side
+  consumers; nothing in v1 reads them and `llmoji-study` reads
+  bundles + journals, so they're dropped in 1.1.x.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
-- **`llmoji.providers.Provider`** interface.
+- **`llmoji.providers.HookInstaller`** interface.
 - **Bundle schema**:
   - `manifest.json` keys: `llmoji_version`, `synthesis_model_id`,
     `synthesis_backend`, `submitter_id`, `generated_at`,
@@ -180,19 +194,25 @@ llmoji/
   LICENSE                      # MIT (PEP 639 SPDX)
   CLAUDE.md
   .github/                     # dependabot + PR/issue templates +
-                               # ci.yml (ruff + pytest 3.11–3.13 ×
-                               # ubuntu/macos + wheel-import gate) +
+                               # ci.yml (lint + typecheck + test +
+                               # build/wheel-import gate, 3.12 on
+                               # ubuntu-latest; all four required by
+                               # main branch protection) +
                                # release.yml (tag → PyPI → release)
   examples/                    # inspect_bundle.py (audit script);
-                               # openclaw_hook.ts (generic-JSONL example)
+                               # openclaw_plugin/ (definePluginEntry plugin);
+                               # opencode_plugin.ts (generic-JSONL example)
   llmoji/
     py.typed                   # PEP 561 marker
     __init__.py                # public surface re-exports
     _util.py                   # atomic_write_text (tmp+rename),
                                # write_json, package_version,
-                               # human_bytes, sanitize_model_id_for_path.
-                               # Kept out of providers.base so the
-                               # dependency graph stays tree-shaped.
+                               # human_bytes, sanitize_model_id_for_path,
+                               # journal_line_dict / scrape_row_to_journal_line
+                               # (canonical 6-field schema source of truth),
+                               # iter_bundle_data_files. Kept out of
+                               # providers.base so the dependency graph
+                               # stays tree-shaped.
     taxonomy.py                # KAOMOJI_START_CHARS + is_kaomoji_candidate
                                # + extract + KaomojiMatch (span-only)
                                # + canonicalize_kaomoji (rules A–P; frozen)
@@ -215,9 +235,13 @@ llmoji/
                                # up via parent)
     backfill.py                # one-shot transcript→journal replays
                                # for claude_code + codex + hermes;
-                               # parity-tested against live hooks
+                               # parity-tested against live hooks.
+                               # Internal _replay_* generators yield
+                               # ScrapeRow; _flush_rows routes through
+                               # scrape_row_to_journal_line for the
+                               # canonical 6-field on-disk shape.
     providers/
-      base.py                  # Provider + JsonSettingsProvider +
+      base.py                  # HookInstaller + JsonSettingsHookInstaller +
                                # ProviderStatus + SettingsCorruptError
                                # + render helpers + JSON batch
                                # register/unregister/is_registered
@@ -242,11 +266,13 @@ llmoji/
       hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
                                     # {context: ...} shape)
     paths.py                   # ~/.llmoji home, cache, bundle,
-                               # journals, state.json (per-machine
-                               # submission token). NOT an install
-                               # registry — install state is read live
-                               # from each harness's settings file
-                               # by Provider.status().
+                               # journals, .salt (per-machine
+                               # submission salt; flat 64-hex-char
+                               # file, replaces the pre-1.1.x JSON
+                               # envelope at state.json). NOT an
+                               # install registry — install state is
+                               # read live from each harness's
+                               # settings file by HookInstaller.status().
     analyze.py                 # Stage A + B + bundle write. Buckets
                                # by (source_model, canonical) where
                                # source_model = ScrapeRow.model or
@@ -307,6 +333,17 @@ Python: `llmoji.taxonomy.KAOMOJI_START_CHARS`. Shell:
 `is_kaomoji_candidate` validates Python-side; the rendered case
 filter handles the shell-side first pass. If you find another copy
 of the set, delete it and route through `llmoji.taxonomy`.
+
+`is_kaomoji_candidate` enforces: length 2..32, first char in
+`KAOMOJI_START_CHARS`, no ASCII backslash, no run of 4+ ASCII
+letters. Bracket-balance is *not* enforced — real corpus output is
+sometimes unbalanced (closing glyph isn't strictly the matching
+bracket), and the length cap + 4-letter-run + backslash filters
+together carry the prose-rejection role. `_leading_bracket_span`
+still uses depth-walking to *locate* the closing bracket on
+bracket-leading inputs, but falls back to a whitespace-delimited
+word (capped at the length limit) when the depth-walker doesn't
+close cleanly.
 
 ### Per-provider kaomoji capture — N rows per turn
 
@@ -377,7 +414,7 @@ Response shapes:
 - **Hermes**: bare `{"context": "<msg>"}` — no envelope, returned by
   `pre_llm_call`, "the only hook whose return value is used."
 
-The base `Provider` class exposes the nudge through
+The base `HookInstaller` class exposes the nudge through
 `nudge_hook_template` / `nudge_hook_filename` / `nudge_event` /
 `nudge_message` class attrs and a `has_nudge` predicate. Providers
 that opt in get the nudge written + registered automatically by
@@ -401,7 +438,7 @@ nudge to a future provider is four class-level attrs (and a
   carrying the child id, or (b) `post_llm_call` exposing
   `parent_session_id` / `is_subagent`.
 
-### Provider install refuses to clobber existing config
+### HookInstaller.install refuses to clobber existing config
 
 Three corruption paths are explicitly defended:
 
@@ -429,7 +466,7 @@ string and skips. Main and nudge dedup independently.
 Settings writes go through `llmoji._util.atomic_write_text` (tmp
 file + `os.replace`) so a power loss / SIGINT mid-write leaves the
 user's settings file with either the old content or the new — never
-half. The `upload` state.json (per-machine submission token) writes
+half. The `upload` `.salt` file (per-machine submission token) writes
 the same way. JSON-settings providers also batch their main+nudge
 edits into a single read-modify-write cycle per install (via
 `_register_json_settings_batch`), so a SIGKILL between registering
@@ -469,7 +506,12 @@ shared-prefix archives).
 
 Email target keeps `tar_bundle` because a single attachment is what
 the recipient wants; `~/.llmoji/bundle-<ts>.tar.gz` is now an
-email-only artifact.
+email-only artifact. The mailto: handoff goes through
+`webbrowser.open` (stdlib, cross-platform — works on macOS, Linux,
+and Windows without per-platform `open` / `xdg-open` branching).
+Aborts at the confirm prompt return `submitted=False` honestly,
+with the tarball path included so a scripted caller can still find
+the on-disk artifact.
 
 ### Hermes payload contract — source-verified
 
@@ -534,12 +576,20 @@ mirrors this.
 ### Generic JSONL contract for unsupported harnesses
 
 Motivated users on harnesses we don't ship a first-class adapter for
-(notably OpenClaw — TS-shaped hooks taking the payload as a function
-argument, not stdin) can write directly to
-`~/.llmoji/journals/<name>.jsonl` against the canonical 6-field
-schema. `llmoji analyze` picks them up automatically alongside
-managed providers' journals. OpenClaw first-class is post-v1.0;
-worked example lives at `examples/openclaw_hook.ts`.
+can write directly to `~/.llmoji/journals/<name>.jsonl` against the
+canonical 6-field schema. `llmoji analyze` picks them up
+automatically alongside managed providers' journals. Two worked
+examples ship in the repo:
+
+- `examples/opencode_plugin.ts` — generic-JSONL-append contract for
+  opencode (TS-only plugin host). One row per kaomoji-bearing
+  assistant turn, written to `~/.llmoji/journals/opencode.jsonl`.
+- `examples/openclaw_plugin/` — a real `definePluginEntry`-based
+  OpenClaw plugin (`index.ts` + `openclaw.plugin.json`); demonstrates
+  the same generic-JSONL contract on a different host.
+
+A first-class TS-plugin adapter for either harness is a post-1.0
+concern — bash-rendered hooks are the v1.0 first-class shape.
 
 ### HF dataset card is a separate hand-maintained surface
 
@@ -570,6 +620,11 @@ Two coupling points:
 
 - Single venv at `.venv/`, pip not uv. `pip install -e ../llmoji`
   during dev; PyPI install at freeze.
+- `main` is branch-protected: PR-only (no direct pushes, including
+  for admins), all four CI jobs (lint / typecheck / test / build)
+  required green, branch up-to-date with main, conversation
+  resolution required, force-push and deletion blocked. Day-to-day
+  work lands on `dev`; merge to main via PR.
 - `~/.llmoji` is the on-disk root for everything the package
   manages; tests can override via `$LLMOJI_HOME`.
 - Hook templates are bash, syntactically validated by `bash -n` in
@@ -580,9 +635,11 @@ Two coupling points:
   adapter, and the generic-JSONL-append contract is the path until
   then.
 - Stage-A synth calls run on a small thread pool (default 2,
-  `$LLMOJI_CONCURRENCY` to override). Both Anthropic and OpenAI SDKs
-  use thread-safe httpx clients; cache writes serialize on the main
-  thread via `as_completed`, so no append interleaving. Default is 2
+  `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Both
+  Anthropic and OpenAI SDKs use thread-safe httpx clients; cache
+  writes serialize on the main thread after futures complete, in
+  deterministic walk order, so the cache file's row order matches
+  the bundle's Stage-B input order. Default is 2
   because the org-level Haiku rate limit is 50 req/min; 4 concurrent
   workers reliably trip it on a multi-hundred-row backfill, and the
   SDK's `max_retries=8` exponential backoff (set explicitly in

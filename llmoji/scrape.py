@@ -25,10 +25,22 @@ class ScrapeRow:
 
     Sources fill the fields they have evidence for and leave the
     others empty / ``None``. The downstream :mod:`llmoji.analyze`
-    pipeline reads only ``first_word``, ``assistant_text``, and
-    ``surrounding_user``; the richer fields (``session_id``,
-    ``parent_uuid``, etc.) are preserved for research-side
-    consumers that want them.
+    pipeline reads ``first_word``, ``assistant_text``,
+    ``surrounding_user``, and ``model`` (with fallback to
+    ``source``); the rest is provenance for the on-disk journal
+    row.
+
+    The cross-corpus invariant is the on-disk 6-field journal row
+    (``ts``, ``model``, ``cwd``, ``kaomoji``, ``user_text``,
+    ``assistant_text``), not this dataclass — ``ScrapeRow`` is
+    in-memory only and free to evolve. Pre-1.1.x versions carried
+    richer metadata (``session_id``, ``parent_uuid``,
+    ``project_slug``, ``assistant_uuid``, ``git_branch``,
+    ``turn_index``, ``had_thinking``) for would-be research-side
+    consumers. Nothing in the v1 pipeline reads them, and
+    ``llmoji-study`` reads bundles + journals (not ``ScrapeRow``
+    directly), so they're dropped in 1.1.x to keep the dataclass
+    honest.
 
     Pre-v1.0 versions also carried ``kaomoji`` (TAXONOMY-registered
     form) and ``kaomoji_label`` (+1/-1/0 affect pole) fields. Those
@@ -40,18 +52,11 @@ class ScrapeRow:
     # --- provenance ---
     source: str                 # e.g. "claude_code-hook", "codex-hook",
                                 #      "hermes-hook", "claude-ai-export"
-    session_id: str             # session/conversation UUID, if known
-    project_slug: str           # working-dir basename or conversation name
-    assistant_uuid: str         # message UUID (export only)
-    parent_uuid: str | None     # parent message UUID (export only)
 
     # --- context ---
     model: str | None           # active model slug, if reported
     timestamp: str              # ISO-8601
     cwd: str | None             # working directory at hook fire
-    git_branch: str | None      # claude-code transcript only
-    turn_index: int             # 0-based per-source position
-    had_thinking: bool          # transcript-only enrichment
 
     # --- content ---
     assistant_text: str         # full assistant message text (kaomoji stripped)

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from . import paths
-from ._util import human_bytes
+from ._util import human_bytes, scrape_row_to_journal_line
 from .providers import PROVIDERS, get_provider
 from .scrape import ScrapeRow
 from .sources.chatgpt_export import iter_chatgpt_export
@@ -73,23 +73,22 @@ def _cmd_status(args: argparse.Namespace) -> int:
         s = p.status()
         marker = "✓" if s.installed else "·"
         kw = "installed" if s.installed else "not installed"
-        rows = f"{s.journal_rows} rows" if s.journal_exists else "no journal"
-        bytes_ = (
-            f", {human_bytes(s.journal_bytes)}"
-            if s.journal_exists else ""
+        # Journal row count costs a full file scan; analyze re-walks
+        # it via iter_journal anyway, so report bytes only here.
+        journal = (
+            human_bytes(s.journal_bytes) if s.journal_exists else "no journal"
         )
-        print(f"  {marker} {name:<14} {kw:<14} ({rows}{bytes_})")
+        print(f"  {marker} {name:<14} {kw:<14} ({journal})")
         print(f"        hook:    {s.hook_path}")
         if s.nudge_hook_path is not None:
             nudge_state = "registered" if s.nudge_installed else "missing"
             print(f"        nudge:   {s.nudge_hook_path} ({nudge_state})")
         print(f"        journal: {s.journal_path}")
     cache_path = paths.cache_per_instance_path()
-    n_rows, n_bytes = cache_size(cache_path)
+    n_bytes = cache_size(cache_path)
     print()
     print(
-        f"per-instance synth cache: {n_rows} entries, "
-        f"{human_bytes(n_bytes)} at {cache_path}"
+        f"per-instance synth cache: {human_bytes(n_bytes)} at {cache_path}"
     )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
@@ -131,7 +130,9 @@ def _write_journal_rows(rows: Iterator[ScrapeRow], out_name: str) -> int:
 
     Used by every static-export parser: the row-to-6-field
     journal-line mapping is identical across formats, only the
-    upstream :class:`ScrapeRow` iterator + output filename differ.
+    upstream :class:`ScrapeRow` iterator and output filename differ.
+    The schema lives in :func:`llmoji._util.scrape_row_to_journal_line`
+    so a future change flows through one function.
     """
     paths.ensure_home()
     out_path = paths.journals_dir() / out_name
@@ -140,15 +141,10 @@ def _write_journal_rows(rows: Iterator[ScrapeRow], out_name: str) -> int:
     n = 0
     with out_path.open("w") as f:
         for row in rows:
-            r = {
-                "ts": row.timestamp,
-                "model": row.model or "",
-                "cwd": row.cwd or "",
-                "kaomoji": row.first_word,
-                "user_text": row.surrounding_user,
-                "assistant_text": row.assistant_text,
-            }
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(scrape_row_to_journal_line(row), ensure_ascii=False)
+                + "\n"
+            )
             n += 1
     print(f"wrote {n} rows to {out_path}.")
     return 0
@@ -177,15 +173,10 @@ _PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
 
 
 def _cmd_parse(args: argparse.Namespace) -> int:
-    parser = _PARSERS.get(args.provider)
-    if parser is None:
-        print(
-            f"unknown --provider {args.provider!r} for parse. "
-            f"v1.0 supports: {sorted(_PARSERS)}.",
-            file=sys.stderr,
-        )
-        return 2
-    return parser(args)
+    # argparse choices=_PARSERS keys already enforces a known
+    # provider; the only way args.provider lands here is through the
+    # registered set.
+    return _PARSERS[args.provider](args)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +251,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         backend=backend,
         base_url=base_url,
         model_id=model_id,
+        concurrency=args.concurrency,
     )
     print()
     print(
@@ -304,9 +296,9 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _cmd_cache(args: argparse.Namespace) -> int:
-    if args.cache_action != "clear":
-        print(f"unknown cache action {args.cache_action!r}", file=sys.stderr)
-        return 2
+    # ``args.cache_action`` is constrained to ``["clear"]`` by
+    # argparse; only one branch needed here.
+    del args
     cache_dir = paths.cache_dir()
     if not cache_dir.exists():
         print("no cache to clear.")
@@ -383,6 +375,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "model id for --backend local "
             "(e.g. llama3.1, qwen2.5:14b). env: LLMOJI_MODEL."
+        ),
+    )
+    sp.add_argument(
+        "--concurrency", type=int, default=None,
+        help=(
+            "Stage-A worker count (default 2; bump if your synth "
+            "rate-limit tier has headroom). env: LLMOJI_CONCURRENCY."
         ),
     )
     sp.set_defaults(func=_cmd_analyze)

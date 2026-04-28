@@ -1,9 +1,18 @@
-"""Provider interface — base class + dataclasses + helpers."""
+"""HookInstaller interface — base class + dataclasses + helpers.
+
+The class is named after its job: writing one harness's bash hook
+script(s) and registering them in that harness's settings file.
+``providers/`` stays the directory name — concrete subclasses
+correspond to user-facing harness providers (claude_code, codex,
+hermes) — but the abstraction itself is hook-installation, not a
+generic "provider".
+"""
 
 from __future__ import annotations
 
 import importlib.resources
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
@@ -15,7 +24,7 @@ from ..taxonomy import KAOMOJI_START_CHARS
 
 @dataclass
 class ProviderStatus:
-    """Result of :meth:`Provider.status` — a snapshot for the CLI.
+    """Result of :meth:`HookInstaller.status` — a snapshot for the CLI.
 
     ``nudge_hook_path`` is ``None`` for providers that don't ship a
     nudge hook; ``nudge_installed`` defaults False in that case so
@@ -82,14 +91,21 @@ def _read_partial(name: str) -> str:
     return importlib.resources.files("llmoji._hooks").joinpath(name).read_text()
 
 
-class Provider:
-    """Base class. Subclass for each first-class harness.
+class HookInstaller:
+    """Base class — one subclass per first-class harness.
+
+    Renamed from ``Provider`` in 1.1.x. The class's job is writing
+    bash hook script(s) and registering them in a harness's
+    settings file; the old name described who not what. The
+    ``providers/`` directory name is kept because concrete
+    subclasses do correspond to user-facing harness providers
+    (claude_code, codex, hermes).
 
     Subclasses fill in the small set of attrs that drive
     :meth:`render_hook` substitution, plus a ``main_event`` hint and
     optional nudge attrs. The default :meth:`_register` /
-    :meth:`_unregister` / ``_is_registered`` / ``_is_nudge_registered``
-    use the shared JSON-settings helpers; YAML providers override.
+    :meth:`_unregister` / :meth:`_check_registrations` use the
+    shared JSON-settings helpers; YAML providers override.
     """
 
     name: str = ""
@@ -233,10 +249,10 @@ class Provider:
                 self.nudge_hook_path.unlink()
 
     def status(self) -> ProviderStatus:
-        # ``_check_registrations`` is the batched single-read variant of
-        # ``_is_registered`` + ``_is_nudge_registered``. Default
-        # implementation here loads the settings file once and runs
-        # both checks against it; YAML providers (hermes) override.
+        # ``_check_registrations`` reads the settings file once and
+        # reports both main + nudge registration in a single pass.
+        # Default implementation walks the JSON-settings shape; YAML
+        # providers (hermes) override.
         main_reg, nudge_reg = self._check_registrations()
         main_installed = self.hook_path.exists() and main_reg
         if self.has_nudge:
@@ -249,19 +265,21 @@ class Provider:
             nudge_installed = False
             installed = main_installed
         journal_exists = self.journal_path.exists()
-        journal_rows = 0
-        journal_bytes = 0
-        if journal_exists:
-            journal_bytes = self.journal_path.stat().st_size
-            with self.journal_path.open() as f:
-                for line in f:
-                    if line.strip():
-                        journal_rows += 1
+        # ``status()`` reports byte-size only — counting rows requires
+        # walking the whole file and ``analyze`` re-walks it via
+        # ``iter_journal`` immediately after, so the per-row scan
+        # here is wasted work on multi-hundred-MB journals. The
+        # ``journal_rows`` field stays on :class:`ProviderStatus` for
+        # backwards compat with callers that still read it; it just
+        # never increments past zero in this default impl.
+        journal_bytes = (
+            self.journal_path.stat().st_size if journal_exists else 0
+        )
         return ProviderStatus(
             name=self.name,
             installed=installed,
             journal_exists=journal_exists,
-            journal_rows=journal_rows,
+            journal_rows=0,
             journal_bytes=journal_bytes,
             hook_path=self.hook_path,
             settings_path=self.settings_path,
@@ -292,25 +310,9 @@ class Provider:
             edits.append((self.nudge_event, self.nudge_hook_path))
         self._unregister_json_settings_batch(edits)
 
-    def _is_registered(self) -> bool:
-        return self._is_registered_json_settings(
-            event=self.main_event, hook_path=self.hook_path,
-        )
-
-    def _is_nudge_registered(self) -> bool:
-        if not self.has_nudge:
-            return False
-        assert self.nudge_hook_path is not None
-        return self._is_registered_json_settings(
-            event=self.nudge_event, hook_path=self.nudge_hook_path,
-        )
-
     def _check_registrations(self) -> tuple[bool, bool]:
         """Return ``(main_installed, nudge_installed)`` from a single
-        settings-file read. Used by :meth:`status` instead of two
-        separate ``_is_registered`` / ``_is_nudge_registered`` calls
-        so an installed nudge-bearing provider doesn't trigger two
-        independent file reads per ``status()``.
+        settings-file read.
 
         Default JSON-settings implementation walks the loaded ``hooks``
         dict once and checks both registrations against it. YAML
@@ -327,6 +329,15 @@ class Provider:
         return main_reg, nudge_reg
 
     # --- helpers for JSON-format settings (Claude Code, Codex) ---
+    #
+    # All three batch helpers walk the same nested shape:
+    #   cfg["hooks"][event][i]["hooks"][j]
+    # where the leaf at ``[j]`` is ``{"type": "command", "command":
+    # "<path>"}``. The dict/list/dict/dict isinstance gauntlet lives
+    # in :func:`_iter_leaf_commands` so the three helpers can speak
+    # in terms of "valid leaf entries" without re-implementing the
+    # validation. Malformed sub-shapes are skipped silently — they
+    # pass through unchanged in :meth:`_unregister_json_settings_batch`.
 
     def _register_json_settings_batch(
         self, edits: list[tuple[str, Path]],
@@ -355,7 +366,7 @@ class Provider:
                 f"existing 'hooks' field is {type(hooks_field).__name__}, "
                 f"not an object",
             )
-        hooks = cfg.setdefault("hooks", {})
+        hooks: dict[str, Any] = cfg.setdefault("hooks", {})
         changed = False
         for event, hook_path in edits:
             cmd = str(hook_path)
@@ -366,18 +377,8 @@ class Provider:
                     f"existing hooks[{event!r}] is "
                     f"{type(bucket_field).__name__}, not an array",
                 )
-            bucket = hooks.setdefault(event, [])
-            already = False
-            for entry in bucket:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and h.get("command") == cmd:
-                        already = True
-                        break
-                if already:
-                    break
-            if already:
+            bucket: list[Any] = hooks.setdefault(event, [])
+            if any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket)):
                 continue
             bucket.append({"hooks": [{"type": "command", "command": cmd}]})
             changed = True
@@ -407,41 +408,43 @@ class Provider:
             if not isinstance(bucket, list):
                 continue
             cmd = str(hook_path)
-            kept = []
-            for entry in bucket:
-                if not isinstance(entry, dict):
+            # Group the indices to drop by their owning entry so each
+            # entry's ``hooks`` list is rebuilt at most once.
+            drops_per_entry: dict[int, set[int]] = {}
+            for entry_idx, hook_idx, leaf_cmd in _iter_leaf_commands(bucket):
+                if leaf_cmd == cmd:
+                    drops_per_entry.setdefault(entry_idx, set()).add(hook_idx)
+            if not drops_per_entry:
+                continue
+            kept: list[Any] = []
+            for entry_idx, entry in enumerate(bucket):
+                drops = drops_per_entry.get(entry_idx)
+                if drops is None or not isinstance(entry, dict):
+                    # No matches in this entry, OR entry isn't a dict
+                    # we can rewrite — preserve as-is.
                     kept.append(entry)
                     continue
+                # Rebuild the entry's ``hooks`` list, dropping matched
+                # indices. Malformed siblings (non-dicts, dicts without
+                # ``command``) are kept unchanged because the walker
+                # only emitted indices for valid-and-matching leaves.
+                inner_field = entry.get("hooks") or []
                 inner = [
-                    h for h in (entry.get("hooks") or [])
-                    if not (isinstance(h, dict) and h.get("command") == cmd)
+                    h for j, h in enumerate(inner_field)
+                    if j not in drops
                 ]
-                if len(inner) != len(entry.get("hooks") or []):
-                    changed = True
                 if inner:
                     kept.append({**entry, "hooks": inner})
-            if len(kept) != len(bucket):
-                changed = True
+                # else: entry collapsed to empty hooks list, drop it
+            changed = True
             if kept:
                 hooks[event] = kept
             else:
                 hooks.pop(event, None)
-        if hooks:
-            cfg["hooks"] = hooks
-        else:
+        if not hooks:
             cfg.pop("hooks", None)
         if changed:
             write_json(self.settings_path, cfg)
-
-    def _is_registered_json_settings(
-        self,
-        *,
-        event: str,
-        hook_path: Path,
-    ) -> bool:
-        return self._is_registered_json_settings_batch(
-            [(event, hook_path)],
-        )[0]
 
     def _is_registered_json_settings_batch(
         self, edits: list[tuple[str, Path]],
@@ -472,21 +475,13 @@ class Provider:
                 out.append(False)
                 continue
             cmd = str(hook_path)
-            found = False
-            for entry in bucket:
-                if not isinstance(entry, dict):
-                    continue
-                for h in entry.get("hooks", []) or []:
-                    if isinstance(h, dict) and h.get("command") == cmd:
-                        found = True
-                        break
-                if found:
-                    break
-            out.append(found)
+            out.append(
+                any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket))
+            )
         return out
 
 
-class JsonSettingsProvider(Provider):
+class JsonSettingsHookInstaller(HookInstaller):
     """JSON-settings provider with the shared Claude Code/Codex nudge.
 
     Both Claude Code and Codex register hooks under a JSON settings
@@ -531,6 +526,39 @@ class SettingsCorruptError(RuntimeError):
         )
         self.path = path
         self.why = why
+
+
+def _iter_leaf_commands(
+    bucket: list[Any],
+) -> Iterator[tuple[int, int, str]]:
+    """Walk a JSON-settings event bucket and yield ``(entry_idx,
+    hook_idx, command)`` for every valid leaf hook entry.
+
+    The shape this validates is
+    ``bucket[entry_idx]["hooks"][hook_idx]["command"]``:
+
+    - each ``entry`` must be a dict
+    - ``entry["hooks"]`` must be a list (a missing/falsy value is
+      treated as empty)
+    - each leaf ``h`` must be a dict whose ``"command"`` is a string
+
+    Anything that fails the gauntlet is skipped silently. Used by
+    the three batch helpers as the single source of truth for "what
+    counts as a valid registration?" — concentrating the isinstance
+    chain here means a shape-validation tweak only happens once.
+    """
+    for entry_idx, entry in enumerate(bucket):
+        if not isinstance(entry, dict):
+            continue
+        inner = entry.get("hooks") or []
+        if not isinstance(inner, list):
+            continue
+        for hook_idx, h in enumerate(inner):
+            if not isinstance(h, dict):
+                continue
+            cmd = h.get("command")
+            if isinstance(cmd, str):
+                yield entry_idx, hook_idx, cmd
 
 
 def _load_json_strict(path: Path) -> dict[str, Any]:

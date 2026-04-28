@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ..scrape import ScrapeRow
-from ._common import kaomoji_lead_strip
+from ._common import (
+    dedup_by_id_keep_richest,
+    kaomoji_lead_strip,
+    walk_parents_for_user_text,
+)
 
 
 def _message_text(msg: dict[str, Any]) -> str:
@@ -44,21 +48,12 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
     by_uuid: dict[str, dict[str, Any]] = {
         m["uuid"]: m for m in msgs if isinstance(m.get("uuid"), str)
     }
-    session_id = str(conv.get("uuid") or "")
-    project_slug = str(conv.get("name") or "") or "(unnamed)"
-    # turn_index = 0-based position among assistant messages we
-    # actually consider (have non-empty text). Independent of whether
-    # the row passes the kaomoji filter — that way two consecutive
-    # filtered-out kaomoji-less assistant turns don't compress to the
-    # same index.
-    turn = -1
     for m in msgs:
         if m.get("sender") != "assistant":
             continue
         text = _message_text(m)
         if not text.strip():
             continue
-        turn += 1
         # Validate + strip via the shared helper so this reader and
         # the ChatGPT one stay in lockstep — see the "Journal-row
         # contract" gotcha in :file:`CLAUDE.md`.
@@ -67,39 +62,23 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             continue
         first_word, body = stripped
         # Walk parent_message_uuid back to the nearest human-authored
-        # message with non-empty text. Generous hop budget for
-        # symmetry with the Claude Code transcript backfill — a
-        # tool-heavy turn easily chains dozens of intermediate
-        # assistant↔tool-result pairs between the kaomoji-led text
-        # and the originating user prompt. The cap exists only to
-        # bound a pathological uuid cycle.
-        user_text = ""
+        # message with non-empty text. Routed through the shared
+        # walker in `sources._common` so this reader and the Claude
+        # Code transcript backfill apply identical traversal logic;
+        # only the field name and role check differ.
         parent_uuid = m.get("parent_message_uuid")
-        cur = parent_uuid
-        for _ in range(1000):
-            if not cur:
-                break
-            pm = by_uuid.get(cur)
-            if pm is None:
-                break
-            if pm.get("sender") == "human":
-                pt = _message_text(pm)
-                if pt.strip():
-                    user_text = pt
-                    break
-            cur = pm.get("parent_message_uuid")
+        user_text = walk_parents_for_user_text(
+            parent_uuid,
+            by_uuid,
+            parent_field="parent_message_uuid",
+            role_check=lambda node: node.get("sender") == "human",
+            text_extractor=_message_text,
+        )
         yield ScrapeRow(
             source="claude-ai-export",
-            session_id=session_id,
-            project_slug=project_slug,
-            assistant_uuid=str(m.get("uuid") or ""),
-            parent_uuid=parent_uuid,
             model=None,
             timestamp=str(m.get("created_at") or ""),
             cwd=None,
-            git_branch=None,
-            turn_index=turn,
-            had_thinking=False,
             assistant_text=body,
             first_word=first_word,
             surrounding_user=user_text,
@@ -140,10 +119,10 @@ def iter_claude_export(
 
     Each directory is expected to contain a ``conversations.json``
     file. Conversations are unioned by UUID across directories; on
-    duplicate UUIDs the version with more non-empty messages wins.
+    duplicate UUIDs the version with more non-empty messages wins
+    (via :func:`llmoji.sources._common.dedup_by_id_keep_richest`).
     """
-    best: dict[str, dict[str, Any]] = {}
-    best_score: dict[str, int] = {}
+    candidates: list[tuple[str, dict[str, Any], int]] = []
     for export_dir in export_dirs:
         path = Path(export_dir) / "conversations.json"
         if not path.exists():
@@ -158,10 +137,7 @@ def iter_claude_export(
             uuid = conv.get("uuid")
             if not isinstance(uuid, str):
                 continue
-            score = _conv_content_score(conv)
-            if score > best_score.get(uuid, -1):
-                best[uuid] = conv
-                best_score[uuid] = score
+            candidates.append((uuid, conv, _conv_content_score(conv)))
 
-    for conv in best.values():
+    for conv in dedup_by_id_keep_richest(candidates).values():
         yield from _iter_conversation(conv)

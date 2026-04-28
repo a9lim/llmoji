@@ -113,8 +113,6 @@ def test_yields_kaomoji_led_assistant_with_user_above(tmp_path: Path) -> None:
     assert len(rows) == 1
     r = rows[0]
     assert r.source == "chatgpt-export"
-    assert r.session_id == "c1"
-    assert r.project_slug == "test conversation"
     assert r.first_word == "(◕‿◕)"
     # Journal-row contract: assistant_text MUST NOT carry the kaomoji.
     assert r.assistant_text == "feeling cheery, thanks for asking"
@@ -122,9 +120,6 @@ def test_yields_kaomoji_led_assistant_with_user_above(tmp_path: Path) -> None:
     assert r.model == "gpt-4o"
     # ISO-8601 timestamp from the float Unix create_time.
     assert r.timestamp.endswith("Z")
-    assert r.assistant_uuid == "a1"
-    assert r.parent_uuid == "u1"
-    assert r.turn_index == 0
 
 
 def test_skips_non_kaomoji_assistant_message(tmp_path: Path) -> None:
@@ -177,7 +172,8 @@ def test_inactive_regen_branch_is_invisible(tmp_path: Path) -> None:
 
     rows = list(iter_chatgpt_export([tmp_path]))
     assert len(rows) == 1
-    assert rows[0].assistant_uuid == "a1_new"
+    # The kept reply (active branch) yields its kaomoji; the
+    # abandoned a1_old sibling is invisible.
     assert rows[0].first_word == "(◕‿◕)"
 
 
@@ -200,9 +196,6 @@ def test_walks_multi_turn_active_branch(tmp_path: Path) -> None:
     assert [r.first_word for r in rows] == ["(◕‿◕)", "(╥﹏╥)", "(｡◕‿◕｡)"]
     # surrounding_user resolves to the most recent user above each row.
     assert [r.surrounding_user for r in rows] == ["first", "second", "fourth"]
-    # turn_index counts every non-empty assistant message — including
-    # the non-kaomoji one — so a3 takes index 2 and a4 takes index 3.
-    assert [r.turn_index for r in rows] == [0, 1, 3]
 
 
 # ---------------------------------------------------------------------------

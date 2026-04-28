@@ -34,6 +34,12 @@ from typing import Any
 
 import pytest
 
+# Every test in this module forks bash + jq subprocesses, which adds
+# real wallclock time on local dev runs. CI keeps running the full
+# suite; locally, ``pytest -m "not slow"`` skips the parity gate when
+# iterating on something unrelated.
+pytestmark = pytest.mark.slow
+
 # Fields the journal row is built from. We compare these between the
 # bash hook output and the backfill output. ``ts`` differs by design
 # (bash stamps now, backfill stamps historical) so it's excluded.
@@ -541,8 +547,8 @@ def test_claude_code_skill_injected_user_filtered(tmp_path: Path) -> None:
     Verifies the prefix-list unification is wired correctly: the
     bash side gets the prefixes via ``${INJECTED_PREFIXES_FILTER}``
     template substitution, the Python side reads the same tuple
-    from the Provider class. They cannot disagree on which prefixes
-    to drop.
+    from the ClaudeCodeProvider class. They cannot disagree on which
+    prefixes to drop.
     """
     bash, _ = _require_tools()
 
@@ -553,9 +559,9 @@ def test_claude_code_skill_injected_user_filtered(tmp_path: Path) -> None:
     hook_journal = tmp_path / "hook-journal.jsonl"
     hook = _render_hook(ClaudeCodeProvider, hook_journal, hooks_dir)
 
-    # Use the Provider's first declared prefix verbatim so the test
-    # tracks the canonical source. If the prefix list grows, this
-    # test still exercises the first one.
+    # Use the ClaudeCodeProvider's first declared prefix verbatim so
+    # the test tracks the canonical source. If the prefix list grows,
+    # this test still exercises the first one.
     inj_prefix = ClaudeCodeProvider.system_injected_prefixes[0]
     real_user = "what's the weather"
     skill_user = inj_prefix + " /path/to/skill"

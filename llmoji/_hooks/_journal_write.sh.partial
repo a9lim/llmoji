@@ -1,5 +1,5 @@
 # Shared journal-write tail. Substituted into every provider's main
-# hook by ``Provider.render_hook``.
+# hook by ``HookInstaller.render_hook``.
 #
 # Inputs (all set by the per-provider header above):
 #   $ASSISTANT_TEXT  the assistant message body
@@ -17,6 +17,14 @@
 # kaomoji + surrounding whitespace stripped via jq's
 # ``sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")`` so the
 # row contract holds: kaomoji lives in its own field, body is body.
+#
+# The on-the-way-out strip here is paired with an on-the-way-in
+# re-extraction in ``llmoji.sources.journal.iter_journal``, which
+# routes through ``llmoji.sources._common.kaomoji_lead_strip``. That
+# read-side belt-and-suspenders catches journals authored by
+# generic-JSONL contributors who don't run this hook — the bash
+# strip + the Python re-strip together guarantee `assistant_text`
+# never carries the leading kaomoji regardless of source.
 JOURNAL="$JOURNAL_PATH"
 mkdir -p "$(dirname "$JOURNAL")"
 
