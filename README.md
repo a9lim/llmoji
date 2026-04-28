@@ -163,16 +163,19 @@ For Claude Code, Codex, or Hermes history that predates installing the live hook
 
 ## Custom harness
 
-For harnesses we don't ship a first-class adapter for (notably OpenClaw):
+For harnesses we don't ship a first-class adapter for (notably OpenClaw and opencode):
 
 - Append one row per kaomoji-bearing assistant turn to `~/.llmoji/journals/<harness>.jsonl`.
 - Use the canonical six-field schema: `{ts, model, cwd, kaomoji, user_text, assistant_text}`.
 - Strip the leading kaomoji from `assistant_text` on the way in (the prefix lives in the `kaomoji` field).
 - Validate the prefix the same way the package does: `llmoji.taxonomy.is_kaomoji_candidate(prefix)`.
 
-`llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically. Please see [`examples/openclaw_hook.ts`](examples/openclaw_hook.ts) for a worked example.
+`llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically. Worked examples:
 
-The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw, please mirror the rules in `is_kaomoji_candidate` faithfully. Bumping any of them is a cross-corpus invariant change on the package side and your port needs to follow.
+- [`examples/openclaw_hook.ts`](examples/openclaw_hook.ts) — OpenClaw stop-event hook (TS-shaped hooks taking a payload as a function argument).
+- [`examples/opencode_plugin.ts`](examples/opencode_plugin.ts) — opencode plugin (TS/JS plugins auto-loaded from `~/.config/opencode/plugins/`; uses the `event` and `experimental.chat.system.transform` hooks). opencode's plugin contract is TypeScript-only with no shell-hook escape hatch, so first-class llmoji support would have to ship as a TS plugin rather than the rendered-bash pattern the other providers use; the worked example covers the same ground until then.
+
+The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw or opencode, please mirror the rules in `is_kaomoji_candidate` faithfully. Bumping any of them is a cross-corpus invariant change on the package side and your port needs to follow.
 
 ---
 
