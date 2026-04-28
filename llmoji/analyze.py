@@ -15,9 +15,12 @@ End-user pipeline (no GPU, no embedding, no axes):
      :func:`llmoji.synth.mask_kaomoji` and call the chosen backend
      via the :class:`~llmoji.synth.Synthesizer` instance with
      :data:`llmoji.synth_prompts.DESCRIBE_PROMPT_*`. Cache by
-     content-hash + synth model id so re-runs of ``analyze`` skip
-     rows already described — both for cost and so unchanged rows
-     produce identical bundles.
+     content-hash + synth model id + backend so re-runs of
+     ``analyze`` skip rows already described — for cost, and so a
+     re-run feeds Stage B identical descriptions in the same order
+     regardless of cache state. (Synthesizer prose itself is
+     model-dependent and may not be byte-stable on a fresh call,
+     but the cache pins it for any given input.)
   3. Stage B (per-cell synthesis): pool Stage A descriptions for
      each ``(source_model, canonical_kaomoji)`` cell; call
      :func:`llmoji.synth.synthesize_descriptions` with
@@ -41,7 +44,9 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+from tqdm import tqdm
 
 from . import paths
 from ._util import atomic_write_text, package_version, sanitize_model_id_for_path
@@ -161,9 +166,10 @@ def _sample(
 
 
 def _resolve_concurrency(explicit: int | None) -> int:
-    """Stage-A worker count: explicit arg → ``$LLMOJI_CONCURRENCY``
-    → :data:`DEFAULT_STAGE_A_CONCURRENCY`. Clamps to ``>=1``. Bad
-    env values fall back silently to the default."""
+    """Stage-A worker count: ``--concurrency`` (CLI) → explicit arg
+    → ``$LLMOJI_CONCURRENCY`` → :data:`DEFAULT_STAGE_A_CONCURRENCY`.
+    Clamps to ``>=1``. Bad env values fall back silently to the
+    default."""
     if explicit is not None:
         return max(1, explicit)
     raw = os.environ.get("LLMOJI_CONCURRENCY")
@@ -173,19 +179,6 @@ def _resolve_concurrency(explicit: int | None) -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_STAGE_A_CONCURRENCY
-
-
-def _print_stage_progress(
-    stage: str,
-    label: str,
-    n_descs: int | None,
-    dt: float,
-    text: str,
-) -> None:
-    """Shared formatter for Stage-A and Stage-B per-call progress lines."""
-    short = text[:70] + ("..." if len(text) > 70 else "")
-    suffix = f" (n={n_descs})" if n_descs is not None else ""
-    print(f"  stage-{stage} {label}{suffix}  ({dt:.1f}s)  {short}")
 
 
 # ---------------------------------------------------------------------------
@@ -210,20 +203,20 @@ def _stage_a(
 
     Cache-miss API calls run on a small thread pool (``max_workers``
     or ``$LLMOJI_CONCURRENCY``, default 2). Both SDK clients are
-    thread-safe; cache appends happen serially on the main thread as
-    futures complete, so there's no append interleaving to worry
-    about.
+    thread-safe; cache appends happen serially on the main thread
+    after all dispatched futures complete, in deterministic walk
+    order, so the bundle and the cache file are identical regardless
+    of the order futures finish in.
     """
     cache = load_cache(cache_path)
-    descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
     n_cached = 0
-    # (source_model, canonical, cache_key, prompt) for cache misses.
-    pending: list[tuple[str, str, str, str]] = []
 
-    # Pass 1: walk every sampled row, satisfy from cache where
-    # possible, queue misses for parallel dispatch.
+    # Walk every sampled row in deterministic (sorted source_model,
+    # sorted canonical, _sample-stable) order. Each entry records
+    # whether it was a cache hit (carries ``description`` directly)
+    # or a miss (carries ``prompt`` to be dispatched). After dispatch
+    # the misses are populated with their ``description`` in place.
+    walk: list[dict[str, Any]] = []
     for source_model in sorted(buckets):
         per_canon = buckets[source_model]
         for canon in sorted(per_canon):
@@ -235,10 +228,16 @@ def _stage_a(
             for r in sampled:
                 user_text = (r.surrounding_user or "").strip()
                 assistant = r.assistant_text or ""
-                key = cache_key(synth.model_id, canon, user_text, assistant)
+                key = cache_key(
+                    synth.model_id, synth.backend, synth.base_url,
+                    canon, user_text, assistant,
+                )
                 hit = cache.get(key)
                 if hit and "description" in hit:
-                    descs_by_cell[source_model][canon].append(hit["description"])
+                    walk.append({
+                        "sm": source_model, "canon": canon, "key": key,
+                        "cached": True, "description": hit["description"],
+                    })
                     n_cached += 1
                     continue
                 masked = mask_kaomoji(assistant, r.first_word)
@@ -248,29 +247,79 @@ def _stage_a(
                     )
                 else:
                     prompt = DESCRIBE_PROMPT_NO_USER.format(masked_text=masked)
-                pending.append((source_model, canon, key, prompt))
+                walk.append({
+                    "sm": source_model, "canon": canon, "key": key,
+                    "cached": False, "prompt": prompt, "description": None,
+                })
 
-    if not pending:
-        return _freeze_two_level(descs_by_cell), 0, n_cached
+    # Group cache misses by key. Two sampled rows can share a key
+    # (same canonical + user_text + assistant_text — common when one
+    # turn's assistant text gets sampled into multiple cells, or when
+    # the journal carries near-duplicate rows). Without this dedupe,
+    # a cold-cache run would dispatch each duplicate separately and
+    # potentially get different descriptions, while a warm-cache
+    # follow-up would read the (single) last-write-wins cache row
+    # for all duplicates — cold and warm would feed Stage B
+    # different lists. One dispatch per unique key keeps cold and
+    # warm in lockstep.
+    pending_by_key: dict[str, list[int]] = defaultdict(list)
+    for i, e in enumerate(walk):
+        if not e["cached"]:
+            pending_by_key[e["key"]].append(i)
 
-    workers = _resolve_concurrency(max_workers)
+    if pending_by_key:
+        workers = _resolve_concurrency(max_workers)
+        if print_progress:
+            print(
+                f"stage A: {n_cached} cache hit(s), "
+                f"{len(pending_by_key)} dispatch(es) "
+                f"({workers} workers)"
+            )
 
-    def _describe_one(
-        sm: str, canon: str, key: str, prompt: str,
-    ) -> tuple[str, str, str, str, float]:
-        t0 = time.monotonic()
-        description = synth.call(prompt)
-        dt = time.monotonic() - t0 if print_progress else 0.0
-        return sm, canon, key, description, dt
+        def _describe_one(prompt: str) -> str:
+            return synth.call(prompt)
 
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_key = {
+                pool.submit(_describe_one, walk[indices[0]]["prompt"]): key
+                for key, indices in pending_by_key.items()
+            }
+            iterator = as_completed(future_to_key)
+            if print_progress:
+                iterator = tqdm(
+                    iterator,
+                    total=len(future_to_key),
+                    desc="stage A",
+                    unit="call",
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+            for fut in iterator:
+                key = future_to_key[fut]
+                description = fut.result()
+                indices = pending_by_key[key]
+                for i in indices:
+                    walk[i]["description"] = description
+
+    # Serialize: assemble descs_by_cell + append cache in deterministic
+    # walk order. Order matters for Stage B because SYNTHESIZE_PROMPT
+    # numbers the descriptions; if Stage B sees the same list in the
+    # same order across runs, it produces the same prose. The cache
+    # is written once per unique key — duplicate walk entries share
+    # the cached row so a warm-cache rerun resolves all duplicates
+    # to the same description.
+    descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     n_calls = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_describe_one, sm, canon, k, p)
-            for sm, canon, k, p in pending
-        ]
-        for fut in as_completed(futures):
-            sm, canon, key, description, dt = fut.result()
+    written_keys: set[str] = set()
+    for entry in walk:
+        sm = entry["sm"]
+        canon = entry["canon"]
+        description = entry["description"]
+        descs_by_cell[sm][canon].append(description)
+        key = entry["key"]
+        if not entry["cached"] and key not in written_keys:
             row = {
                 "key": key,
                 "kaomoji": canon,
@@ -280,12 +329,8 @@ def _stage_a(
             }
             append_cache(cache_path, row)
             cache[key] = row
-            descs_by_cell[sm][canon].append(description)
+            written_keys.add(key)
             n_calls += 1
-            if print_progress:
-                _print_stage_progress(
-                    "A", f"{sm}/{canon}", None, dt, description,
-                )
 
     return _freeze_two_level(descs_by_cell), n_calls, n_cached
 
@@ -327,30 +372,36 @@ def _stage_b(
         return {}, 0
 
     workers = _resolve_concurrency(max_workers)
+    if print_progress:
+        print(f"stage B: {len(pending)} cell(s) ({workers} workers)")
 
     def _synth_one(
         sm: str, canon: str, descs: list[str],
-    ) -> tuple[str, str, str, int, float]:
-        t0 = time.monotonic()
+    ) -> tuple[str, str, str]:
         line = synthesize_descriptions(
             synth, descs,
             synth_prompt_template=SYNTHESIZE_PROMPT,
         )
-        dt = time.monotonic() - t0 if print_progress else 0.0
-        return sm, canon, line, len(descs), dt
+        return sm, canon, line
 
     out: dict[str, dict[str, str]] = defaultdict(dict)
     n_calls = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_synth_one, sm, c, d) for sm, c, d in pending]
-        for fut in as_completed(futures):
-            sm, canon, line, n_descs, dt = fut.result()
+        iterator = as_completed(futures)
+        if print_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(futures),
+                desc="stage B",
+                unit="cell",
+                dynamic_ncols=True,
+                leave=True,
+            )
+        for fut in iterator:
+            sm, canon, line = fut.result()
             out[sm][canon] = line
             n_calls += 1
-            if print_progress:
-                _print_stage_progress(
-                    "B", f"{sm}/{canon}", n_descs, dt, line,
-                )
     return {sm: dict(per_canon) for sm, per_canon in out.items()}, n_calls
 
 
@@ -360,18 +411,26 @@ def _stage_b(
 
 
 def _clear_bundle_dir(bundle_dir: Path) -> None:
-    """Remove every top-level file AND every top-level subdir from
-    ``bundle_dir``. Stale per-source-model files from prior runs
-    would silently leak into upload otherwise — the bundle is the
-    privacy boundary, so we wipe everything that isn't about to be
-    re-written. Subdirs from older 1.1.0 layouts are also cleared
-    here on first analyze post-upgrade.
+    """Remove every top-level entry from ``bundle_dir``.
+
+    Stale per-source-model files from prior runs would silently leak
+    into upload otherwise — the bundle is the privacy boundary, so
+    we wipe everything that isn't about to be re-written. Subdirs
+    from older 1.1.0 layouts are also cleared here on first analyze
+    post-upgrade.
+
+    Symlinks are unlinked, never followed: a symlinked subdir would
+    cause ``shutil.rmtree`` to walk across the link and delete files
+    outside the bundle dir. ``Path.is_symlink()`` is checked before
+    ``is_dir()`` because a symlink-to-directory satisfies both.
     """
     import shutil
     if not bundle_dir.exists():
         return
     for p in bundle_dir.iterdir():
-        if p.is_file() or p.is_symlink():
+        if p.is_symlink():
+            p.unlink()
+        elif p.is_file():
             p.unlink()
         elif p.is_dir():
             shutil.rmtree(p)
@@ -425,8 +484,8 @@ def _write_bundle(
     # Reject sanitization collisions before we write — two distinct
     # source-model strings landing on the same slug (e.g. ``A/B``
     # and ``a__b`` both → ``a__b``) would silently overwrite each
-    # other's descriptions.jsonl. Loud failure beats a half-shipped
-    # bundle.
+    # other's per-source-model ``<slug>.jsonl``. Loud failure beats a
+    # half-shipped bundle.
     slug_owners: dict[str, list[str]] = defaultdict(list)
     for source_model in synthesized_by_cell:
         slug_owners[sanitize_model_id_for_path(source_model)].append(
@@ -500,6 +559,7 @@ def run_analyze(
     backend: str = "anthropic",
     base_url: str | None = None,
     model_id: str | None = None,
+    concurrency: int | None = None,
     print_progress: bool = True,
 ) -> AnalyzeResult:
     """Top-level entry point.
@@ -521,7 +581,8 @@ def run_analyze(
         rows_list,
     )
     # counts_by_cell[source_model][canonical] = total rows in that cell
-    # (used for the ``count`` column in descriptions.jsonl).
+    # (used for the ``count`` column in each per-source-model
+    # ``<slug>.jsonl``).
     counts_by_cell: dict[str, dict[str, int]] = {
         sm: {canon: len(rs) for canon, rs in per_canon.items()}
         for sm, per_canon in buckets.items()
@@ -540,13 +601,15 @@ def run_analyze(
         )
 
     descs_by_cell, n_a, n_cached = _stage_a(
-        synth, buckets, cache_path=cache_path, print_progress=print_progress,
+        synth, buckets, cache_path=cache_path,
+        print_progress=print_progress, max_workers=concurrency,
     )
     synthesized_by_cell, n_b = _stage_b(
-        synth, descs_by_cell, print_progress=print_progress,
+        synth, descs_by_cell,
+        print_progress=print_progress, max_workers=concurrency,
     )
 
-    # Lazy import — upload is the only place that touches state.json,
+    # Lazy import — upload is the only place that touches the .salt file,
     # but we want the submitter id stamped into the manifest so the
     # bundle the user inspects matches what would land on HF.
     from .upload import submitter_id as _submitter_id

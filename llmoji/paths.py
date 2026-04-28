@@ -42,13 +42,22 @@ def journals_dir() -> Path:
     return llmoji_home() / "journals"
 
 
-def state_path() -> Path:
-    """Persistent per-machine state. Currently holds the salted
-    submission token used to derive a stable
-    :func:`llmoji.upload.submitter_id` across upload runs.
-    Provider install state is read live from each harness's own
-    settings file — this isn't an install registry."""
-    return llmoji_home() / "state.json"
+def salt_path() -> Path:
+    """Per-machine random salt, persisted at ``~/.llmoji/.salt``.
+
+    Holds 64 hex characters (32 bytes of entropy) — the seed for
+    :func:`llmoji.upload.submitter_id`. The hash is what lands on
+    HF; the salt itself never leaves the user's machine.
+
+    Pre Wave 6 the same byte was wrapped in a JSON envelope at
+    ``state.json`` keyed under ``"submission_token"``; the envelope
+    paid for nothing and a flat ``.salt`` is honest about what's
+    on disk. The dotfile prefix keeps `ls ~/.llmoji` clean.
+
+    HookInstaller install state is read live from each harness's
+    own settings file — this isn't an install registry.
+    """
+    return llmoji_home() / ".salt"
 
 
 def ensure_home() -> Path:

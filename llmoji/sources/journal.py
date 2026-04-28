@@ -39,13 +39,6 @@ from ..scrape import ScrapeRow
 from ..taxonomy import extract
 
 
-def _project_slug_from_cwd(cwd: str | None) -> str:
-    if not cwd:
-        return "(unknown)"
-    name = Path(cwd).name
-    return name or "(unknown)"
-
-
 def iter_journal(
     path: Path | str,
     *,
@@ -97,16 +90,9 @@ def iter_journal(
             cwd = row.get("cwd")
             yield ScrapeRow(
                 source=source,
-                session_id="",
-                project_slug=_project_slug_from_cwd(cwd),
-                assistant_uuid="",
-                parent_uuid=None,
                 model=str(row.get("model") or "") or None,
                 timestamp=str(row.get("ts") or ""),
                 cwd=str(cwd) if cwd else None,
-                git_branch=None,
-                turn_index=turn,
-                had_thinking=False,
                 assistant_text=str(row.get("assistant_text") or ""),
                 first_word=match.first_word,
                 surrounding_user=str(row.get("user_text") or ""),

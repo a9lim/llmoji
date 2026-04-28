@@ -22,7 +22,8 @@ Three first-class backends:
 Cache layout (one JSONL line per cached call):
 
     {
-      "key":          sha256(synth_model_id + "\\0" + canonical_kaomoji
+      "key":          sha256(synth_model_id + "\\0" + backend
+                            + "\\0" + base_url + "\\0" + canonical_kaomoji
                             + "\\0" + user + "\\0" + assistant)[:16],
       "kaomoji":      canonical kaomoji,
       "description":  synthesizer output,
@@ -30,10 +31,11 @@ Cache layout (one JSONL line per cached call):
       "backend":      "anthropic" | "openai" | "local",
     }
 
-The synth model id is part of the cache key — switching backends
-silently returning stale paraphrases from the prior backend would
-be a correctness bug. One-time recompute cost on the first analyze
-after upgrade (existing entries silently miss).
+Backend + base_url + model_id are all in the key — switching
+backends or pointing a local backend at a different endpoint can't
+silently return paraphrases from the prior call. One-time recompute
+cost on the first analyze after upgrade (existing entries miss
+cleanly because the key shape changed).
 
 The cache file lives at ``~/.llmoji/cache/per_instance.jsonl`` by
 default; the path is parameterized so tests can use a tmpdir.
@@ -46,6 +48,8 @@ import json
 import threading
 from pathlib import Path
 from typing import Any, Iterable
+
+from .synth_prompts import DEFAULT_ANTHROPIC_MODEL_ID, DEFAULT_OPENAI_MODEL_ID
 
 MASK_TOKEN = "[FACE]"
 
@@ -77,6 +81,8 @@ def mask_kaomoji(text: str, first_word: str) -> str:
 
 def cache_key(
     synth_model_id: str,
+    backend: str,
+    base_url: str,
     canonical_kaomoji: str,
     user_text: str,
     assistant_text: str,
@@ -88,18 +94,35 @@ def cache_key(
     probability against a 64-bit space). The cache is private to
     one machine; no security boundary depends on the hash.
 
-    The synthesizer model id is folded in so two different backends
-    (or the same backend on different snapshots) don't share cache
-    entries — the prose differs by model, so the key has to too.
+    Backend and base_url are folded in alongside the model id so two
+    backends sharing a model name (e.g. ``local`` running an Ollama
+    tag that collides with a remote id) — or one ``local`` instance
+    pointed at two different endpoints — don't share cache entries.
+    The prose differs by backend; the key has to too.
+
+    If a future federated/shared cache lands, bump from the truncated
+    16-hex prefix to the full SHA-256 hexdigest — collision
+    probability scales quadratically with corpus size and 64 bits is
+    only safe at single-machine scale.
     """
     h = hashlib.sha256()
-    h.update((synth_model_id or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update(canonical_kaomoji.encode("utf-8"))
-    h.update(b"\0")
-    h.update((user_text or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update((assistant_text or "").encode("utf-8"))
+    # Length-prefix each field so a NUL byte buried inside (e.g. an
+    # assistant message that happens to contain ``"\0"``) can't shift
+    # a field boundary and collide with a different (user, assistant)
+    # pair. Real journal text is unlikely to carry NULs but the
+    # framing is cheap; raw NUL-delimiters were the previous shape.
+    for part in (
+        synth_model_id or "",
+        backend or "",
+        base_url or "",
+        canonical_kaomoji,
+        user_text or "",
+        assistant_text or "",
+    ):
+        encoded = part.encode("utf-8")
+        h.update(str(len(encoded)).encode("ascii"))
+        h.update(b":")
+        h.update(encoded)
     return h.hexdigest()[:16]
 
 
@@ -132,18 +155,17 @@ def append_cache(cache_path: Path, row: dict[str, Any]) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def cache_size(cache_path: Path) -> tuple[int, int]:
-    """Return ``(n_rows, n_bytes)`` for the cache file. Used by
-    ``llmoji status`` so the user knows what's on disk."""
+def cache_size(cache_path: Path) -> int:
+    """Return the cache file's size in bytes.
+
+    Used by ``llmoji status`` so the user knows what's on disk. Pre
+    Wave 4 this also walked the file to count rows; that scan is
+    wasted work on multi-hundred-MB caches and the row count was
+    never load-bearing — bytes is the user-facing number.
+    """
     if not cache_path.exists():
-        return (0, 0)
-    n_bytes = cache_path.stat().st_size
-    n_rows = 0
-    with cache_path.open() as f:
-        for line in f:
-            if line.strip():
-                n_rows += 1
-    return (n_rows, n_bytes)
+        return 0
+    return cache_path.stat().st_size
 
 
 # ---------------------------------------------------------------------------
@@ -157,24 +179,47 @@ class Synthesizer:
     calls it from N threads (the Anthropic httpx client and OpenAI's
     httpx client are both thread-safe), so subclasses must keep
     ``call`` reentrant.
+
+    ``base_url`` is empty for the hosted backends (anthropic, openai)
+    and set to the user-supplied endpoint for ``local``. It feeds
+    into :func:`cache_key` so two ``local`` instances pointed at
+    different endpoints don't share cache entries.
+
+    Concrete synthesizers all defer SDK-client construction to the
+    first ``call`` so the factory itself can be invoked without
+    environment variables set (constructor side-effects would
+    otherwise force a real ``OPENAI_API_KEY`` just to enumerate
+    backends in tests, ``llmoji status``, etc.). The lazy client is
+    memoized on ``self._client`` behind a per-instance lock —
+    Stage A is multi-threaded and an unguarded check-then-set would
+    race on the first cache-miss wave, instantiating N clients
+    instead of one (and burning N OAuth flows on the openai backend).
+    Subclasses implement :meth:`_make_client` (the SDK import +
+    constructor call); the base class owns the double-checked locking
+    around it.
     """
 
     backend: str = ""
     model_id: str = ""
+    base_url: str = ""
 
-    def call(self, prompt: str, *, max_tokens: int = 200) -> str:
+    def __init__(self) -> None:
+        self._client: Any = None
+        self._client_lock = threading.Lock()
+
+    def _make_client(self) -> Any:
         raise NotImplementedError
 
+    def _ensure_client(self) -> Any:
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = self._make_client()
+        return self._client
 
-# Concrete synthesizers all defer SDK-client construction to the
-# first ``call`` so the factory itself can be invoked without
-# environment variables set (constructor side-effects would
-# otherwise force a real ``OPENAI_API_KEY`` just to enumerate
-# backends in tests, ``llmoji status``, etc.). The lazy client is
-# memoized on ``self._client`` behind a per-instance lock —
-# Stage A is multi-threaded and an unguarded check-then-set would
-# race on the first cache-miss wave, instantiating N clients
-# instead of one (and burning N OAuth flows on the openai backend).
+    def call(self, prompt: str, *, max_tokens: int = 200) -> str:
+        del prompt, max_tokens
+        raise NotImplementedError
 
 
 class AnthropicSynthesizer(Synthesizer):
@@ -189,17 +234,12 @@ class AnthropicSynthesizer(Synthesizer):
     backend = "anthropic"
 
     def __init__(self, model_id: str) -> None:
+        super().__init__()
         self.model_id = model_id
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import anthropic
-                    self._client = anthropic.Anthropic(max_retries=8)
-        return self._client
+    def _make_client(self) -> Any:
+        import anthropic
+        return anthropic.Anthropic(max_retries=8)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()
@@ -226,17 +266,12 @@ class OpenAISynthesizer(Synthesizer):
     backend = "openai"
 
     def __init__(self, model_id: str) -> None:
+        super().__init__()
         self.model_id = model_id
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import openai
-                    self._client = openai.OpenAI(max_retries=8)
-        return self._client
+    def _make_client(self) -> Any:
+        import openai
+        return openai.OpenAI(max_retries=8)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()
@@ -263,21 +298,14 @@ class LocalSynthesizer(Synthesizer):
     def __init__(
         self, model_id: str, *, base_url: str, api_key: str = "ollama",
     ) -> None:
+        super().__init__()
         self.model_id = model_id
-        self._base_url = base_url
+        self.base_url = base_url
         self._api_key = api_key
-        self._client: Any = None
-        self._client_lock = threading.Lock()
 
-    def _ensure_client(self) -> Any:
-        if self._client is None:
-            with self._client_lock:
-                if self._client is None:
-                    import openai
-                    self._client = openai.OpenAI(
-                        base_url=self._base_url, api_key=self._api_key,
-                    )
-        return self._client
+    def _make_client(self) -> Any:
+        import openai
+        return openai.OpenAI(base_url=self.base_url, api_key=self._api_key)
 
     def call(self, prompt: str, *, max_tokens: int = 200) -> str:
         client = self._ensure_client()
@@ -310,8 +338,6 @@ def make_synthesizer(
       :data:`llmoji.synth_prompts.DEFAULT_OPENAI_MODEL_ID`.
     - ``local``: requires both ``base_url`` and ``model_id``.
     """
-    from .synth_prompts import DEFAULT_ANTHROPIC_MODEL_ID, DEFAULT_OPENAI_MODEL_ID
-
     if backend == "anthropic":
         return AnthropicSynthesizer(model_id=DEFAULT_ANTHROPIC_MODEL_ID)
     if backend == "openai":

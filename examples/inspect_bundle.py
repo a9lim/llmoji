@@ -18,6 +18,7 @@ import json
 import sys
 
 from llmoji import paths
+from llmoji._util import iter_bundle_data_files
 
 
 def main() -> int:
@@ -52,21 +53,14 @@ def main() -> int:
         print(f"  notes:             {notes}")
     print()
 
-    data_files = sorted(
-        p for p in bundle.iterdir() if p.is_file() and p.suffix == ".jsonl"
-    )
-    if not data_files:
+    data = list(iter_bundle_data_files(bundle))
+    if not data:
         print("no source-model .jsonl files — bundle is empty.")
         return 2
 
     print("descriptions (the only prose that ships):")
     print()
-    for data_file in data_files:
-        rows = [
-            json.loads(line)
-            for line in data_file.read_text().splitlines()
-            if line.strip()
-        ]
+    for data_file, rows in data:
         print(f"  ── {data_file.name}  ({len(rows)} faces) ──")
         for row in rows:
             kao = row.get("kaomoji", "?")

@@ -53,6 +53,10 @@ dependencies = [
     "anthropic>=0.40",
     "openai>=1.55",
     "huggingface_hub>=0.25",
+    # tqdm drives the analyze progress bars in :mod:`llmoji.analyze`.
+    # Already a transitive dep via huggingface_hub and openai, listed
+    # explicitly so the surface stays honest if either upstream drops it.
+    "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +95,9 @@ testpaths = ["tests"]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: bash + jq subprocess parity tests; skip with -m 'not slow' for fast local iteration",
 ]
 
 [tool.ruff]

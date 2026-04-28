@@ -18,9 +18,10 @@ The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or networ
 pytest tests/                          # everything
 pytest tests/test_canonicalize.py -v   # rule-by-rule taxonomy regression
 pytest tests/test_public_surface.py -v # cross-corpus invariant contract
+pytest -m "not slow"                   # skip the bash + jq parity gate
 ```
 
-The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
+The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. The bash + jq parity tests in `tests/test_pipeline_parity.py` are marked `slow` because they fork subprocess for every case. Skip them with `-m "not slow"` while iterating on something unrelated; CI keeps running the full suite. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
 
 ## Lint
 
@@ -33,18 +34,18 @@ ruff check . --fix      # auto-fix what's fixable
 
 ## Adding a new provider
 
-A first-class provider is one bash hook template under `llmoji/_hooks/` plus one `Provider` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:Provider` documents what the subclass needs. The three things that matter are:
+A first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs (renamed from `Provider` in 1.1.x — same role, more honest name). The three things that matter are:
 
 1. Where the harness keeps its hooks dir and settings file.
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `_atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_is_nudge_registered`.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_check_registrations` if the format isn't JSON-shaped.
 
 Please include in the PR:
 
 - The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl` or `hermes_nudge.sh.tmpl`.
-- The `Provider` subclass and its `system_injected_prefixes` list (empty if the harness doesn't inject system-role-as-user-text payloads).
+- The `HookInstaller` subclass and its `system_injected_prefixes` list (empty if the harness doesn't inject system-role-as-user-text payloads).
 - Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage.
 - A short note on the harness's docs version and where the kaomoji lands in the stop payload.
 
@@ -59,7 +60,7 @@ Please strip the leading kaomoji from `assistant_text` on parse, the same way th
 ## PRs
 
 - Please don't bump the version in your PR unless the change is intended to ship as a release. The PyPI publish workflow is triggered by a version update.
-- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `Provider`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset's and need an edit on the dataset card too.
+- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `HookInstaller`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset's and need an edit on the dataset card too.
 - The hermes provider in particular wants real-traffic validation. If you run hermes and are willing to share what `extra.*` keys actually arrive on `post_llm_call` and whether `subagent_stop` correlation filters cleanly, please open an issue.
 
 ## Questions

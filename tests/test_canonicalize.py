@@ -62,14 +62,33 @@ def test_extract_positive(text: str, expected: str) -> None:
         "[pre-commit] passed",
         # Markdown-escape backslash → rejected.
         "(\\*´∀｀\\*) hello",
-        # Unbalanced bracket → rejected (no whitespace-split fallback).
-        "(｡• ω •｡  open paren never closed",
         # Oversize balanced span → rejected.
         "(" + "a" * 50 + ") text",
     ],
 )
 def test_extract_rejects(text: str) -> None:
     assert extract(text).first_word == ""
+
+
+@pytest.mark.parametrize(
+    "text,expected_first_word",
+    [
+        # Unbalanced bracket-leading kaomoji — the depth walker can't
+        # close, but the whitespace-fallback grabs the first word so
+        # we don't drop a real corpus entry whose closing glyph
+        # isn't strictly the matching bracket.
+        ("(◕‿◕ followed by prose", "(◕‿◕"),
+        ("(｡•  more prose past the paren", "(｡•"),
+    ],
+)
+def test_extract_unbalanced_bracket_fallback(
+    text: str, expected_first_word: str,
+) -> None:
+    """Unbalanced bracket-leading kaomoji surface via the
+    whitespace-split fallback in `_leading_bracket_span`. Real
+    corpus output sometimes drops or substitutes the closing glyph
+    and we want those entries in the journal."""
+    assert extract(text).first_word == expected_first_word
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +205,9 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         ("(\\*´∀｀\\*)",       False),
         # 4+-letter run inside parens — prose, not a kaomoji.
         ("(Backgrounddebug)", False),
-        # Unbalanced bracket — sed-cut at first letter mid-bracket.
+        # 4+-letter run inside an unclosed bracket-leading span —
+        # rejected via the prose filter (the bracket-balance check
+        # is gone; 4-letter-run carries the prose-rejection role).
         ("(unclosed",         False),
         # Oversize span — not a real kaomoji.
         ("(" + "a" * 100 + ")", False),
