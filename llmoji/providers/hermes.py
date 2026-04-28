@@ -176,23 +176,12 @@ class HermesProvider(Provider):
         else:
             self.settings_path.unlink()
 
-    def _is_registered(self) -> bool:
-        if not self.settings_path.exists():
-            return False
-        return self._MARKER_BEGIN in self.settings_path.read_text()
-
-    def _is_nudge_registered(self) -> bool:
-        # Hermes registers both hooks atomically inside one
-        # marker-fenced YAML stanza, so the nudge is wired up iff the
-        # marker is present — same check as :meth:`_is_registered`.
-        return self._is_registered()
-
     def _check_registrations(self) -> tuple[bool, bool]:
         # Single-read override: hermes wires both hooks inside one
         # marker-fenced stanza, so one file read tells us about both.
-        # Default Provider._check_registrations would still work but
-        # would route through the JSON-settings batch (which is wrong
-        # for YAML); cleaner to override directly.
+        # Default Provider._check_registrations would route through
+        # the JSON-settings batch (wrong for YAML); cleaner to
+        # override directly.
         if not self.settings_path.exists():
             return False, False
         present = self._MARKER_BEGIN in self.settings_path.read_text()

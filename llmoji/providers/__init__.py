@@ -13,10 +13,10 @@ Three things drive the abstraction:
   1. Where to write the hook script (``hooks_dir``).
   2. How to register it. JSON-settings providers (Claude Code, Codex)
      get the default :meth:`Provider._register` /
-     :meth:`Provider._unregister` / ``_is_registered`` /
-     ``_is_nudge_registered`` from the base class — they only need to
-     specify ``main_event``. YAML-settings providers (Hermes)
-     override the four ``_register``-family methods.
+     :meth:`Provider._unregister` / :meth:`Provider._check_registrations`
+     from the base class — they only need to specify ``main_event``.
+     YAML-settings providers (Hermes) override the three
+     ``_register``-family methods.
   3. Where the journal lives (``journal_path``) — a published
      uniform-schema JSONL the live hook appends to and which
      ``llmoji analyze`` reads.

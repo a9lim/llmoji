@@ -49,6 +49,8 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
+from .synth_prompts import DEFAULT_ANTHROPIC_MODEL_ID, DEFAULT_OPENAI_MODEL_ID
+
 MASK_TOKEN = "[FACE]"
 
 
@@ -337,8 +339,6 @@ def make_synthesizer(
       :data:`llmoji.synth_prompts.DEFAULT_OPENAI_MODEL_ID`.
     - ``local``: requires both ``base_url`` and ``model_id``.
     """
-    from .synth_prompts import DEFAULT_ANTHROPIC_MODEL_ID, DEFAULT_OPENAI_MODEL_ID
-
     if backend == "anthropic":
         return AnthropicSynthesizer(model_id=DEFAULT_ANTHROPIC_MODEL_ID)
     if backend == "openai":

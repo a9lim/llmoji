@@ -177,15 +177,10 @@ _PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
 
 
 def _cmd_parse(args: argparse.Namespace) -> int:
-    parser = _PARSERS.get(args.provider)
-    if parser is None:
-        print(
-            f"unknown --provider {args.provider!r} for parse. "
-            f"v1.0 supports: {sorted(_PARSERS)}.",
-            file=sys.stderr,
-        )
-        return 2
-    return parser(args)
+    # argparse choices=_PARSERS keys already enforces a known
+    # provider; the only way args.provider lands here is through the
+    # registered set.
+    return _PARSERS[args.provider](args)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +255,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         backend=backend,
         base_url=base_url,
         model_id=model_id,
+        concurrency=args.concurrency,
     )
     print()
     print(
@@ -304,9 +300,9 @@ def _cmd_upload(args: argparse.Namespace) -> int:
 
 
 def _cmd_cache(args: argparse.Namespace) -> int:
-    if args.cache_action != "clear":
-        print(f"unknown cache action {args.cache_action!r}", file=sys.stderr)
-        return 2
+    # ``args.cache_action`` is constrained to ``["clear"]`` by
+    # argparse; only one branch needed here.
+    del args
     cache_dir = paths.cache_dir()
     if not cache_dir.exists():
         print("no cache to clear.")
@@ -383,6 +379,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "model id for --backend local "
             "(e.g. llama3.1, qwen2.5:14b). env: LLMOJI_MODEL."
+        ),
+    )
+    sp.add_argument(
+        "--concurrency", type=int, default=None,
+        help=(
+            "Stage-A worker count (default 2; bump if your synth "
+            "rate-limit tier has headroom). env: LLMOJI_CONCURRENCY."
         ),
     )
     sp.set_defaults(func=_cmd_analyze)
