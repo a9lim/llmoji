@@ -21,9 +21,9 @@ The end-user CLI is :mod:`llmoji.cli`. The locked public surface
     interface and the three first-class providers.
   - The bundle schema written by :func:`llmoji.analyze.run_analyze`
     (top-level ``manifest.json`` + per-source-model
-    ``<slug>/descriptions.jsonl``) and enforced by
+    ``<slug>.jsonl``) and enforced by
     :data:`llmoji.upload.BUNDLE_TOPLEVEL_ALLOWLIST` +
-    :data:`llmoji.upload.BUNDLE_SUBDIR_FILE`.
+    :data:`llmoji.upload.BUNDLE_DATA_SUFFIX`.
 
 Bumping any of those changes the cross-corpus invariant; treat as
 a major version bump.

@@ -6,10 +6,10 @@ Run after ``llmoji analyze``::
     python examples/inspect_bundle.py
 
 Prints the manifest summary plus one section per source-model
-subfolder, with each canonical kaomoji's row inside. This is what
-would ship on ``llmoji upload`` (and nothing else: the bundle is
-allowlisted to ``manifest.json`` at the top level plus each
-``<source-model>/descriptions.jsonl``).
+``.jsonl`` file at the bundle root, with each canonical kaomoji's
+row inside. This is what would ship on ``llmoji upload`` (and
+nothing else: the bundle is allowlisted to ``manifest.json`` plus
+each top-level ``<source-model>.jsonl``).
 """
 
 from __future__ import annotations
@@ -52,24 +52,22 @@ def main() -> int:
         print(f"  notes:             {notes}")
     print()
 
-    subdirs = sorted(p for p in bundle.iterdir() if p.is_dir())
-    if not subdirs:
-        print("no source-model subfolders — bundle is empty.")
+    data_files = sorted(
+        p for p in bundle.iterdir() if p.is_file() and p.suffix == ".jsonl"
+    )
+    if not data_files:
+        print("no source-model .jsonl files — bundle is empty.")
         return 2
 
     print("descriptions (the only prose that ships):")
     print()
-    for sub in subdirs:
-        descriptions_path = sub / "descriptions.jsonl"
-        if not descriptions_path.exists():
-            print(f"  [{sub.name}/]  (missing descriptions.jsonl)")
-            continue
+    for data_file in data_files:
         rows = [
             json.loads(line)
-            for line in descriptions_path.read_text().splitlines()
+            for line in data_file.read_text().splitlines()
             if line.strip()
         ]
-        print(f"  ── {sub.name}  ({len(rows)} faces) ──")
+        print(f"  ── {data_file.name}  ({len(rows)} faces) ──")
         for row in rows:
             kao = row.get("kaomoji", "?")
             count = row.get("count", "?")

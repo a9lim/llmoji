@@ -110,16 +110,13 @@ The synthesizer is one of three backends, chosen via `--backend`. The same synth
 ```
 ~/.llmoji/bundle/
   manifest.json
-  claude-sonnet-4-5-20250929/
-    descriptions.jsonl
-  claude-haiku-4-5-20251001/
-    descriptions.jsonl
-  gpt-5.4-mini-2026-03-17/
-    descriptions.jsonl
+  claude-sonnet-4-5-20250929.jsonl
+  claude-haiku-4-5-20251001.jsonl
+  gpt-5.4-mini-2026-03-17.jsonl
 ```
 
 - **`manifest.json`**: package version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
-- **`<source-model>/descriptions.jsonl`**: one row per kaomoji as that model used it, with the synthesized meaning. 
+- **`<source-model>.jsonl`**: one row per kaomoji as that model used it, with the synthesized meaning. The filename stem is the sanitized model id (lowercase, slashes become double-underscores, colons become hyphens).
 
 ---
 

@@ -56,8 +56,8 @@ End-user pipeline:
                  ▼
           ┌──────────────────┐
           │ ~/.llmoji/       │  manifest.json
-          │ bundle/          │   + <source-model>/descriptions.jsonl
-          │                  │   per source model
+          │ bundle/          │   + <source-model>.jsonl
+          │                  │   per source model, all flat
           │                  │  (loose files for user inspection)
           └──────┬───────────┘
                  │  llmoji upload --target {hf,email}
@@ -70,7 +70,7 @@ End-user pipeline:
 
 The bundle landing on disk between `analyze` and `upload` is the
 deliberate inspection gap — the user `cat`s each
-`<source-model>/descriptions.jsonl` before deciding to ship.
+`<source-model>.jsonl` before deciding to ship.
 
 ### Provider abstraction
 
@@ -162,7 +162,8 @@ the factory has no env-var dependency at construction time —
   `(source_model, canonical_kaomoji)` cell, synthesize a single
   1-2-sentence overall meaning via `SYNTHESIZE_PROMPT`. The
   synthesized line is the **only** thing that ships in the bundle,
-  and it lands in that cell's `<source-model>/descriptions.jsonl`.
+  and it lands in that cell's `<source-model>.jsonl` at the
+  bundle root.
 
 Embedding / axis projection / clustering / figures are NOT in this
 package — they happen on the receiving research side, against either
@@ -201,10 +202,10 @@ match.
     `synthesis_model_id`, `synthesis_backend`, `submitter_id`,
     `generated_at`, `providers_seen`, `model_counts`,
     `total_synthesized_rows`, `notes`
-  - one `<sanitized_source_model>/descriptions.jsonl` per source
-    model the journal saw, each row carrying
+  - one `<sanitized_source_model>.jsonl` per source model the
+    journal saw, each row carrying
     `{kaomoji, count, synthesis_description}`
-  - subfolder name = `sanitize_model_id_for_path(source_model)`
+  - filename stem = `sanitize_model_id_for_path(source_model)`
     (lowercase, `/` → `__`, `:` → `-`)
 
 Free to change without bumping the cross-corpus invariant: cache
@@ -283,7 +284,7 @@ llmoji/
     _util.py               # cross-cutting helpers: atomic_write_text
                            # (tmp+rename), write_json, package_version,
                            # human_bytes, sanitize_model_id_for_path
-                           # (subfolder-name rule for the per-source-model
+                           # (filename-stem rule for the per-source-model
                            # bundle layout — lives here rather than in
                            # synth.py so upload.py's allowlist walker can
                            # reuse it without dragging in synth backends).
@@ -380,10 +381,11 @@ llmoji/
                            # state is read live from each harness's own
                            # settings file by Provider.status().
     analyze.py             # the analyze pipeline (Stage A + B + bundle;
-                           # clears bundle dir AND every subdir before
-                           # writing — per-source-model layout means
-                           # stale subfolders would silently leak).
-                           # Buckets by (source_model, canonical) where
+                           # clears bundle dir of all top-level files
+                           # AND any subdirs before writing — flat
+                           # layout, but legacy subfolders from older
+                           # runs get wiped too). Buckets by
+                           # (source_model, canonical) where
                            # source_model = ScrapeRow.model or fall
                            # back to ScrapeRow.source when empty.
                            # Stage A dispatches cache-miss synth calls
@@ -396,11 +398,11 @@ llmoji/
                            # model) so the inspected bundle byte-matches
                            # what HF would receive.
     upload.py              # tar + HF / email targets;
-                           # BUNDLE_TOPLEVEL_ALLOWLIST + BUNDLE_SUBDIR_FILE
-                           # enforce the structural shape (manifest at
-                           # top, descriptions.jsonl per source-model
-                           # subdir, nothing else, no recursion past
-                           # one level). Refuses extras (raises
+                           # BUNDLE_TOPLEVEL_ALLOWLIST + BUNDLE_DATA_SUFFIX
+                           # enforce the flat shape (manifest.json plus
+                           # per-source-model .jsonl files at the root,
+                           # nothing else — no subdirs, no symlinks).
+                           # Refuses extras (raises
                            # BundleAllowlistError). submitter_id() is
                            # public so analyze can stamp the manifest.
     cli.py                 # argparse entry, [project.scripts] llmoji.
@@ -630,37 +632,34 @@ half-installed.
 
 ### Bundle is allowlisted, not just-ship-everything
 
-Both upload paths enforce the structural allowlist:
-`BUNDLE_TOPLEVEL_ALLOWLIST = ("manifest.json",)` at the top level
-plus exactly one `BUNDLE_SUBDIR_FILE = "descriptions.jsonl"` inside
-each per-source-model subfolder, and no recursion past one level.
+Both upload paths enforce the flat allowlist:
+`BUNDLE_TOPLEVEL_ALLOWLIST = ("manifest.json",)` plus
+`BUNDLE_DATA_SUFFIX = ".jsonl"` for the per-source-model data
+files. No subdirs, no symlinks, no other file types.
 
 - `upload.tar_bundle()` (used by the email target) raises
-  `BundleAllowlistError` if the bundle dir holds anything else,
-  whether at the top level or inside a model subfolder.
+  `BundleAllowlistError` if the bundle dir holds anything else.
 - `upload.upload_hf()` does the same pre-flight check AND passes
-  `allow_patterns=["manifest.json", "*/descriptions.jsonl"]` to
+  `allow_patterns=["manifest.json", "*.jsonl"]` to
   `HfApi.upload_folder` as a second line of defense.
 
 `analyze` clears the bundle dir of all top-level files AND all
-subdirs before writing, so a clean run produces exactly the
-structural shape. The three together mean stale per-instance
-descriptions, user-added notes, hidden-state caches, leftover
-subfolders from a prior backend run, etc. cannot accidentally
-leak through `upload`.
+subdirs before writing, so a clean run produces exactly the flat
+shape. The three together mean stale per-instance descriptions,
+user-added notes, hidden-state caches, leftover subfolders from
+older 1.1.0 runs, etc. cannot accidentally leak through `upload`.
 
 ### HF upload is loose files, not a tarball
 
 `upload --target hf` pushes `manifest.json` plus each
-`<source-model>/descriptions.jsonl` as loose files at
+`<source-model>.jsonl` as loose files at
 `contributors/<hash>/bundle-<ts>/` via `HfApi.upload_folder`
 (single atomic commit). The dataset card on the HF side has a
-`configs:` YAML pointing at `contributors/**/descriptions.jsonl`,
-which is what the auto-loader needs to surface the dataset viewer.
-The `**` glob is recursive so the new per-source-model nesting
-matches without a card change to the loader path; only the
-field-by-field schema prose on the card needs hand-editing (see
-the "HF dataset card" gotcha below). Uploading as a tarball
+`configs:` YAML pointing at `contributors/**/*.jsonl`, which is
+what the auto-loader needs to surface the dataset viewer. The
+`**` glob is recursive (matches `bundle-<ts>/<model>.jsonl`) and
+the `*.jsonl` suffix matches every per-source-model data file
+without picking up the manifests. Uploading as a tarball
 triggered HF's WebDataset auto-detection and broke the viewer
 (WebDataset expects shared-prefix archives, our loose-files
 bundles don't fit).
@@ -770,16 +769,16 @@ touched the package README.
 Two coupling points to keep in mind:
 
 - **Schema changes need both updates.** Any change to
-  `bundle/manifest.json` or `<source-model>/descriptions.jsonl`
-  field names is a cross-corpus invariant change (see §"Cross-corpus
-  invariant surface"), so it wants a hand-edit on the HF dataset
-  card so the field-by-field schema documentation doesn't go stale.
-  The card is editable in-place via the HF web UI; the canonical
+  `bundle/manifest.json` or `<source-model>.jsonl` field names is
+  a cross-corpus invariant change (see §"Cross-corpus invariant
+  surface"), so it wants a hand-edit on the HF dataset card so
+  the field-by-field schema documentation doesn't go stale. The
+  card is editable in-place via the HF web UI; the canonical
   surface lives there, not in this repo. The 1.1.0 schema bump
-  (manifest fields renamed, per-source-model subfolder layout)
-  needs a one-time card update on merge — the auto-loader glob
-  (`contributors/**/descriptions.jsonl`) handles the new nesting
-  via the recursive `**` without changes.
+  (manifest fields renamed, flat per-source-model `.jsonl`
+  layout) needs a one-time card update on merge — including a
+  loader-glob change from the 1.0 `contributors/**/descriptions.jsonl`
+  to `contributors/**/*.jsonl` to match the new filenames.
 - **License split.** The package code is GPL-3.0-or-later; the
   shared corpus on HF is CC-BY-SA-4.0. `llmoji upload --target hf`
   contributes a bundle under CC-BY-SA-4.0, and the package README's

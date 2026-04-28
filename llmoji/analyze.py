@@ -22,9 +22,10 @@ End-user pipeline (no GPU, no embedding, no axes):
      each ``(source_model, canonical_kaomoji)`` cell; call
      :func:`llmoji.synth.synthesize_descriptions` with
      :data:`llmoji.synth_prompts.SYNTHESIZE_PROMPT`.
-  4. Emit a manifest + one ``descriptions.jsonl`` per source-model
-     subfolder under ``~/.llmoji/bundle/`` — the loose-files
-     inspection gap the user reads before deciding to ``upload``.
+  4. Emit a manifest + one ``<sanitized_source_model>.jsonl``
+     per source model at the top of ``~/.llmoji/bundle/`` — the
+     loose-files inspection gap the user reads before deciding to
+     ``upload``.
 
 Embedding, axis-projection, figures, clustering all live in
 ``llmoji-study`` — research-side. The bundle is the boundary.
@@ -360,10 +361,11 @@ def _stage_b(
 
 def _clear_bundle_dir(bundle_dir: Path) -> None:
     """Remove every top-level file AND every top-level subdir from
-    ``bundle_dir``. The per-source-model layout means stale
-    subfolders from prior runs would silently leak into upload
-    otherwise — the bundle is the privacy boundary, so we wipe
-    everything that isn't about to be re-written.
+    ``bundle_dir``. Stale per-source-model files from prior runs
+    would silently leak into upload otherwise — the bundle is the
+    privacy boundary, so we wipe everything that isn't about to be
+    re-written. Subdirs from older 1.1.0 layouts are also cleared
+    here on first analyze post-upgrade.
     """
     import shutil
     if not bundle_dir.exists():
@@ -388,14 +390,14 @@ def _write_bundle(
     notes: str,
 ) -> None:
     """Write ``manifest.json`` + per-source-model
-    ``<sanitized>/descriptions.jsonl``. Loose-files layout so the
-    user can ``cat`` and review before ``upload``.
+    ``<sanitized>.jsonl`` at the bundle root. Flat loose-files
+    layout so the user can ``cat`` and review before ``upload``.
 
     ``counts_by_cell[source_model][canonical]`` and
     ``synthesized_by_cell[source_model][canonical]`` carry the same
     set of keys — one row per face per source model.
-    ``total_synthesized_rows`` counts rows across folders, so a face
-    appearing in 4 folders contributes 4.
+    ``total_synthesized_rows`` counts rows across files, so a face
+    appearing in 4 source-model files contributes 4.
     """
     bundle_dir.mkdir(parents=True, exist_ok=True)
     _clear_bundle_dir(bundle_dir)
@@ -443,11 +445,11 @@ def _write_bundle(
         )
 
     for source_model in sorted(synthesized_by_cell):
-        sub = bundle_dir / sanitize_model_id_for_path(source_model)
-        sub.mkdir(parents=True, exist_ok=True)
+        slug = sanitize_model_id_for_path(source_model)
+        out_path = bundle_dir / f"{slug}.jsonl"
         per_canon = synthesized_by_cell[source_model]
         counts = counts_by_cell.get(source_model, {})
-        with (sub / "descriptions.jsonl").open("w") as f:
+        with out_path.open("w") as f:
             for canon in sorted(per_canon):
                 row = {
                     "kaomoji": canon,
@@ -472,18 +474,18 @@ def _print_preview(
     print(f"location: {bundle_dir}")
     n_models = len(synthesized_by_cell)
     n_rows = sum(len(p) for p in synthesized_by_cell.values())
-    print(f"{n_models} source-model subfolder(s), {n_rows} synthesized row(s) total:\n")
+    print(f"{n_models} source-model file(s), {n_rows} synthesized row(s) total:\n")
     for source_model in sorted(synthesized_by_cell):
         per_canon = synthesized_by_cell[source_model]
         counts = counts_by_cell.get(source_model, {})
         slug = sanitize_model_id_for_path(source_model)
-        print(f"  [{source_model}]  → {slug}/  ({len(per_canon)} faces)")
+        print(f"  [{source_model}]  → {slug}.jsonl  ({len(per_canon)} faces)")
         for canon in sorted(per_canon, key=lambda c: -counts.get(c, 0)):
             n = counts.get(canon, 0)
             short = per_canon[canon][:80].replace("\n", " ")
             print(f"    n={n:>4}  {canon}  {short}")
     print("\n--- end preview ---")
-    print("review each <model>/descriptions.jsonl before `llmoji upload`.\n")
+    print("review each <model>.jsonl before `llmoji upload`.\n")
 
 
 # ---------------------------------------------------------------------------

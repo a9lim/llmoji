@@ -202,9 +202,9 @@ def test_bundle_schema():
     Lock the schema by writing a fake bundle and re-reading it.
 
     Manifest must be well-formed JSON with the documented keys.
-    Per-source-model subfolders each carry one ``descriptions.jsonl``
-    with one row per canonical kaomoji; row keys = the three
-    documented keys.
+    Per-source-model ``<sanitized>.jsonl`` files at the bundle
+    root each carry one row per canonical kaomoji; row keys = the
+    three documented keys.
     """
     from llmoji.analyze import _write_bundle
     from pathlib import Path
@@ -258,40 +258,45 @@ def test_bundle_schema():
         assert manifest["synthesis_backend"] == "anthropic"
         assert manifest["synthesis_model_id"] == "claude-haiku-4-5-20251001"
 
-        # One subfolder per source model, sanitized name.
-        subdirs = sorted(p.name for p in bundle.iterdir() if p.is_dir())
-        assert subdirs == [
-            "claude-sonnet-4-5-20250929",
-            "gpt-5.4-mini-2026-03-17",
+        # One .jsonl per source model at the bundle root, sanitized
+        # name.
+        data_files = sorted(
+            p.name for p in bundle.iterdir()
+            if p.is_file() and p.suffix == ".jsonl"
+        )
+        assert data_files == [
+            "claude-sonnet-4-5-20250929.jsonl",
+            "gpt-5.4-mini-2026-03-17.jsonl",
         ]
-        for sub in subdirs:
-            descriptions = bundle / sub / "descriptions.jsonl"
-            assert descriptions.exists()
+        # No subdirectories under 1.1.0 flat layout.
+        assert not [p for p in bundle.iterdir() if p.is_dir()]
+        for name in data_files:
+            data = bundle / name
             rows = [
                 json.loads(l)
-                for l in descriptions.read_text().splitlines()
+                for l in data.read_text().splitlines()
                 if l.strip()
             ]
-            assert rows, f"empty descriptions.jsonl in {sub}/"
+            assert rows, f"empty {name}"
             for r in rows:
                 assert set(r) == {
                     "kaomoji", "count", "synthesis_description",
-                }, f"unexpected row keys in {sub}/: {set(r)}"
+                }, f"unexpected row keys in {name}: {set(r)}"
 
 
 def test_bundle_allowlist_rejects_extras():
-    """`tar_bundle` must refuse to ship anything outside the
-    structural allowlist (top-level ``manifest.json`` + each
-    ``<source-model>/descriptions.jsonl``). Loud failure beats
-    silent leak — covered both for an extra top-level file AND a
-    stray file inside a model subfolder.
+    """`tar_bundle` must refuse to ship anything outside the flat
+    allowlist (top-level ``manifest.json`` plus per-source-model
+    ``*.jsonl`` files). Loud failure beats silent leak — covered
+    for an extra top-level file of the wrong type AND a stray
+    subdirectory.
     """
     from pathlib import Path
     import tempfile
 
     from llmoji.analyze import _write_bundle
     from llmoji.upload import (
-        BUNDLE_SUBDIR_FILE,
+        BUNDLE_DATA_SUFFIX,
         BUNDLE_TOPLEVEL_ALLOWLIST,
         BundleAllowlistError,
         tar_bundle,
@@ -314,7 +319,7 @@ def test_bundle_allowlist_rejects_extras():
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        # 1. extra top-level file
+        # 1. extra top-level file of the wrong type
         bundle = _fresh_bundle(td)
         (bundle / "stray.txt").write_text("would leak")
         try:
@@ -328,29 +333,29 @@ def test_bundle_allowlist_rejects_extras():
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        # 2. extra file inside a model subfolder
+        # 2. stray subdirectory (not allowed under the flat shape)
         bundle = _fresh_bundle(td)
-        sub = bundle / "claude-haiku-4-5-20251001"
-        (sub / "extra.txt").write_text("inner stash")
+        (bundle / "stray-subdir").mkdir()
+        (bundle / "stray-subdir" / "anything.jsonl").write_text("\n")
         try:
             tar_bundle(bundle, out_path=td / "out2.tgz")
         except BundleAllowlistError:
             pass
         else:
             raise AssertionError(
-                "tar_bundle didn't refuse extra subdir file",
+                "tar_bundle didn't refuse stray subdirectory",
             )
 
     # Allowlist constants are the frozen shape.
     assert BUNDLE_TOPLEVEL_ALLOWLIST == ("manifest.json",)
-    assert BUNDLE_SUBDIR_FILE == "descriptions.jsonl"
+    assert BUNDLE_DATA_SUFFIX == ".jsonl"
 
 
-def test_bundle_allowlist_rejects_symlinks_and_empty_subdirs():
-    """Symlinks bypass the file/dir contract because ``Path.is_file``
-    follows them; the allowlist must explicitly reject symlinks at
-    every layer. Empty model subdirs misrepresent which models
-    contributed; reject those too.
+def test_bundle_allowlist_rejects_symlinks():
+    """Symlinks bypass the file-type contract because ``Path.is_file``
+    follows them; the allowlist must explicitly reject symlinks
+    whether they point at the manifest or at a per-source-model
+    data file.
     """
     from pathlib import Path
     import tempfile
@@ -377,7 +382,6 @@ def test_bundle_allowlist_rejects_symlinks_and_empty_subdirs():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         bundle = _fresh(td)
-        # Replace the real manifest with a symlink pointing somewhere else.
         target = td / "leak.json"
         target.write_text("{}")
         (bundle / "manifest.json").unlink()
@@ -391,26 +395,28 @@ def test_bundle_allowlist_rejects_symlinks_and_empty_subdirs():
                 "tar_bundle didn't refuse symlinked manifest",
             )
 
-    # 2. Empty model subdir (descriptions.jsonl removed).
+    # 2. Symlinked source-model .jsonl.
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         bundle = _fresh(td)
-        sub = bundle / "claude-haiku-4-5-20251001"
-        (sub / "descriptions.jsonl").unlink()
+        target = td / "leak.jsonl"
+        target.write_text("{}\n")
+        sym = bundle / "extra-model.jsonl"
+        sym.symlink_to(target)
         try:
             tar_bundle(bundle, out_path=td / "out.tgz")
         except BundleAllowlistError:
             pass
         else:
             raise AssertionError(
-                "tar_bundle didn't refuse empty model subdir",
+                "tar_bundle didn't refuse symlinked .jsonl",
             )
 
 
 def test_write_bundle_rejects_slug_collision():
     """Two distinct ``ScrapeRow.model`` strings that sanitize to
-    the same subfolder slug must NOT both write to the same
-    ``descriptions.jsonl`` — that would silently overwrite. Loud
+    the same filename slug must NOT both write to the same
+    ``<slug>.jsonl`` — that would silently overwrite. Loud
     failure beats a half-shipped bundle.
     """
     from pathlib import Path
