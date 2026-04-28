@@ -196,6 +196,290 @@ def test_claude_code_hook_and_backfill_agree(
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
 
 
+# ---------------------------------------------------------------------------
+# Claude Code multi-event-per-turn shape
+# ---------------------------------------------------------------------------
+#
+# Real Claude Code transcripts persist each assistant content block —
+# text, tool_use, thinking — as its own top-level JSONL entry. A
+# turn that does anything tool-flavored produces many assistant
+# entries. The pre-fix hook keyed off `last(assistant)` and missed
+# every turn whose final assistant entry was a tool_use or thinking
+# (i.e. the model wrote text and then resumed tool work, or the
+# transcript had not yet flushed a trailing text block when Stop
+# fired). These cases pin the fix.
+
+def _claude_turn_events(
+    *, blocks: list[dict[str, Any]], user: str = "ping",
+) -> list[dict[str, Any]]:
+    """Build a Claude Code transcript fragment with one user prompt
+    and one assistant turn whose ``blocks`` are emitted as separate
+    transcript entries (matching the real on-disk shape).
+
+    ``blocks`` is a list of either ``{"type": "text", "text": "..."}``
+    or ``{"type": "tool_use", ...}`` dicts; each becomes its own
+    assistant JSONL row. Real transcripts also emit ``thinking``
+    blocks, which we represent the same way.
+    """
+    events: list[dict[str, Any]] = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "parentUuid": None,
+            "timestamp": "2026-04-27T00:00:00Z",
+            "message": {"content": user},
+        },
+    ]
+    parent = "u1"
+    for i, block in enumerate(blocks):
+        uid = f"a{i}"
+        events.append({
+            "type": "assistant",
+            "uuid": uid,
+            "parentUuid": parent,
+            "timestamp": f"2026-04-27T00:00:{i+1:02d}Z",
+            "cwd": "/test",
+            "message": {
+                "model": "claude-test",
+                "content": [block],
+            },
+        })
+        parent = uid
+        # Tool-use blocks get a tool_result user entry on their heels
+        # — the same pattern real transcripts ship. Stays in the
+        # current turn (tool_results are not real-user events).
+        if block.get("type") == "tool_use":
+            tu_id = f"r{i}"
+            events.append({
+                "type": "user",
+                "uuid": tu_id,
+                "parentUuid": uid,
+                "timestamp": f"2026-04-27T00:00:{i+1:02d}.5Z",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": uid,
+                         "content": "ok"}
+                    ],
+                },
+            })
+            parent = tu_id
+    return events
+
+
+_CLAUDE_TURN_SHAPE_CASES: list[tuple[str, list[dict[str, Any]], str, bool]] = [
+    # description, blocks, expected_kaomoji, expect_row
+    (
+        "text then tool_use (the original bug — kaomoji-led reply "
+        "followed by more tool work)",
+        [
+            {"type": "text", "text": "(◕‿◕) here's the answer"},
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+        ],
+        "(◕‿◕)",
+        True,
+    ),
+    (
+        "tool_use then text (model investigates first then replies)",
+        [
+            {"type": "tool_use", "id": "tu1", "name": "Read",
+             "input": {"file_path": "/x"}},
+            {"type": "text", "text": "(´･ω･`) found it"},
+        ],
+        "(´･ω･`)",
+        True,
+    ),
+    (
+        "text → tool_use → text (kaomoji on first, post-tool "
+        "follow-up after — hook should pick first, no double-emit)",
+        [
+            {"type": "text", "text": "(◕‿◕) starting"},
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "text", "text": "follow-up paragraph."},
+        ],
+        "(◕‿◕)",
+        True,
+    ),
+    (
+        "tool_use → tool_use → text (multi-tool then kaomoji-led "
+        "reply, common shape for verification-heavy turns)",
+        [
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "tool_use", "id": "tu2", "name": "Read",
+             "input": {"file_path": "/x"}},
+            {"type": "text", "text": "[≧▽≦] all clear"},
+        ],
+        "[≧▽≦]",
+        True,
+    ),
+    (
+        "tool_use only — no text in turn, no row emitted",
+        [
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+        ],
+        "",
+        False,
+    ),
+    (
+        "non-kaomoji text then tool_use — first text fails kaomoji "
+        "filter, turn skipped (matches live hook semantics)",
+        [
+            {"type": "text", "text": "let me check"},
+            {"type": "tool_use", "id": "tu1", "name": "Bash",
+             "input": {"command": "ls"}},
+            {"type": "text", "text": "(◕‿◕) actually here"},
+        ],
+        "",
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "desc,blocks,expected_kaomoji,expect_row",
+    _CLAUDE_TURN_SHAPE_CASES,
+)
+def test_claude_code_multi_event_turn_shapes(
+    desc: str,
+    blocks: list[dict[str, Any]],
+    expected_kaomoji: str,
+    expect_row: bool,
+    tmp_path: Path,
+) -> None:
+    """Live hook + backfill must agree on which entry in a multi-event
+    turn carries the kaomoji. This is the regression-pin test for
+    the `last(assistant)` → `first text-bearing in current turn`
+    redesign.
+    """
+    bash, _ = _require_tools()
+
+    from llmoji.backfill import backfill_claude_code
+    from llmoji.providers import ClaudeCodeProvider
+
+    hooks_dir = tmp_path / "hooks"
+    hook_journal = tmp_path / "hook-journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, hook_journal, hooks_dir)
+
+    tx_dir = tmp_path / "tx"
+    tx_dir.mkdir()
+    transcript = tx_dir / "transcript.jsonl"
+    events = _claude_turn_events(blocks=blocks)
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    stop_event = json.dumps({
+        "transcript_path": str(transcript),
+        "cwd": "/test",
+    })
+    r = subprocess.run(
+        [bash, str(hook)],
+        input=stop_event,
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
+    bash_rows = _read_jsonl(hook_journal)
+    for row in bash_rows:
+        row.pop("ts", None)
+
+    bf_journal = tmp_path / "backfill-journal.jsonl"
+    backfill_claude_code(tx_dir, bf_journal)
+    bf_rows = _read_jsonl(bf_journal)
+    for row in bf_rows:
+        row.pop("ts", None)
+
+    _assert_parity(desc, bash_rows, bf_rows, expect_row)
+    if expect_row:
+        assert bash_rows[0]["kaomoji"] == expected_kaomoji, (
+            f"{desc}: bash extracted {bash_rows[0]['kaomoji']!r}, "
+            f"expected {expected_kaomoji!r}"
+        )
+
+
+def test_claude_code_one_row_per_turn_across_session(tmp_path: Path) -> None:
+    """Backfill must emit one row per real-user-bounded turn even
+    when a single transcript chains several turns. Pre-fix backfill
+    iterated assistant entries and could double-count text blocks
+    across a turn boundary; the live hook never had this issue
+    (Stop fires once per turn) but the parity contract requires
+    them to agree on row count.
+    """
+    bash, _ = _require_tools()
+
+    from llmoji.backfill import backfill_claude_code
+
+    tx_dir = tmp_path / "tx"
+    tx_dir.mkdir()
+    transcript = tx_dir / "transcript.jsonl"
+
+    events: list[dict[str, Any]] = []
+    # Turn 1: kaomoji-led text only
+    events.extend([
+        {"type": "user", "uuid": "u1", "parentUuid": None,
+         "timestamp": "2026-04-27T00:00:00Z",
+         "message": {"content": "first prompt"}},
+        {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+         "timestamp": "2026-04-27T00:00:01Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "text", "text": "(◕‿◕) one"}]}},
+    ])
+    # Turn 2: kaomoji-led text then tool_use (the bugged shape)
+    events.extend([
+        {"type": "user", "uuid": "u2", "parentUuid": "a1",
+         "timestamp": "2026-04-27T00:01:00Z",
+         "message": {"content": "second prompt"}},
+        {"type": "assistant", "uuid": "a2", "parentUuid": "u2",
+         "timestamp": "2026-04-27T00:01:01Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "text", "text": "(´｡• ω •｡`) two"}]}},
+        {"type": "assistant", "uuid": "a3", "parentUuid": "a2",
+         "timestamp": "2026-04-27T00:01:02Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "tool_use", "id": "tu",
+                                  "name": "Bash", "input": {"command": "ls"}}]}},
+        {"type": "user", "uuid": "r1", "parentUuid": "a3",
+         "timestamp": "2026-04-27T00:01:02.5Z",
+         "message": {"content": [{"type": "tool_result",
+                                  "tool_use_id": "tu", "content": "ok"}]}},
+    ])
+    # Turn 3: prose (no kaomoji), no row
+    events.extend([
+        {"type": "user", "uuid": "u3", "parentUuid": "r1",
+         "timestamp": "2026-04-27T00:02:00Z",
+         "message": {"content": "third prompt"}},
+        {"type": "assistant", "uuid": "a4", "parentUuid": "u3",
+         "timestamp": "2026-04-27T00:02:01Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "text", "text": "Sure thing."}]}},
+    ])
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    bf_journal = tmp_path / "bf.jsonl"
+    backfill_claude_code(tx_dir, bf_journal)
+    rows = _read_jsonl(bf_journal)
+    assert [r["kaomoji"] for r in rows] == ["(◕‿◕)", "(´｡• ω •｡`)"], rows
+    assert [r["user_text"] for r in rows] == ["first prompt", "second prompt"], rows
+    # Sanity-check: live hook fired against the same transcript also
+    # picks the second turn's kaomoji-led text (the pre-fix bug case).
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    hooks_dir = tmp_path / "hooks"
+    hook_journal = tmp_path / "hook.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, hook_journal, hooks_dir)
+    r = subprocess.run(
+        [bash, str(hook)],
+        input=json.dumps({"transcript_path": str(transcript), "cwd": "/test"}),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    hook_rows = _read_jsonl(hook_journal)
+    # Hook keys on the LATEST turn; turn 3 is prose so no row.
+    assert hook_rows == [], hook_rows
+
+
 def test_claude_code_skill_injected_user_filtered(tmp_path: Path) -> None:
     """The Claude skill-activation prefix (in
     ``ClaudeCodeProvider.system_injected_prefixes``) must be dropped

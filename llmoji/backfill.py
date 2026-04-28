@@ -122,13 +122,21 @@ _CLAUDE_CODE_INJECTED_PREFIXES: tuple[str, ...] = tuple(
 def _resolve_user_text_claude(
     start_uuid: str | None,
     by_uuid: dict[str, dict[str, Any]],
-    max_hops: int = 5,
+    max_hops: int = 1000,
 ) -> str:
     """Walk parentUuid backward to the nearest human-typed user text.
 
     Skips tool_result parents (they have type=='user' but content is
     machine-generated) AND skill-injected content (slash-command
     activations dump the skill body as a user-role message).
+
+    The hop budget is generous because a tool-heavy turn easily
+    chains dozens of `assistant tool_use → user tool_result` pairs
+    between the kaomoji-led text and the originating user prompt.
+    Pre-bump the cap was 5, which dropped `user_text` on ~17% of
+    real-corpus rows. The cap exists only to bound a pathological
+    uuid cycle — anything higher than the longest plausible turn
+    is fine.
     """
     uuid = start_uuid
     for _ in range(max_hops):
@@ -156,7 +164,40 @@ def _resolve_user_text_claude(
     return ""
 
 
+def _is_real_user_event(ev: dict[str, Any]) -> bool:
+    """Real user event = content is a string OR a content-block array
+    that is NOT a tool_result delivery. Tool-result user events don't
+    start a new conversational turn — they're machine-generated
+    interleaving inside one.
+    """
+    if ev.get("type") != "user":
+        return False
+    m = ev.get("message")
+    if not isinstance(m, dict):
+        return False
+    c = m.get("content")
+    if isinstance(c, str):
+        return True
+    if isinstance(c, list):
+        return not any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in c
+        )
+    return False
+
+
 def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
+    """Walk a Claude Code transcript JSONL and emit at most one
+    journal row per turn.
+
+    Mirrors the live hook's first-text-since-latest-user logic:
+    each real user prompt opens a turn, and within a turn the first
+    text-bearing non-sidechain assistant entry is taken as the
+    kaomoji-led reply. The naive "iterate every assistant entry"
+    pattern would emit one row per text block, which over-counts
+    turns where the model writes preamble + post-tool text in
+    separate entries.
+    """
     try:
         raw = path.read_text(errors="replace")
     except OSError:
@@ -171,7 +212,14 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     by_uuid = {ev["uuid"]: ev for ev in events if isinstance(ev.get("uuid"), str)}
+
+    emitted_for_turn = False
     for ev in events:
+        if _is_real_user_event(ev):
+            # New turn boundary — reset the per-turn flag so the
+            # next text-bearing assistant entry can emit.
+            emitted_for_turn = False
+            continue
         if ev.get("type") != "assistant":
             continue
         # Skip sidechain (subagent) turns. Agent-to-agent dispatches
@@ -179,12 +227,22 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
         # otherwise contaminate user_text with subagent prompts.
         if ev.get("isSidechain"):
             continue
+        if emitted_for_turn:
+            continue
         m = ev.get("message", {})
         if not isinstance(m, dict):
             continue
         text = _collect_assistant_text(m)
         if not text.strip():
+            # Tool-use-only or thinking-only entries don't close out
+            # the turn's emission slot — keep scanning forward for
+            # the first real text in this turn.
             continue
+        # First text-bearing entry of the turn — this is our shot.
+        # Whether or not the kaomoji filter passes, mark the slot
+        # consumed so a later text block in the same turn (e.g. a
+        # post-tool follow-up) doesn't double-emit.
+        emitted_for_turn = True
         prefix = kaomoji_prefix(text)
         if not prefix:
             continue
