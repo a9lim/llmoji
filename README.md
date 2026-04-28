@@ -14,7 +14,7 @@ The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-stu
 
 There are three main commands:
 
-- **`llmoji install <provider>`**: write a `Stop` hook into your harness
+- **`llmoji install <provider>`**: writes hooks to prompt for and record kaomoji
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: loose files; email: tarball)
 
