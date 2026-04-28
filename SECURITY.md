@@ -28,7 +28,7 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 The bundle is human-readable JSON, laid out flat: one top-level manifest plus one `.jsonl` per source model, no subdirectories.
 
 - **`manifest.json`**: package version, the synthesis backend and model id used, per-source-model row counts, total synthesized rows, list of providers seen, generation timestamp, any included `--notes`, and a salted-hash submitter id.
-- **`<source-model>.jsonl`**: one row per canonical kaomoji as that source model used it, with the synthesized meaning. The filename stem is the sanitized model id, so the receiving side can tell which model wrote the kaomoji-bearing turns the synthesizer was reading.
+- **`<source-model>.jsonl`**: one row per canonical kaomoji as that model used it, with the synthesized meaning. 
 
 The submitter id is a 32-hex-char (128-bit) salted hash of the per-machine token plus the package version. We do not collect HuggingFace usernames or any account-bound identifier.
 
@@ -39,9 +39,9 @@ For frequent kaomoji, the per-face summary pools many instances and so abstracts
 - `analyze` prints a per-face preview before declaring done.
 - `upload` re-prompts before committing.
 - The bundle is inspectable in `~/.llmoji/bundle/`.
-- The bundle is structurally allowlisted: top-level `manifest.json` plus per-source-model `.jsonl` files at the root, nothing else (no subdirectories, no symlinks). Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
+- The bundle is allowlisted: top-level `manifest.json` plus per-model `.jsonl` files at the root. Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
 
-Please review every `~/.llmoji/bundle/<source-model>.jsonl` before running `upload` if your kaomoji distribution is long-tailed.
+Please review every `~/.llmoji/bundle/<source-model>.jsonl` before running `upload`.
 
 ### Hooks are read-only
 
