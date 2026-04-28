@@ -104,17 +104,23 @@ def cache_key(
     only safe at single-machine scale.
     """
     h = hashlib.sha256()
-    h.update((synth_model_id or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update((backend or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update((base_url or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update(canonical_kaomoji.encode("utf-8"))
-    h.update(b"\0")
-    h.update((user_text or "").encode("utf-8"))
-    h.update(b"\0")
-    h.update((assistant_text or "").encode("utf-8"))
+    # Length-prefix each field so a NUL byte buried inside (e.g. an
+    # assistant message that happens to contain ``"\0"``) can't shift
+    # a field boundary and collide with a different (user, assistant)
+    # pair. Real journal text is unlikely to carry NULs but the
+    # framing is cheap; raw NUL-delimiters were the previous shape.
+    for part in (
+        synth_model_id or "",
+        backend or "",
+        base_url or "",
+        canonical_kaomoji,
+        user_text or "",
+        assistant_text or "",
+    ):
+        encoded = part.encode("utf-8")
+        h.update(str(len(encoded)).encode("ascii"))
+        h.update(b":")
+        h.update(encoded)
     return h.hexdigest()[:16]
 
 
