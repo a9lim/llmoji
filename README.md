@@ -112,7 +112,7 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 |---------------|---------------------------------------------------|-----------------|--------------------------------------------------------|
 | `claude_code` | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
 | `codex`       | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
-| `hermes`      | post_llm_call, pre_llm_call, subagent_stop        | YAML            | Implemented from docs.  |
+| `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
 
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
 
@@ -129,7 +129,7 @@ llmoji parse --provider chatgpt ~/Downloads/chatgpt-export
 
 Both exports happen to ship a file named `conversations.json`, with different schemas under the same filename; the parsers handle each. Rows land at `~/.llmoji/journals/claude_ai_export.jsonl` or `~/.llmoji/journals/chatgpt_export.jsonl`, and `llmoji analyze` picks them up alongside the live provider journals. The ChatGPT reader walks the message tree from `current_node` along the active branch only, so abandoned regenerations stay out of the corpus.
 
-For Claude Code or Codex history that predates installing the live hook, the historical transcripts (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`) can be replayed into the journals via the `llmoji.backfill` module.
+For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`, `~/.hermes/sessions/session_*.json`) can be replayed into the journals via the `llmoji.backfill` module.
 
 ---
 

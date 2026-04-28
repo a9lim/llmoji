@@ -4,56 +4,81 @@
 # llmoji/_hooks/hermes.sh.tmpl. Edits will be lost.
 #
 # Hermes post_llm_call hook: read-only journal logger. NEVER blocks.
-# Appends one JSONL row per assistant turn to the configured
-# journal in the canonical 6-field schema:
+# Appends one JSONL row PER kaomoji-led assistant message in the
+# current turn. Pre-fix the hook only read .extra.assistant_response
+# (the final string), missing every progress message; post-fix it
+# walks .extra.conversation_history and emits one row per kaomoji-
+# led non-empty assistant message in the slice from the latest user-
+# role message to the end of the array.
 #
+# Schema (canonical 6-field journal row):
 #   ts             ISO-8601 UTC  hook fire time
 #   model          str           extra.model
-#   cwd            str           working directory at hook fire
-#   kaomoji        str           leading non-letter prefix of the
-#                                final assistant_response, ≥2 bytes
-#   user_text      str           extra.user_message (pre-injection)
-#   assistant_text str           extra.assistant_response MINUS the
-#                                leading kaomoji + surrounding
-#                                whitespace
-#
-# Sidechain handling: a companion subagent_stop hook (installed
-# alongside this one) writes child session_ids to
-# ~/.hermes/.llmoji-children. We drop matching session_ids here so
-# subagent turns don't pollute the journal.
+#   cwd            str           top-level cwd (= Path.cwd() of agent
+#                                process at hook-fire time)
+#   kaomoji        str           leading non-letter prefix of an
+#                                assistant message, ≥2 bytes
+#   user_text      str           extra.user_message (pre-injection per
+#                                the documented contract)
+#   assistant_text str           assistant message MINUS the leading
+#                                kaomoji + surrounding whitespace
 #
 # Hermes hook return contract: stdout JSON, {} is no-op, fail-open.
+#
+# Subagent (delegate_task) handling: the documented session-correlation
+# strategy via subagent_stop is not viable on the current
+# hermes-agent payload contract — subagent_stop fires with the
+# parent's session_id (no child id) and post_llm_call doesn't expose
+# parent_session_id, so neither side carries enough info to filter
+# children from a shell hook. Subagent post_llm_call events therefore
+# DO land in the journal under their own session_ids; we'll add a
+# real filter when an upstream payload change makes one possible.
 #
 # Consumed by `llmoji analyze` via llmoji.sources.journal.
 set -u
 
 INPUT=$(cat)
 
-# Hermes payload shape (post_llm_call): all six llmoji fields land
-# in one event under the .extra dict.
-ASSISTANT_TEXT=$(printf '%s' "$INPUT" | jq -r '.extra.assistant_response // empty' 2>/dev/null || printf '')
-[ -z "$ASSISTANT_TEXT" ] && { echo '{}'; exit 0; }
-
+# Top-level + extra-scoped fields. All resolved once per hook fire —
+# every row from this turn shares the same model / cwd / user_text.
 USER_TEXT=$(printf '%s' "$INPUT"  | jq -r '.extra.user_message     // empty' 2>/dev/null || printf '')
 MODEL=$(printf '%s' "$INPUT"      | jq -r '.extra.model            // empty' 2>/dev/null || printf '')
 CWD=$(printf '%s' "$INPUT"        | jq -r '.cwd                    // empty' 2>/dev/null || printf '')
-SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id             // empty' 2>/dev/null || printf '')
 
-# Sidechain filter: post_llm_call fires for both parent and
-# subagent (delegate_task) sessions. The companion subagent_stop
-# hook writes child session_ids here as plain text, one per line.
-# Drop matches.
-CHILD_STATE="${HOME}/.hermes/.llmoji-children"
-if [ -n "$SESSION_ID" ] && [ -f "$CHILD_STATE" ]; then
-  if grep -qFx "$SESSION_ID" "$CHILD_STATE" 2>/dev/null; then
-    echo '{}'
-    exit 0
-  fi
-fi
-
-${KAOMOJI_VALIDATE}
-
-${JOURNAL_WRITE}
+# Walk the conversation_history, slice from the latest user-role
+# message to the end of the array (= "this turn"), emit one
+# JSON-string-encoded assistant message per line for the loop below
+# to validate + journal.
+#
+# jq pipeline:
+#   1. .extra.conversation_history    pull the message list
+#   2. find latest user-role index    last() of [user-role indices]
+#   3. .[start:]                       slice the current turn
+#   4. select role==assistant          drop tool/system/user echoes
+#   5. take .content as string         drop empty / non-string content
+#                                      (assistant messages with only
+#                                      tool_calls have content="" or
+#                                      None; we want the text-bearing
+#                                      messages only)
+#   6. emit JSON string per line       jq -c streams one per row
+#
+# ``// empty`` on the slice fallback: if there's no user-role message
+# in the history (atypical — every real turn opens with one), walk
+# nothing rather than dump the whole conversation.
+printf '%s' "$INPUT" | jq -c '
+  (.extra.conversation_history // []) as $h
+  | ([$h | to_entries[] | select(.value.role == "user") | .key] | last) as $start
+  | (if $start == null then [] else $h[$start:] end)
+  | .[]
+  | select(.role == "assistant")
+  | (.content // "")
+  | select(type == "string" and (. | length) > 0)
+' 2>/dev/null | while IFS= read -r json_text; do
+  [ -z "$json_text" ] && continue
+  ASSISTANT_TEXT=$(printf '%s' "$json_text" | jq -r '.')
+  ${KAOMOJI_VALIDATE}
+  ${JOURNAL_WRITE}
+done
 
 echo '{}'
 exit 0

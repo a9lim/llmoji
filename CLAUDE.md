@@ -261,8 +261,11 @@ llmoji/
                            # active leaf. Walks mapping[current_node]
                            # up via parent for the displayed branch;
                            # regenerated/edited siblings stay invisible.
-    backfill.py            # one-shot transcript→journal replays
-                           # for Claude Code + Codex
+    backfill.py            # one-shot transcript→journal replays for
+                           # Claude Code + Codex + Hermes. Hermes
+                           # backfill walks ~/.hermes/sessions/
+                           # session_*.json and chunks on user-role
+                           # boundaries (each chunk = one turn).
     providers/
       base.py              # Provider + ProviderStatus dataclasses +
                            # SettingsCorruptError + template render
@@ -281,10 +284,12 @@ llmoji/
                            # feature flag is Stage::Stable, default-on
                            # in codex-rs/features. Same default
                            # _register family as claude_code.
-      hermes.py            # YAML pre_llm_call + post_llm_call +
-                           # subagent_stop tri-hook provider
-                           # (~/.hermes/config.yaml, marker-fenced
-                           # hooks: stanza). Overrides _register family.
+      hermes.py            # YAML pre_llm_call + post_llm_call
+                           # provider (~/.hermes/config.yaml,
+                           # marker-fenced hooks: stanza). Overrides
+                           # _register family. The post_llm_call hook
+                           # walks extra.conversation_history for
+                           # multi-emit parity with claude_code/codex.
     _hooks/                # bash hook templates (importlib.resources
                            # data); rendered at install time
       claude_code.sh.tmpl
@@ -299,7 +304,6 @@ llmoji/
                                     # response envelope is byte-identical)
       hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
                                     # {context: ...} shape)
-      hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
     paths.py               # ~/.llmoji home, cache, bundle, journals,
                            # state.json (per-machine submission token).
                            # NOT an install registry — provider install
@@ -404,17 +408,18 @@ per-message.
   agent_message in the slice. `task_complete.last_agent_message`
   is no longer read on either side. `user_text` resolves to the
   latest non-injected user response_item in the same slice.
-- **Hermes**: **single** final-text field per turn
-  (`extra.assistant_response`). The Hermes hook payload doesn't
-  expose the per-LLM-call message stream we'd need to walk, so the
-  multi-message fix doesn't apply on this side. If real-traffic
-  inspection reveals `post_llm_call` fires per LLM call (which
-  would mean the harness already gives us the right granularity),
-  no change. If it fires once at end-of-turn (one final message
-  per turn), the limitation is harness-side and we can't fix it
-  from a hook. Treat hermes per-canonical-face counts as docs-
-  confirmed-but-untested under the multi-emission contract until
-  real traffic verifies.
+- **Hermes**: walks `extra.conversation_history` (the full message
+  list the post_llm_call payload carries), slices from the latest
+  user-role message to the end of the array, emits one row per
+  kaomoji-led non-empty assistant-role message in that slice. Same
+  multi-emit shape as Claude Code + Codex now. Pre-fix the hook
+  read only `extra.assistant_response` (the final string) and
+  missed every progress message. The conversation_history field is
+  always populated per `hermes-agent/run_agent.py:12492` (`list(
+  messages)`), so the walker has the data it needs without a
+  follow-up payload-shape change upstream. Tool-only assistant
+  messages (carry `tool_calls` + empty/null `content`) are skipped
+  naturally; the walker only takes string-typed non-empty content.
 
 Per-row invariants for the multi-emission case:
 
@@ -423,11 +428,15 @@ Per-row invariants for the multi-emission case:
 - The cache key hashes `(canonical, user_text, assistant_text)` —
   different assistant texts within the same turn produce different
   keys, so per-instance caching works without collisions.
-- Backfills (`backfill_codex`, `backfill_claude_code`) implement
-  the same per-message walk and stay parity-tested against the
-  live hooks via `tests/test_pipeline_parity.py`. The
-  `_PARITY_FIELDS` contract holds row-for-row in chronological
-  order.
+- Backfills (`backfill_codex`, `backfill_claude_code`,
+  `backfill_hermes`) implement the same per-message walk and stay
+  parity-tested against the live hooks via
+  `tests/test_pipeline_parity.py`. The `_PARITY_FIELDS` contract
+  holds row-for-row in chronological order. Hermes uses the
+  narrower `_HERMES_PARITY_FIELDS` (excludes `cwd`) because the
+  session JSON doesn't persist cwd — backfilled rows carry `""`
+  there by design while the live hook stamps `Path.cwd()` from the
+  agent process.
 - Existing journals from before the fix are systematically thin
   (1 row per turn vs. N). On first analyze post-fix, prefer a
   one-shot `backfill_*` rebuild over the live-hook journal so
@@ -470,14 +479,23 @@ a nudge to a future provider is four class-level attrs and a
 - Claude Code: `field_flag` on `isSidechain`. Hooks drop the row.
 - Codex: no subagent concept. `collaboration_mode` is `"default"`
   for every observed turn_context.
-- Hermes: `session_correlation` against the `subagent_stop` event.
-  `post_llm_call` fires for both parent and child sessions; the
-  installed companion hook
-  `~/.hermes/agent-hooks/subagent-stop.sh` records each completed
-  child's `session_id` to `~/.hermes/.llmoji-children`. The main
-  hook checks that file and drops matching session_ids. Both hooks
-  are registered together in the YAML stanza `llmoji install
-  hermes` writes; uninstall removes both.
+- Hermes: **no viable filter on the current payload contract.**
+  `subagent_stop` fires from the parent agent's process with the
+  **parent's** `session_id` (no child id; verified at
+  `hermes-agent/tools/delegate_tool.py:2120-2127` —
+  `_invoke_hook("subagent_stop", parent_session_id=..., child_role
+  =..., child_summary=..., child_status=..., duration_ms=...)`),
+  and `post_llm_call` doesn't expose `parent_session_id` either, so
+  neither side carries enough info to filter children from a shell
+  hook. We installed a companion `subagent-stop.sh` for a previous
+  iteration that recorded "child session_ids"; that file was empty
+  in practice because the documented child-id field doesn't exist
+  in the actual payload. The companion hook + its state file are
+  removed. Subagent `post_llm_call` events therefore land in the
+  journal under their own session_ids until upstream gives us a
+  signal — either (a) `subagent_stop` carrying the child id, or
+  (b) `post_llm_call` exposing `parent_session_id` /
+  `is_subagent`.
 
 ### Provider install refuses to clobber existing config
 
@@ -551,36 +569,54 @@ Email target keeps `tar_bundle` because a single attachment is
 what the recipient wants. The local tarball at
 `~/.llmoji/bundle-<ts>.tar.gz` is now an email-only artifact.
 
-### Hermes provider — two-hook design from docs
+### Hermes provider — main hook + nudge, source-verified contract
 
 The hermes provider installs **two** hooks, both wired through the
 same shell-hooks mechanism:
 
 - `~/.hermes/agent-hooks/post-llm-call.sh` — main journal logger.
-- `~/.hermes/agent-hooks/subagent-stop.sh` — companion that records
-  delegated child session_ids to `~/.hermes/.llmoji-children` so
-  the main hook can drop them.
+  Walks `extra.conversation_history`, slices from the latest
+  user-role message to the end, emits one row per kaomoji-led
+  non-empty assistant-role message in that slice. Tool-only
+  assistant messages (carry `tool_calls` + empty/null `content`)
+  are skipped naturally — the walker only takes string-typed
+  non-empty content.
+- `~/.hermes/agent-hooks/pre-llm-call.sh` — nudge that injects the
+  kaomoji-reminder context via the `{context: "<msg>"}` shape (per
+  docs, "the only hook whose return value is used").
 
 Both registered in `~/.hermes/config.yaml` under the `hooks:` block,
 inside our managed marker fence so re-running install is idempotent
 and uninstall removes the stanza cleanly.
 
-This is built from the documented hermes-agent v0.11.0 hook
-contract (the [Event Hooks docs][hermes-hooks]). Three items still
-want real-traffic verification before claiming stability:
+The implementation cross-checks the documented [Event Hooks][hermes-hooks]
+contract against the actual source at
+`hermes-agent/agent/shell_hooks.py:_serialize_payload` (top-level
+shape) and `hermes-agent/run_agent.py:12492` (`post_llm_call`
+kwargs: `session_id`, `user_message`, `assistant_response`,
+`conversation_history`, `model`, `platform`). The `extra.*` block
+holds everything except the four reserved top-level keys
+(`tool_name`, `args`, `session_id`, `parent_session_id`); `cwd` is a
+top-level field set to `Path.cwd()` of the agent process at hook
+fire time, NOT under `extra`.
 
-1. The exact `extra.*` keys delivered by `post_llm_call` (the docs
-   example block was for `pre_tool_call`).
-2. That session-correlation against `subagent_stop` actually filters
-   child sessions cleanly under real `delegate_task` traffic.
-3. That `extra.user_message` arrives clean — no system-injection
-   prefixes that need filtering. The Provider's
-   `system_injected_prefixes` is `[]` per the docs; if real traffic
-   shows otherwise, populate the list and re-render.
+`extra.user_message` is the original pre-injection user message
+(see `original_user_message` at the call site), so
+`system_injected_prefixes` stays `[]`. If a future real-traffic
+inspection shows leaked injection prefixes, populate the list and
+re-render — the bash hook picks the same list up via
+`${INJECTED_PREFIXES_FILTER}`.
 
-Treat the hermes hooks as docs-confirmed-but-untested until that
-validation lands; the journal schema and CLI surface are stable
-across the verification.
+A previous iteration installed a third companion hook
+(`subagent-stop.sh`) intended to record child session_ids for
+sidechain filtering. Source review showed that approach is
+unworkable: `subagent_stop` fires from the parent agent's process
+with the **parent's** `session_id` and no child id at all
+(`hermes-agent/tools/delegate_tool.py:2120-2127`), so there's
+nothing to record. The companion hook is removed; subagent
+filtering is documented as not currently viable (see §"Sidechain
+strategy") and traffic from delegated subagents lands in the
+journal under its own session_id.
 
 [hermes-hooks]: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/
 

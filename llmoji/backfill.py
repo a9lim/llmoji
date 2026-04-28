@@ -1,13 +1,17 @@
 """One-shot backfill: replay native transcripts/rollouts into a
 provider's kaomoji journal.
 
-Each provider that exposes its history as on-disk JSONL transcripts
-(Claude Code under ``~/.claude/projects/**``, Codex under
-``~/.codex/sessions/**``) gets a backfill function that walks every
-transcript file, identifies kaomoji-bearing assistant turns, and
-writes them into the same JSONL journal the live Stop hook
-appends to. The journal becomes the single source of truth for
-kaomoji emission per provider.
+Each provider that exposes its history on disk gets a backfill
+function that walks every session file, identifies kaomoji-bearing
+assistant turns, and writes them into the same JSONL journal the
+live hook appends to. The journal becomes the single source of
+truth for kaomoji emission per provider.
+
+  - Claude Code: ``~/.claude/projects/**/*.jsonl`` (per-event JSONL)
+  - Codex:       ``~/.codex/sessions/**/rollout-*.jsonl`` (rollout JSONL)
+  - Hermes:      ``~/.hermes/sessions/session_*.json`` (whole-session JSON
+                  with full ``messages`` list — same shape the live hook
+                  receives via ``extra.conversation_history``)
 
 Per-row schema (matches the bash hook templates under
 ``llmoji._hooks/``):
@@ -17,6 +21,11 @@ Per-row schema (matches the bash hook templates under
 ``ts`` carries the historical event timestamp (not "now"), so
 backfilled rows are chronologically meaningful for trajectory
 analyses. Rows are sorted by ``ts`` per journal before writing.
+Hermes session files only carry session-level timestamps
+(``session_start`` / ``last_updated``); the per-message structure
+doesn't preserve turn time, so every row from one Hermes session
+gets the same ``ts`` (= ``last_updated``). Cross-session ordering
+still holds.
 
 Re-runs OVERWRITE the journal — the writer truncates. Pause active
 sessions during a backfill, otherwise an in-flight turn could land
@@ -30,7 +39,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
-from .providers import ClaudeCodeProvider, CodexProvider
+from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
 from .taxonomy import is_kaomoji_candidate
 
 
@@ -354,6 +363,130 @@ def backfill_codex(rollouts_root: Path, journal: Path) -> int:
     paths = sorted(rollouts_root.rglob("rollout-*.jsonl"))
     for path in paths:
         rows.extend(_replay_codex_rollout(path))
+    rows.sort(key=lambda r: r["ts"])
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Hermes sessions: ~/.hermes/sessions/session_*.json
+# ---------------------------------------------------------------------------
+
+
+# Hermes' documented contract is ``extra.user_message`` arrives
+# pre-injection, so the prefix list is empty. Mirrors
+# :data:`HermesProvider.system_injected_prefixes`. Single source of
+# truth on the Provider class — if that ever populates, this picks up
+# the change automatically.
+_HERMES_INJECTED_PREFIXES: tuple[str, ...] = tuple(
+    HermesProvider.system_injected_prefixes
+)
+
+
+def _replay_hermes_session(path: Path) -> Iterator[dict[str, Any]]:
+    """Walk one Hermes session JSON and emit one journal row per
+    kaomoji-led assistant message, chunked by user-role boundaries.
+
+    Hermes session files persist the cumulative ``messages`` list
+    (overwritten each turn by ``_save_session_log`` in hermes-agent's
+    run_agent.py), so by the time a backfill reads one, the file
+    holds every turn's traffic in chronological order. Hermes' chat
+    shape is linear — one user → N assistants/tools → one user →
+    ... — so user-role indices delineate turns cleanly. For each
+    consecutive (user_i, user_{i+1}] slice, walk every assistant-
+    role message and emit one journal row per kaomoji-led one.
+
+    Per-message timestamps aren't persisted in the session file, so
+    every row from one session gets the same ``ts`` (=
+    ``last_updated``). Cross-session ordering is preserved by the
+    sort in :func:`backfill_hermes`. Within a session, rows preserve
+    their order in ``messages`` (chronological by construction).
+    """
+    try:
+        raw = path.read_text(errors="replace")
+    except OSError:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return
+
+    model = str(data.get("model") or "")
+    # Hermes session files don't persist cwd; the live hook reads
+    # ``Path.cwd()`` at fire time. Backfilled rows therefore land
+    # with cwd="" (the session file simply doesn't carry it). Same
+    # degradation profile as a missing transcript field elsewhere.
+    cwd = ""
+    ts = str(data.get("last_updated") or data.get("session_start") or "")
+
+    # Find every user-role message index — each delineates a turn.
+    # The slice from one user-role index to the next is "that turn";
+    # the last user index runs to the end of the array.
+    user_indices = [
+        i for i, m in enumerate(messages)
+        if isinstance(m, dict) and m.get("role") == "user"
+    ]
+    if not user_indices:
+        return
+
+    boundaries = list(zip(user_indices, user_indices[1:] + [len(messages)]))
+    for start, end in boundaries:
+        user_msg = messages[start]
+        if not isinstance(user_msg, dict):
+            continue
+        user_content = user_msg.get("content")
+        if not isinstance(user_content, str):
+            continue
+        if user_content and not user_content.startswith(_HERMES_INJECTED_PREFIXES):
+            user_text = user_content
+        else:
+            user_text = ""
+        # Walk this turn's assistants — every assistant-role message
+        # in ``messages[start:end]`` whose ``content`` is a non-empty
+        # string. Tool-only assistant messages (carry ``tool_calls``
+        # with empty/null ``content``) are skipped naturally.
+        for msg in messages[start:end]:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            prefix = kaomoji_prefix(content)
+            if not prefix:
+                continue
+            yield {
+                "ts": ts,
+                "model": model,
+                "cwd": cwd,
+                "kaomoji": prefix,
+                "user_text": user_text,
+                "assistant_text": strip_leading_kaomoji(content, prefix),
+            }
+
+
+def backfill_hermes(sessions_root: Path, journal: Path) -> int:
+    """Walk every ``session_*.json`` under ``sessions_root``, write
+    chronologically-sorted journal rows to ``journal``. Returns row
+    count.
+
+    Sort key is ``last_updated``, so all rows from one session land
+    contiguously and sessions order by completion time. Within one
+    session, rows preserve their declared order in ``messages``
+    (chronological by construction — the file is the agent's
+    persisted message list).
+    """
+    rows: list[dict[str, Any]] = []
+    paths = sorted(sessions_root.glob("session_*.json"))
+    for path in paths:
+        rows.extend(_replay_hermes_session(path))
     rows.sort(key=lambda r: r["ts"])
     journal.parent.mkdir(parents=True, exist_ok=True)
     with journal.open("w") as f:
