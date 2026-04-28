@@ -143,7 +143,9 @@ llmoji parse --provider <n> P  ingest a static export dump (e.g.
                                ~/.llmoji/journals/
 llmoji analyze [--notes …]     scrape + canonicalize + Haiku
                                synthesize → ~/.llmoji/bundle/
-llmoji upload --target {hf,email} [--yes]  tarball + ship
+llmoji upload --target {hf,email} [--yes]  ship the bundle (HF: loose
+                                            files via single atomic
+                                            commit; email: tarball)
 llmoji cache clear             wipe ~/.llmoji/cache/
 ```
 
@@ -215,17 +217,27 @@ llmoji/
                            # helpers + JSON-settings edit helpers
                            # + _atomic_write_text (tmp+rename) used
                            # by every provider's settings writer
-      claude_code.py       # JSON Stop-hook provider (~/.claude/settings.json)
-      codex.py             # TOML Stop-hook provider (~/.codex/config.toml,
-                           # marker-fenced [hooks.stop] stanza)
-      hermes.py            # YAML post_llm_call + subagent_stop dual-hook
-                           # provider (~/.hermes/config.yaml,
-                           # marker-fenced hooks: stanza)
+      claude_code.py       # JSON Stop+UserPromptSubmit provider
+                           # (~/.claude/settings.json); shares the
+                           # nudge template with codex
+      codex.py             # JSON Stop+UserPromptSubmit provider
+                           # (~/.codex/hooks.json); the codex_hooks
+                           # feature flag is Stage::Stable, default-on
+                           # in codex-rs/features
+      hermes.py            # YAML pre_llm_call + post_llm_call +
+                           # subagent_stop tri-hook provider
+                           # (~/.hermes/config.yaml, marker-fenced
+                           # hooks: stanza)
     _hooks/                # bash hook templates (importlib.resources
                            # data); rendered at install time
       claude_code.sh.tmpl
       codex.sh.tmpl
+      claude_codex_nudge.sh.tmpl    # UserPromptSubmit nudge — shared
+                                    # between claude_code + codex (the
+                                    # response envelope is byte-identical)
       hermes.sh.tmpl                # post_llm_call (journal logger)
+      hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
+                                    # {context: ...} shape)
       hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
     paths.py               # ~/.llmoji home, cache, bundle, journals
     analyze.py             # the analyze pipeline (Stage A + B + bundle;
@@ -306,6 +318,38 @@ If you find another copy of the set, delete it and route through
 
 Flipping any of these would miss every multi-step turn's kaomoji.
 
+### Nudge hooks — what gives the corpus its size
+
+Each provider ships a tiny **nudge** hook alongside the journal
+logger. The nudge fires before each model turn (UserPromptSubmit
+on Claude/Codex, `pre_llm_call` on Hermes) and injects a fresh
+"please begin your message with a kaomoji that best represents
+how you feel" reminder as additional context. Without the nudge
+the model drifts away from leading kaomoji over a long session;
+with it the journal stays dense.
+
+Response shapes differ:
+
+- **Claude Code + Codex**: `{"hookSpecificOutput": {"hookEventName":
+  "UserPromptSubmit", "additionalContext": "<msg>"}}`. Codex's
+  envelope is byte-identical to Claude Code's (verified at
+  `codex-rs/hooks/src/events/user_prompt_submit.rs`), so a single
+  shared `claude_codex_nudge.sh.tmpl` template serves both. The
+  `nudge_message` itself substitutes through `_shell_quote` into a
+  bash single-quoted literal, so embedded apostrophes round-trip
+  cleanly.
+- **Hermes**: bare `{"context": "<msg>"}` — no envelope, returned
+  by `pre_llm_call`, which the docs call out as "the only hook
+  whose return value is used."
+
+The base `Provider` class exposes the nudge through
+`nudge_hook_template` / `nudge_hook_filename` / `nudge_event` /
+`nudge_message` class attrs and a `has_nudge` predicate. Providers
+that opt in get the nudge written + registered automatically by
+`install`, removed by `uninstall`, and reported by `status`. Adding
+a nudge to a future provider is four class-level attrs and a
+`_is_nudge_registered` override.
+
 ### Sidechain strategy
 
 - Claude Code: `field_flag` on `isSidechain`. Hooks drop the row.
@@ -329,11 +373,15 @@ Three corruption paths are explicitly defended:
    `{}` and rewrite. Post-fix `_load_json_strict` raises
    `SettingsCorruptError` and the user has to fix the file by hand
    before `install` will touch it.
-2. **Existing `[hooks.stop]` section in `~/.codex/config.toml`** —
-   appending a fresh `[hooks.stop]` block would yield invalid
-   duplicate-table TOML. `CodexProvider._has_unmanaged_hooks_stop`
-   detects an unmanaged stanza outside our marker fence and refuses
-   to install.
+2. **Malformed JSON in `~/.codex/hooks.json`** — same defense as
+   claude_code, same helper. Codex used to live behind a
+   marker-fenced `[hooks.stop]` stanza in `~/.codex/config.toml`,
+   but the canonical home for codex hook registration is
+   `~/.codex/hooks.json` — Claude-style payload, same shape as
+   claude_code, verified at the `codex_hooks` feature flag in
+   `codex-rs/features` (`Stage::Stable`, `default_enabled: true`).
+   The TOML path warned when both representations were present, so
+   we standardize on the JSON file and reuse the JSON helpers.
 3. **Existing top-level `hooks:` key in `~/.hermes/config.yaml`** —
    appending another `hooks:` makes a duplicate-key YAML doc that
    silently last-write-wins. `HermesProvider._has_unmanaged_hooks_top_level`
@@ -344,10 +392,11 @@ specific path and reason. They edit the file (move-aside or merge
 by hand) and re-run.
 
 The non-managed analogue — a user re-running `install` after
-already installing once — is fully idempotent. The marker fences in
-codex/hermes mean the second `install` is a no-op; the JSON-edit
-path in claude_code checks for an existing entry with our command
-string and skips.
+already installing once — is fully idempotent. The marker fence in
+hermes means the second `install` is a no-op; the JSON-edit path
+in claude_code and codex checks for an existing entry with our
+command string and skips. Both the main and nudge hooks dedup
+independently — re-installing only one of the two pairs is fine.
 
 Settings writes go through `_atomic_write_text` (tmp file +
 `os.replace`) so a power loss / SIGINT mid-write leaves the user's
@@ -355,16 +404,38 @@ settings file with either the old content or the new — never half.
 The `upload` state.json (per-machine submission token) writes the
 same way.
 
-### Bundle is allowlisted, not just-tar-everything
+### Bundle is allowlisted, not just-ship-everything
 
-`upload.tar_bundle()` only ships files in `BUNDLE_ALLOWLIST`
-(`manifest.json`, `descriptions.jsonl` — the v1.0 frozen schema).
-Any other file in `~/.llmoji/bundle/` makes `tar_bundle` raise
-`FileExistsError`. `analyze` clears loose files in the bundle dir
-before writing, so a clean run produces exactly the two-file
-schema. The two together mean: stale per-instance descriptions,
-user-added notes, hidden state caches, etc. cannot accidentally
-leak through `upload`.
+Both upload paths enforce `BUNDLE_ALLOWLIST` (`manifest.json`,
+`descriptions.jsonl` — the v1.0 frozen schema):
+
+- `upload.tar_bundle()` (used by the email target) raises
+  `FileExistsError` if the bundle dir holds anything else.
+- `upload.upload_hf()` does the same pre-flight check and ALSO
+  passes `allow_patterns=list(BUNDLE_ALLOWLIST)` to
+  `HfApi.upload_folder` as a second line of defense.
+
+`analyze` clears loose files in the bundle dir before writing, so
+a clean run produces exactly the two-file schema. The three
+together mean stale per-instance descriptions, user-added notes,
+hidden-state caches, etc. cannot accidentally leak through
+`upload`.
+
+### HF upload is loose files, not a tarball
+
+`upload --target hf` pushes `manifest.json` + `descriptions.jsonl`
+as loose files at `contributors/<hash>/bundle-<ts>/` via
+`HfApi.upload_folder` (single atomic commit). The dataset card on
+the HF side has a `configs:` YAML pointing at
+`contributors/**/descriptions.jsonl`, which is what the auto-loader
+needs to surface the dataset viewer; uploading as a tarball
+triggered HF's WebDataset auto-detection and broke the viewer
+(WebDataset expects shared-prefix archives, our two-file bundles
+don't fit).
+
+Email target keeps `tar_bundle` because a single attachment is
+what the recipient wants. The local tarball at
+`~/.llmoji/bundle-<ts>.tar.gz` is now an email-only artifact.
 
 ### Hermes provider — two-hook design from docs
 

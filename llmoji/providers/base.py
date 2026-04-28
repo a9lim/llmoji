@@ -17,7 +17,12 @@ SidechainStrategy = Literal["none", "field_flag", "session_correlation"]
 
 @dataclass
 class ProviderStatus:
-    """Result of :meth:`Provider.status` — a snapshot for the CLI."""
+    """Result of :meth:`Provider.status` — a snapshot for the CLI.
+
+    ``nudge_hook_path`` is ``None`` for providers that don't ship a
+    nudge hook; ``nudge_installed`` defaults False in that case so
+    downstream callers don't need to special-case absence.
+    """
 
     name: str
     installed: bool
@@ -27,6 +32,8 @@ class ProviderStatus:
     hook_path: Path
     settings_path: Path
     journal_path: Path
+    nudge_hook_path: Path | None = None
+    nudge_installed: bool = False
 
 
 def _shell_quote(s: str) -> str:
@@ -117,11 +124,43 @@ class Provider:
     sidechain_config: dict[str, str] = {}  # type: ignore[assignment]
     system_injected_prefixes: list[str] = []  # type: ignore[assignment]
 
+    # --- nudge hook (optional secondary hook) ---
+    #
+    # A "nudge" is a fire-before-each-turn hook that injects extra
+    # context the harness gives to the model right before it
+    # generates. For Claude Code + Codex the contract is
+    # ``UserPromptSubmit`` with a ``hookSpecificOutput.additional
+    # Context`` envelope; for Hermes it's ``pre_llm_call`` with a
+    # bare ``{context: ...}`` shape. Each provider supplies its own
+    # template so the response shape stays correct on either side.
+    #
+    # Provider opts in by setting all four attrs. ``has_nudge`` is
+    # the canonical "is this provider configured for a nudge?" check.
+    nudge_hook_template: str = ""
+    nudge_hook_filename: str = ""
+    nudge_event: str = ""
+    nudge_message: str = ""
+
     # --- public API ---
 
     @property
     def hook_path(self) -> Path:
         return self.hooks_dir / self.hook_filename
+
+    @property
+    def nudge_hook_path(self) -> Path:
+        """Path the rendered nudge hook lands at on disk. Only
+        meaningful when :attr:`has_nudge` is True; readers should
+        guard with that property first."""
+        return self.hooks_dir / self.nudge_hook_filename
+
+    @property
+    def has_nudge(self) -> bool:
+        return bool(
+            self.nudge_hook_template
+            and self.nudge_hook_filename
+            and self.nudge_event
+        )
 
     def render_hook(self) -> str:
         """Read the bash template from package data and substitute the
@@ -144,26 +183,67 @@ class Provider:
             LLMOJI_VERSION=_package_version(),
         )
 
+    def render_nudge_hook(self) -> str:
+        """Read the nudge template and substitute placeholders.
+        Raises :class:`RuntimeError` if the provider isn't configured
+        for a nudge — callers should guard with :attr:`has_nudge`."""
+        if not self.has_nudge:
+            raise RuntimeError(f"{self.name} has no nudge configured")
+        template_text = importlib.resources.files("llmoji._hooks").joinpath(
+            self.nudge_hook_template
+        ).read_text()
+        return Template(template_text).safe_substitute(
+            # Wrap the message as a bash single-quoted literal —
+            # ``_shell_quote`` escapes embedded single quotes via the
+            # close-escape-reopen idiom; we add the surrounding quotes
+            # here so templates can write ``MSG=$NUDGE_MESSAGE_QUOTED``
+            # without worrying about quoting inside the template body.
+            NUDGE_MESSAGE_QUOTED=f"'{_shell_quote(self.nudge_message)}'",
+            LLMOJI_VERSION=_package_version(),
+        )
+
     def install(self) -> None:
-        """Idempotent: write the hook, register it in settings, ensure
-        the journal directory exists. Safe to re-run."""
+        """Idempotent: write the hook(s), register them in settings,
+        ensure the journal directory exists. Safe to re-run.
+
+        If the provider has a nudge configured (:attr:`has_nudge`),
+        the nudge hook is written + registered alongside the main
+        hook in a single ``_register`` call — subclasses are
+        responsible for registering both events when they implement
+        :meth:`_register`.
+        """
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
-        rendered = self.render_hook()
-        self.hook_path.write_text(rendered)
+        self.hook_path.write_text(self.render_hook())
         self.hook_path.chmod(0o755)
+        if self.has_nudge:
+            self.nudge_hook_path.write_text(self.render_nudge_hook())
+            self.nudge_hook_path.chmod(0o755)
         self._register()
 
     def uninstall(self) -> None:
         """Idempotent: deregister from settings, remove the hook
-        script. Leaves the journal in place (the user may want to
+        script(s). Leaves the journal in place (the user may want to
         keep their history)."""
         self._unregister()
         if self.hook_path.exists():
             self.hook_path.unlink()
+        if self.has_nudge and self.nudge_hook_path.exists():
+            self.nudge_hook_path.unlink()
 
     def status(self) -> ProviderStatus:
-        installed = self.hook_path.exists() and self._is_registered()
+        main_installed = self.hook_path.exists() and self._is_registered()
+        if self.has_nudge:
+            nudge_hook_path: Path | None = self.nudge_hook_path
+            nudge_installed = (
+                self.nudge_hook_path.exists()
+                and self._is_nudge_registered()
+            )
+            installed = main_installed and nudge_installed
+        else:
+            nudge_hook_path = None
+            nudge_installed = False
+            installed = main_installed
         journal_exists = self.journal_path.exists()
         journal_rows = 0
         journal_bytes = 0
@@ -182,6 +262,8 @@ class Provider:
             hook_path=self.hook_path,
             settings_path=self.settings_path,
             journal_path=self.journal_path,
+            nudge_hook_path=nudge_hook_path,
+            nudge_installed=nudge_installed,
         )
 
     # --- subclass hooks ---
@@ -198,22 +280,38 @@ class Provider:
 
     def _is_registered(self) -> bool:
         """Cheap check used by :meth:`status` — returns True if the
-        provider's hook is currently wired up in settings."""
+        provider's main (journal-logger) hook is wired up in settings."""
         raise NotImplementedError
 
-    # --- helpers for JSON-format settings (Claude Code) ---
+    def _is_nudge_registered(self) -> bool:
+        """Cheap check used by :meth:`status` — returns True if the
+        provider's nudge hook is wired up in settings.
+
+        Default returns False. Providers that opt into a nudge MUST
+        override (typically by calling :meth:`_is_registered_json_settings`
+        with ``hook_path=self.nudge_hook_path`` and ``event=self.nudge_event``,
+        or by checking the YAML stanza in the hermes case)."""
+        return False
+
+    # --- helpers for JSON-format settings (Claude Code, Codex) ---
 
     def _register_json_settings(
         self,
         *,
         event: str,
+        hook_path: Path | None = None,
         matcher_predicate: dict[str, Any] | None = None,
     ) -> None:
         """Append the hook to a JSON settings file under ``hooks[<event>]``.
 
-        The shape Claude Code expects:
-        ``{"hooks": {"Stop": [{"hooks": [{"type": "command",
+        The shape Claude Code (and Codex's ``~/.codex/hooks.json``)
+        expects:
+        ``{"hooks": {"<Event>": [{"hooks": [{"type": "command",
         "command": "<path>"}]}]}}``.
+
+        ``hook_path`` defaults to ``self.hook_path`` (the main
+        journal-logger). Pass ``self.nudge_hook_path`` to register the
+        secondary nudge hook on a different event in the same file.
 
         Idempotent — re-registering the same hook is a no-op.
 
@@ -222,6 +320,7 @@ class Provider:
         corrupt-but-recoverable config). Same for non-dict payloads
         — JSON ``[]`` / ``"string"`` / etc.
         """
+        cmd = str(hook_path if hook_path is not None else self.hook_path)
         cfg = _load_json_strict(self.settings_path)
         hooks_field = cfg.get("hooks")
         if hooks_field is not None and not isinstance(hooks_field, dict):
@@ -239,7 +338,6 @@ class Provider:
                 f"{type(bucket_field).__name__}, not an array",
             )
         bucket = hooks.setdefault(event, [])
-        cmd = str(self.hook_path)
         for entry in bucket:
             if not isinstance(entry, dict):
                 continue
@@ -252,7 +350,12 @@ class Provider:
         bucket.append(new_entry)
         _write_json(self.settings_path, cfg)
 
-    def _unregister_json_settings(self, *, event: str) -> None:
+    def _unregister_json_settings(
+        self,
+        *,
+        event: str,
+        hook_path: Path | None = None,
+    ) -> None:
         if not self.settings_path.exists():
             return
         try:
@@ -270,7 +373,7 @@ class Provider:
         bucket = hooks.get(event)
         if not isinstance(bucket, list):
             return
-        cmd = str(self.hook_path)
+        cmd = str(hook_path if hook_path is not None else self.hook_path)
         kept = []
         for entry in bucket:
             if not isinstance(entry, dict):
@@ -292,7 +395,12 @@ class Provider:
             cfg.pop("hooks", None)
         _write_json(self.settings_path, cfg)
 
-    def _is_registered_json_settings(self, *, event: str) -> bool:
+    def _is_registered_json_settings(
+        self,
+        *,
+        event: str,
+        hook_path: Path | None = None,
+    ) -> bool:
         if not self.settings_path.exists():
             return False
         try:
@@ -305,7 +413,7 @@ class Provider:
         bucket = hooks.get(event)
         if not isinstance(bucket, list):
             return False
-        cmd = str(self.hook_path)
+        cmd = str(hook_path if hook_path is not None else self.hook_path)
         for entry in bucket:
             if not isinstance(entry, dict):
                 continue
