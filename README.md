@@ -174,6 +174,6 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup. For security and pr
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE](LICENSE). The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is AGPL-3.0-or-later. The shared corpus on [HuggingFace](https://huggingface.co/datasets/a9lim/llmoji) is CC-BY-SA-4.0; running `llmoji upload --target hf` contributes a bundle under those terms.
+GPL-3.0-or-later. See [LICENSE](LICENSE). The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is CC-BY-SA-4.0. The shared corpus on [HuggingFace](https://huggingface.co/datasets/a9lim/llmoji) is also CC-BY-SA-4.0; running `llmoji upload --target hf` contributes a bundle under those terms.
 
 If you use llmoji or the central corpus in published research, please cite this repository.
