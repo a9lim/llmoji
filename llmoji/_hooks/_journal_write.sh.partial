@@ -1,0 +1,41 @@
+# Shared journal-write tail. Substituted into every provider's main
+# hook by ``Provider.render_hook``.
+#
+# Inputs (all set by the per-provider header above):
+#   $ASSISTANT_TEXT  the assistant message body
+#   $KAOMOJI         the validated leading prefix (post-validate partial)
+#   $USER_TEXT       latest real user message, system-injection filtered
+#   $MODEL           active model slug
+#   $CWD             working directory at hook fire
+#   JOURNAL_PATH     rendered absolute path to the journal JSONL
+#                    (Python ``string.Template`` substitution; written
+#                    as a plain word here, not a shell variable
+#                    reference, so the substitution doesn't reach
+#                    into this comment)
+#
+# Writes one canonical 6-field row. ``assistant_text`` has the leading
+# kaomoji + surrounding whitespace stripped via jq's
+# ``sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")`` so the
+# row contract holds: kaomoji lives in its own field, body is body.
+JOURNAL="$JOURNAL_PATH"
+mkdir -p "$(dirname "$JOURNAL")"
+
+jq -nc \
+  --arg ts             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg model          "$MODEL" \
+  --arg cwd            "$CWD" \
+  --arg kaomoji        "$KAOMOJI" \
+  --arg user_text      "$USER_TEXT" \
+  --arg assistant_text "$ASSISTANT_TEXT" \
+  '{
+    ts:             $ts,
+    model:          $model,
+    cwd:            $cwd,
+    kaomoji:        $kaomoji,
+    user_text:      $user_text,
+    assistant_text: ($assistant_text
+                     | sub("^\\s+"; "")
+                     | ltrimstr($kaomoji)
+                     | sub("^\\s+"; ""))
+  }' \
+  >> "$JOURNAL" 2>/dev/null || true

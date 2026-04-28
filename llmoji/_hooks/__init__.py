@@ -1,17 +1,25 @@
-"""Bash hook templates.
+"""Bash hook templates and shared partials.
 
-Each ``*.sh.tmpl`` is rendered at provider-install time with
-``string.Template`` substitutions:
+Each ``*.sh.tmpl`` is a per-provider main hook, rendered at install
+time via ``string.Template`` substitution. The ``*.partial`` files
+are shared fragments inlined into every provider's main hook by
+:meth:`llmoji.providers.base.Provider.render_hook` so the kaomoji
+validator and the JSONL journal-writer live in one place.
+
+Substitutions performed by ``Provider.render_hook``:
 
   ``$JOURNAL_PATH``           absolute path to the journal JSONL
-  ``$KAOMOJI_START_CASE``     bash ``case`` glob list, generated from
-                              :data:`llmoji.taxonomy.KAOMOJI_START_CHARS`
+  ``$KAOMOJI_VALIDATE``       expanded contents of
+                              ``_kaomoji_validate.sh.partial`` with
+                              ``$KAOMOJI_START_CASE`` (built from
+                              :data:`llmoji.taxonomy.KAOMOJI_START_CHARS`)
+                              and ``$SKIP_ACTION`` (per-provider bail
+                              statement) substituted in
+  ``$JOURNAL_WRITE``          expanded contents of
+                              ``_journal_write.sh.partial``
   ``$INJECTED_PREFIXES_FILTER`` jq expression filtering system-injected
                               user-role payloads (see
                               :func:`llmoji.providers.base.render_injected_prefixes_filter`)
-  ``$INJECTED_PREFIXES_LIST`` comma-separated jq-string list of the
-                              same prefixes (for hermes's child-session
-                              state file)
   ``$LLMOJI_VERSION``         the rendering package version
 
 The package layout intentionally keeps these as data files (under

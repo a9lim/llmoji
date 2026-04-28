@@ -70,19 +70,47 @@ before deciding to ship.
 first-class harness. Each provider knows:
 
 - where the harness keeps its hooks dir + settings file
-- where the journal lives
-- the harness's stop-event payload shape (kaomoji on first / last /
-  single-text-field per turn)
-- how to filter sidechain dispatches (none / field flag /
-  session-id correlation)
+  (`hooks_dir`, `settings_path`)
+- where the journal lives (`journal_path`)
+- which Stop-equivalent event the harness fires on (`main_event`)
+- how the bash hook should bail when the kaomoji filter rejects a
+  turn (`skip_action` — `exit 0` for claude_code/codex,
+  `echo '{}'; exit 0` for hermes's stdout-JSON contract)
 - which prefixes mark a system-injected user-role payload
+  (`system_injected_prefixes`)
+- nudge attrs (template / filename / event / message) if the
+  provider opts in
 
-The bash hook templates live as data files under
-`llmoji/_hooks/`. `Provider.render_hook()` reads the template and
-substitutes `${KAOMOJI_START_CASE}`, `${INJECTED_PREFIXES_FILTER}`,
-`${JOURNAL_PATH}`, `${LLMOJI_VERSION}` via `string.Template`. Single
-source of truth in Python (the start-char set lives in
-`llmoji.taxonomy`, system-injection prefixes on the Provider class).
+JSON-settings providers (claude_code, codex) inherit the default
+`_register` / `_unregister` / `_is_registered` /
+`_is_nudge_registered` from `Provider`; YAML-settings providers
+(hermes) override the four. Past versions of this doc listed
+`kaomoji_position` / `sidechain_strategy` / `sidechain_config` /
+`settings_format` — those were documentary class attrs that no code
+branched on, so they're gone. The behavior they described still
+holds, but it lives in each provider's hook template + register
+override, not in driver attrs.
+
+The bash hook templates live as data files under `llmoji/_hooks/`,
+plus two **shared partials** that every main hook inlines:
+
+- `_kaomoji_validate.sh.partial` — the leading-prefix extractor and
+  validator. Substituted with `${KAOMOJI_START_CASE}` (built from
+  `llmoji.taxonomy.KAOMOJI_START_CHARS`) and `${SKIP_ACTION}`
+  before being inserted as `${KAOMOJI_VALIDATE}` into the main
+  template.
+- `_journal_write.sh.partial` — the `jq -nc … >> $JOURNAL_PATH`
+  tail. Substituted with `${JOURNAL_PATH}` then inserted as
+  `${JOURNAL_WRITE}`.
+
+`Provider.render_hook()` runs `string.Template.safe_substitute`
+twice — once on each partial with its own placeholders, once on the
+main template with `JOURNAL_PATH`, `KAOMOJI_VALIDATE`, `JOURNAL_WRITE`,
+`INJECTED_PREFIXES_FILTER`, `LLMOJI_VERSION`. Two passes because
+`safe_substitute` is single-pass and the partials' own `${...}`
+references wouldn't survive a one-pass render. Single source of
+truth in Python (the start-char set lives in `llmoji.taxonomy`,
+system-injection prefixes on the Provider class).
 
 ### Two-stage Haiku pipeline
 
@@ -196,6 +224,13 @@ llmoji/
     py.typed              # PEP 561 type marker (Typing :: Typed
                           # classifier in pyproject)
     __init__.py            # public surface re-exports
+    _util.py               # cross-cutting helpers: atomic_write_text
+                           # (tmp+rename), write_json, package_version,
+                           # human_bytes. Imported by analyze, upload,
+                           # cli, providers — kept out of providers.base
+                           # so the dependency graph stays tree-shaped
+                           # (upload doesn't reach into providers for
+                           # io utilities).
     taxonomy.py            # KAOMOJI_START_CHARS + is_kaomoji_candidate
                            # + extract + KaomojiMatch (span-only)
                            # + canonicalize_kaomoji (rules A–P; frozen v1.0)
@@ -215,51 +250,76 @@ llmoji/
       base.py              # Provider + ProviderStatus dataclasses +
                            # SettingsCorruptError + template render
                            # helpers + JSON-settings edit helpers
-                           # + _atomic_write_text (tmp+rename) used
-                           # by every provider's settings writer
+                           # (batched register/unregister/is_registered
+                           # against main_event + nudge_event; one
+                           # read-modify-write cycle per install).
+                           # Atomic settings writes go through
+                           # llmoji._util.atomic_write_text.
       claude_code.py       # JSON Stop+UserPromptSubmit provider
                            # (~/.claude/settings.json); shares the
-                           # nudge template with codex
+                           # nudge template with codex. Inherits the
+                           # default _register family from Provider.
       codex.py             # JSON Stop+UserPromptSubmit provider
                            # (~/.codex/hooks.json); the codex_hooks
                            # feature flag is Stage::Stable, default-on
-                           # in codex-rs/features
+                           # in codex-rs/features. Same default
+                           # _register family as claude_code.
       hermes.py            # YAML pre_llm_call + post_llm_call +
                            # subagent_stop tri-hook provider
                            # (~/.hermes/config.yaml, marker-fenced
-                           # hooks: stanza)
+                           # hooks: stanza). Overrides _register family.
     _hooks/                # bash hook templates (importlib.resources
                            # data); rendered at install time
       claude_code.sh.tmpl
       codex.sh.tmpl
+      hermes.sh.tmpl                # post_llm_call (journal logger)
+      _kaomoji_validate.sh.partial  # shared validator inlined into
+                                    # every main hook via ${KAOMOJI_VALIDATE}
+      _journal_write.sh.partial     # shared jq-write tail inlined via
+                                    # ${JOURNAL_WRITE}
       claude_codex_nudge.sh.tmpl    # UserPromptSubmit nudge — shared
                                     # between claude_code + codex (the
                                     # response envelope is byte-identical)
-      hermes.sh.tmpl                # post_llm_call (journal logger)
       hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
                                     # {context: ...} shape)
       hermes_subagent_stop.sh.tmpl  # subagent_stop (sidechain registrar)
-    paths.py               # ~/.llmoji home, cache, bundle, journals
+    paths.py               # ~/.llmoji home, cache, bundle, journals,
+                           # state.json (per-machine submission token).
+                           # NOT an install registry — provider install
+                           # state is read live from each harness's own
+                           # settings file by Provider.status().
     analyze.py             # the analyze pipeline (Stage A + B + bundle;
                            # clears bundle dir before writing). Stage A
                            # dispatches cache-miss Haiku calls on a
                            # ThreadPoolExecutor (default 4 workers, env
                            # $LLMOJI_CONCURRENCY); cache appends serialize
-                           # on the main thread via as_completed
+                           # on the main thread via as_completed.
+                           # Manifest stamps haiku_model_id, submitter_id,
+                           # journal_counts (per source) so the inspected
+                           # bundle byte-matches what HF would receive.
     upload.py              # tar + HF / email targets;
                            # BUNDLE_ALLOWLIST enforces the two-file
-                           # schema, refuses extras
+                           # schema, refuses extras (raises
+                           # BundleAllowlistError). submitter_id() is
+                           # public so analyze can stamp the manifest.
     cli.py                 # argparse entry, [project.scripts] llmoji
   tests/
     test_public_surface.py # pytest checks locking the v1.0 contract
                            # (taxonomy / haiku_prompts / ScrapeRow /
                            # provider rendering + bash -n / bundle
                            # allowlist / corrupt-config refusal /
-                           # mask_kaomoji unified prepend contract).
+                           # mask_kaomoji unified prepend contract /
+                           # nudge install/uninstall round-trip).
     test_canonicalize.py   # parametrized rule-by-rule regression
                            # tests for canonicalize_kaomoji + extract
                            # + is_kaomoji_candidate. Each rule case is
                            # its own pytest line. ~70 cases total.
+    test_pipeline_parity.py  # cross-validates the bash live hook vs
+                           # the Python backfill on synthetic transcripts
+                           # for claude_code + codex (every parity-
+                           # critical field must match), plus a
+                           # bash-hook-only smoke test for hermes
+                           # (no Python backfill counterpart).
 ```
 
 ## Gotchas
@@ -295,7 +355,7 @@ without the kaomoji). One-time re-call cost on the next analyze.
 If you find another copy of the set, delete it and route through
 `llmoji.taxonomy`.
 
-### Per-provider kaomoji position
+### Per-provider kaomoji position (current capture)
 
 - **Claude Code**: kaomoji on the **first** text-bearing entry of
   the current turn. Claude Code persists each assistant content
@@ -305,11 +365,7 @@ If you find another copy of the set, delete it and route through
   message (string content OR text-block array, NOT tool_result),
   picks the first text-bearing assistant entry, and reads its
   first text block. Naive `last(assistant)` only catches turns
-  that finish on text and never resume — every text-then-tools
-  turn was getting silently dropped pre-fix. (The original gotcha
-  comment claiming "one event with interleaved text + tool_use +
-  text content blocks" described the API response shape, not the
-  on-disk transcript shape — they don't match.)
+  that finish on text and never resume.
 - **Codex**: kaomoji on the **last** agent message of a turn. Each
   agent message is its own `event_msg.agent_message` event;
   progress messages come first. The hook keys on
@@ -320,10 +376,57 @@ If you find another copy of the set, delete it and route through
   (`extra.assistant_response`). No first/last ambiguity, harness
   curates.
 
-Codex + Hermes are structurally immune to the Claude Code bug
-because their Stop payloads carry the final assistant text as a
-named field. Claude Code's only delivers `transcript_path`, so
-the hook owns the find-the-right-block job.
+⚠ **All three undercount on tool-heavy turns.** See the next
+section for the planned fix.
+
+### Multi-message-per-turn capture (planned fix, post-1.0)
+
+Both Codex and Claude Code emit MULTIPLE kaomoji-led messages per
+tool-heavy turn, but the current Stop hooks emit **at most one
+journal row per turn**. Real example pulled from one of a9's Codex
+rollouts — a single turn wrote ten `agent_message` events, each
+kaomoji-led with a distinct affect:
+
+```
+(｀・ω・´) plan
+(ง •̀_•́) attack
+(⌐■_■) scaffold
+(｡•̀ᴗ-)✧ research
+(＾▽＾) build
+( •̀ᴗ•́ ) first pass landed
+(；￣Д￣) build broke
+(｀・ω・´) fixed
+(╯°□°）╯ runtime error
+(⊙_⊙) bug confusion
+─── task_complete: last_agent_message = (｀・ω・´) shipped
+```
+
+Eleven kaomoji-bearing messages, **one row in the journal**. Same
+shape on Claude Code: text(kaomoji-led) → tool_use → text(more) →
+tool_use → text(more) within one turn captures only the first
+text block, not the post-tool continuations.
+
+The right capture is "one journal row per kaomoji-led message,"
+not "one row per turn." That means:
+
+- The Stop hook walks the rollout/transcript and emits N rows per
+  fire, one per kaomoji-led `agent_message` (Codex) or
+  kaomoji-led assistant text block (Claude Code). N can be 0.
+- `last_agent_message` / `last_assistant_message` become useless
+  for both — the walk is mandatory.
+- `user_text` resolution stays per-turn: every row from one turn
+  carries the same originating prompt.
+- `backfill_codex` / `backfill_claude_code` need the same change.
+- The cache key already hashes `(canonical, user_text,
+  assistant_text)` — different assistant texts within the same
+  turn produce different keys, so per-instance caching still
+  works without collisions.
+- One-time mandatory rebackfill after the fix lands (existing
+  journals are systematically thin).
+
+This sat as a known issue at audit time; the fix is staged for a
+follow-up session. Until it lands, treat per-canonical-face counts
+as a lower bound.
 
 ### Nudge hooks — what gives the corpus its size
 
@@ -400,11 +503,15 @@ in claude_code and codex checks for an existing entry with our
 command string and skips. Both the main and nudge hooks dedup
 independently — re-installing only one of the two pairs is fine.
 
-Settings writes go through `_atomic_write_text` (tmp file +
-`os.replace`) so a power loss / SIGINT mid-write leaves the user's
-settings file with either the old content or the new — never half.
-The `upload` state.json (per-machine submission token) writes the
-same way.
+Settings writes go through `llmoji._util.atomic_write_text` (tmp
+file + `os.replace`) so a power loss / SIGINT mid-write leaves the
+user's settings file with either the old content or the new — never
+half. The `upload` state.json (per-machine submission token) writes
+the same way. JSON-settings providers also batch their main+nudge
+edits into a single read-modify-write cycle per `install` (via
+`_register_json_settings_batch`), so a SIGKILL between registering
+the Stop hook and the UserPromptSubmit nudge can't leave the user
+half-installed.
 
 ### Bundle is allowlisted, not just-ship-everything
 
@@ -412,7 +519,7 @@ Both upload paths enforce `BUNDLE_ALLOWLIST` (`manifest.json`,
 `descriptions.jsonl` — the v1.0 frozen schema):
 
 - `upload.tar_bundle()` (used by the email target) raises
-  `FileExistsError` if the bundle dir holds anything else.
+  `BundleAllowlistError` if the bundle dir holds anything else.
 - `upload.upload_hf()` does the same pre-flight check and ALSO
   passes `allow_patterns=list(BUNDLE_ALLOWLIST)` to
   `HfApi.upload_folder` as a second line of defense.
@@ -555,5 +662,5 @@ Two coupling points to keep in mind:
   `$LLMOJI_CONCURRENCY=1` to force serial dispatch when debugging.
 - Public-API freeze: anything in §"v1.0 frozen public surface" gets
   a major-version bump if changed. Internal helpers (everything in
-  `llmoji.providers.base._*`, `llmoji.haiku.cache_key`, etc.) are
-  free to evolve.
+  `llmoji._util`, leading-underscore names in `llmoji.providers.base`,
+  `llmoji.haiku.cache_key`, etc.) are free to evolve.

@@ -34,9 +34,19 @@ def main() -> int:
     print(f"bundle: {bundle}")
     print(f"  llmoji version:    {manifest.get('llmoji_version', '?')}")
     print(f"  haiku model:       {manifest.get('haiku_model_id', '?')}")
+    print(f"  generated at:      {manifest.get('generated_at', '?')}")
     print(f"  submitter id:      {manifest.get('submitter_id', '?')}")
-    print(f"  total rows:        {manifest.get('total_rows', '?')}")
-    print(f"  canonical unique:  {manifest.get('canonical_unique', '?')}")
+    print(f"  total rows:        {manifest.get('total_rows_scraped', '?')}")
+    print(
+        f"  canonical unique:  "
+        f"{manifest.get('total_kaomoji_unique_canonical', '?')}"
+    )
+    if providers := manifest.get("providers_seen"):
+        print(f"  providers:         {', '.join(providers)}")
+    if journal_counts := manifest.get("journal_counts"):
+        print("  journal counts:")
+        for src, n in sorted(journal_counts.items()):
+            print(f"    {src:<24} {n} rows")
     if notes := manifest.get("notes"):
         print(f"  notes:             {notes}")
     print()
@@ -49,9 +59,9 @@ def main() -> int:
             if not line:
                 continue
             row = json.loads(line)
-            kao = row.get("canonical_kaomoji", "?")
+            kao = row.get("kaomoji", "?")
             count = row.get("count", "?")
-            desc = row.get("description", "")
+            desc = row.get("haiku_synthesis_description", "")
             print(f"  {kao}   ({count} occurrences)")
             print(f"      {desc}")
             print()

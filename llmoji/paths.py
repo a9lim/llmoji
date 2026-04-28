@@ -43,8 +43,11 @@ def journals_dir() -> Path:
 
 
 def state_path() -> Path:
-    """Tracks which providers are installed. Touched by
-    ``install``/``uninstall``."""
+    """Persistent per-machine state. Currently holds the salted
+    submission token used to derive a stable
+    :func:`llmoji.upload.submitter_id` across upload runs.
+    Provider install state is read live from each harness's own
+    settings file — this isn't an install registry."""
     return llmoji_home() / "state.json"
 
 

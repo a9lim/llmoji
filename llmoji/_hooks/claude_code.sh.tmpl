@@ -110,62 +110,8 @@ USER_TEXT=$(jq -rs '
   | last // ""
 ' "$TRANSCRIPT" 2>/dev/null || printf '')
 
-# Kaomoji prefix: first non-empty line, strip leading whitespace,
-# drop everything from the first ASCII letter, trim trailing
-# whitespace. ≥2 bytes filters lone "→"/"!"/etc. Skip the journal
-# write entirely on prose-leading turns — null-kaomoji rows are
-# noise.
-FIRST_LINE=$(printf '%s' "$ASSISTANT_TEXT" | awk 'NF{print; exit}')
-KAOMOJI=$(printf '%s' "$FIRST_LINE" \
-  | sed -E 's/^[[:space:]]+//' \
-  | sed -E 's/[A-Za-z].*$//' \
-  | sed -E 's/[[:space:]]+$//')
-if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ]; then
-  exit 0
-fi
-# Match the project-wide KAOMOJI_START_CHARS set (see
-# llmoji.taxonomy). Filters out markdown bullets, list dashes,
-# ASCII headers, etc.
-case "$KAOMOJI" in
-  $KAOMOJI_START_CASE) ;;
-  *) exit 0 ;;
-esac
-# Reject markdown-escape artifacts. A literal `\` in the kaomoji
-# is always a model emitting `\*` (backslash-escape) inside what
-# looks like a kaomoji bracket. Mirrored in
-# llmoji.taxonomy.is_kaomoji_candidate.
-case "$KAOMOJI" in
-  *\\*) exit 0 ;;
-esac
-# Reject oversize spans: real kaomoji are ≤ ~30 chars. Without
-# this, balanced-paren prose accidentally captured by the
-# bracket-span scan could land in the journal. Mirrored in
-# llmoji.taxonomy._KAOMOJI_MAX_LEN.
-if [ "${#KAOMOJI}" -gt 32 ]; then
-  exit 0
-fi
+${KAOMOJI_VALIDATE}
 
-JOURNAL="$JOURNAL_PATH"
-mkdir -p "$(dirname "$JOURNAL")"
-
-jq -nc \
-  --arg ts             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg model          "$MODEL" \
-  --arg cwd            "$CWD" \
-  --arg kaomoji        "$KAOMOJI" \
-  --arg user_text      "$USER_TEXT" \
-  --arg assistant_text "$ASSISTANT_TEXT" \
-  '{
-    ts:             $ts,
-    model:          $model,
-    cwd:            $cwd,
-    kaomoji:        $kaomoji,
-    user_text:      $user_text,
-    assistant_text: ($assistant_text
-                     | sub("^\\s+"; "")
-                     | ltrimstr($kaomoji)
-                     | sub("^\\s+"; ""))
-  }' \
-  >> "$JOURNAL" 2>/dev/null || true
+${JOURNAL_WRITE}
 
 exit 0

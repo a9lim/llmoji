@@ -25,9 +25,10 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from . import paths
+from ._util import human_bytes
 from .haiku import cache_size
 from .providers import PROVIDERS, get_provider
 from .scrape import ScrapeRow
@@ -60,14 +61,6 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def _human_bytes(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024  # type: ignore[assignment]
-    return f"{n:.1f} TB"
-
-
 def _cmd_status(args: argparse.Namespace) -> int:
     home = paths.llmoji_home()
     print(f"llmoji home: {home}")
@@ -80,7 +73,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         kw = "installed" if s.installed else "not installed"
         rows = f"{s.journal_rows} rows" if s.journal_exists else "no journal"
         bytes_ = (
-            f", {_human_bytes(s.journal_bytes)}"
+            f", {human_bytes(s.journal_bytes)}"
             if s.journal_exists else ""
         )
         print(f"  {marker} {name:<14} {kw:<14} ({rows}{bytes_})")
@@ -89,18 +82,19 @@ def _cmd_status(args: argparse.Namespace) -> int:
             nudge_state = "registered" if s.nudge_installed else "missing"
             print(f"        nudge:   {s.nudge_hook_path} ({nudge_state})")
         print(f"        journal: {s.journal_path}")
-    n_rows, n_bytes = cache_size(paths.cache_per_instance_path())
+    cache_path = paths.cache_per_instance_path()
+    n_rows, n_bytes = cache_size(cache_path)
     print()
     print(
         f"per-instance Haiku cache: {n_rows} entries, "
-        f"{_human_bytes(n_bytes)} at {paths.cache_per_instance_path()}"
+        f"{human_bytes(n_bytes)} at {cache_path}"
     )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
         files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
         print(f"bundle ready at {bundle_dir} ({len(files)} files):")
         for f in files:
-            print(f"  - {f.name}  ({_human_bytes(f.stat().st_size)})")
+            print(f"  - {f.name}  ({human_bytes(f.stat().st_size)})")
     else:
         print("no bundle (run `llmoji analyze`).")
 
@@ -122,15 +116,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _cmd_parse(args: argparse.Namespace) -> int:
-    if args.provider != "claude.ai":
-        print(
-            f"unknown --provider {args.provider!r} for parse. "
-            f"v1.0 supports: claude.ai (extends as more static-dump "
-            f"formats land).",
-            file=sys.stderr,
-        )
-        return 2
+def _parse_claude_ai(args: argparse.Namespace) -> int:
     paths.ensure_home()
     out_path = paths.journals_dir() / "claude_ai_export.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +136,25 @@ def _cmd_parse(args: argparse.Namespace) -> int:
             n += 1
     print(f"wrote {n} rows to {out_path}.")
     return 0
+
+
+# Registry of static-dump parsers. Adding a new format = add an
+# entry. The CLI dispatches off ``--provider`` against this dict.
+_PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
+    "claude.ai": _parse_claude_ai,
+}
+
+
+def _cmd_parse(args: argparse.Namespace) -> int:
+    parser = _PARSERS.get(args.provider)
+    if parser is None:
+        print(
+            f"unknown --provider {args.provider!r} for parse. "
+            f"v1.0 supports: {sorted(_PARSERS)}.",
+            file=sys.stderr,
+        )
+        return 2
+    return parser(args)
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +274,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "parse",
         help="ingest a static export into the journal layer",
     )
-    sp.add_argument("--provider", required=True,
-                    help="dump format. v1.0: claude.ai")
+    sp.add_argument("--provider", required=True, choices=sorted(_PARSERS),
+                    help="dump format")
     sp.add_argument("paths", nargs="+", type=Path,
                     help="one or more directories containing the dump file(s)")
     sp.set_defaults(func=_cmd_parse)

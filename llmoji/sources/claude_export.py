@@ -46,16 +46,21 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
     }
     session_id = str(conv.get("uuid") or "")
     project_slug = str(conv.get("name") or "") or "(unnamed)"
-    turn = 0
+    # turn_index = 0-based position among assistant messages we
+    # actually consider (have non-empty text). Independent of whether
+    # the row passes the kaomoji filter — that way two consecutive
+    # filtered-out kaomoji-less assistant turns don't compress to the
+    # same index.
+    turn = -1
     for m in msgs:
         if m.get("sender") != "assistant":
             continue
         text = _message_text(m)
         if not text.strip():
             continue
+        turn += 1
         match = extract(text)
         if not (match.first_word and match.first_word[0] in KAOMOJI_START_CHARS):
-            turn += 1
             continue
         # Strip the leading kaomoji + surrounding whitespace from
         # ``assistant_text`` so the journal-row contract is uniform
@@ -68,14 +73,17 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
         body = text.lstrip()
         if body.startswith(match.first_word):
             body = body[len(match.first_word):].lstrip()
-        # Walk parent_message_uuid back ≤5 hops to the nearest
-        # human-authored message with non-empty text. Five hops is
-        # enough to skip a couple of intermediate tool turns without
-        # latching onto an arbitrarily distant ancestor.
+        # Walk parent_message_uuid back to the nearest human-authored
+        # message with non-empty text. Generous hop budget for
+        # symmetry with the Claude Code transcript backfill — a
+        # tool-heavy turn easily chains dozens of intermediate
+        # assistant↔tool-result pairs between the kaomoji-led text
+        # and the originating user prompt. The cap exists only to
+        # bound a pathological uuid cycle.
         user_text = ""
         parent_uuid = m.get("parent_message_uuid")
         cur = parent_uuid
-        for _ in range(5):
+        for _ in range(1000):
             if not cur:
                 break
             pm = by_uuid.get(cur)
@@ -103,7 +111,6 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             first_word=match.first_word,
             surrounding_user=user_text,
         )
-        turn += 1
 
 
 def _conv_content_score(conv: dict[str, Any]) -> int:

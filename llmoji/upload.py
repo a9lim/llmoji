@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
+from ._util import atomic_write_text, package_version
 
 DEFAULT_HF_REPO = "a9lim/llmoji"
 DEFAULT_EMAIL_TO = "mx@a9l.im"
@@ -57,33 +58,56 @@ BUNDLE_ALLOWLIST: tuple[str, ...] = (
 )
 
 
-def _bundle_files(bundle_dir: Path) -> list[Path]:
-    """Return the bundle's allowlisted files in deterministic order.
+class BundleAllowlistError(RuntimeError):
+    """Raised by ``tar_bundle`` / ``upload_hf`` when the bundle
+    directory holds files outside :data:`BUNDLE_ALLOWLIST`. Loud
+    failure is the correct response — silently dropping the extras
+    on the way out would leak whatever the user stashed there."""
 
-    Files outside the allowlist are skipped (and surfaced separately
-    via :func:`_unexpected_bundle_files` so the caller can refuse to
-    ship).
+
+def _classify_bundle(bundle_dir: Path) -> tuple[list[Path], list[Path]]:
+    """Single-pass walk. Returns ``(allowlisted_files, extras)``,
+    each sorted. Missing dir → both lists empty.
     """
     if not bundle_dir.exists():
-        return []
-    return sorted(
-        bundle_dir / name
-        for name in BUNDLE_ALLOWLIST
-        if (bundle_dir / name).is_file()
-    )
+        return [], []
+    allowed_set = set(BUNDLE_ALLOWLIST)
+    allowlisted: list[Path] = []
+    extras: list[Path] = []
+    for p in sorted(bundle_dir.iterdir()):
+        if not p.is_file():
+            continue
+        if p.name in allowed_set:
+            allowlisted.append(p)
+        else:
+            extras.append(p)
+    # Re-sort allowlisted by allowlist order so iteration is stable
+    # even if the OS returns the names in a different order than
+    # they appear in the v1.0 schema.
+    by_name = {p.name: p for p in allowlisted}
+    allowlisted = [by_name[n] for n in BUNDLE_ALLOWLIST if n in by_name]
+    return allowlisted, extras
 
 
-def _unexpected_bundle_files(bundle_dir: Path) -> list[Path]:
-    """Return any files in the bundle dir that are NOT on the
-    allowlist. Used to refuse `upload` when stale or user-added
-    content is present."""
-    if not bundle_dir.exists():
-        return []
-    allowed = set(BUNDLE_ALLOWLIST)
-    return sorted(
-        p for p in bundle_dir.iterdir()
-        if p.is_file() and p.name not in allowed
-    )
+def _check_or_raise(bundle_dir: Path, op: str) -> list[Path]:
+    """Common bundle-allowlist preflight. Returns the allowlisted
+    files; raises :class:`BundleAllowlistError` for extras and
+    :class:`FileNotFoundError` for an empty bundle."""
+    allowlisted, extras = _classify_bundle(bundle_dir)
+    if extras:
+        joined = ", ".join(p.name for p in extras)
+        raise BundleAllowlistError(
+            f"refusing to {op} {bundle_dir} — unexpected file(s) "
+            f"{joined!r} are not in the v1.0 bundle allowlist "
+            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
+            f"`llmoji analyze` (which clears the bundle dir)."
+        )
+    if not allowlisted:
+        raise FileNotFoundError(
+            f"no allowlisted files in {bundle_dir} — run "
+            f"`llmoji analyze` first"
+        )
+    return allowlisted
 
 
 def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
@@ -91,27 +115,14 @@ def tar_bundle(bundle_dir: Path, *, out_path: Path | None = None) -> Path:
 
     Strict allowlist: only ``manifest.json`` and
     ``descriptions.jsonl`` are included. If the bundle directory
-    holds any other files, raise — refusing to ship is the safe
-    default (the user can `rm` the extras and re-tar).
+    holds any other files, raise :class:`BundleAllowlistError` —
+    refusing to ship is the safe default (the user can `rm` the
+    extras and re-tar).
     """
     if out_path is None:
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         out_path = bundle_dir.parent / f"bundle-{ts}.tar.gz"
-    extras = _unexpected_bundle_files(bundle_dir)
-    if extras:
-        joined = ", ".join(p.name for p in extras)
-        raise FileExistsError(
-            f"refusing to tar {bundle_dir} — unexpected file(s) "
-            f"{joined!r} are not in the v1.0 bundle allowlist "
-            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
-            f"`llmoji analyze` (which clears the bundle dir)."
-        )
-    files = _bundle_files(bundle_dir)
-    if not files:
-        raise FileNotFoundError(
-            f"no allowlisted files in {bundle_dir} — run "
-            f"`llmoji analyze` first"
-        )
+    files = _check_or_raise(bundle_dir, "tar")
     with tarfile.open(out_path, "w:gz") as tar:
         for f in files:
             tar.add(f, arcname=f"bundle/{f.name}")
@@ -122,7 +133,7 @@ def _submission_token() -> str:
     """Per-machine random token, persisted at ``~/.llmoji/state.json``.
 
     Generated once on first ``upload``. Never sent anywhere — only
-    used as the salt in :func:`_submitter_id`.
+    used as the salt in :func:`submitter_id`.
     """
     state_path = paths.state_path()
     state: dict[str, Any] = {}
@@ -136,29 +147,29 @@ def _submission_token() -> str:
         # Atomic write — losing the token mid-write would invalidate
         # the user's submitter id and double-credit them in the
         # dataset's per-machine dedup.
-        from .providers.base import _atomic_write_text
-        _atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
+        atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
     return state["submission_token"]
 
 
-def _submitter_id() -> str:
+def submitter_id() -> str:
     """Salted-hash submitter identifier. 32 hex chars (128 bits),
     stable per (machine, llmoji version).
 
-    Length is 128 bits because the dataset README will pin
-    submission identity to this string and an attacker who knows
-    the per-machine token (server-side compromise) shouldn't be
-    able to grind a same-id submission. 64 bits would be fine for
-    pure dedup but isn't crypto-collision-resistant in the formal
-    sense.
+    Length is 128 bits because the dataset README pins submission
+    identity to this string and an attacker who knows the
+    per-machine token (server-side compromise) shouldn't be able to
+    grind a same-id submission. 64 bits would be fine for pure dedup
+    but isn't crypto-collision-resistant in the formal sense.
+
+    Public so the manifest write in :func:`llmoji.analyze.run_analyze`
+    can stamp the same id the HF upload path would use, keeping the
+    bundle the user inspects byte-identical to what ships.
     """
     import hashlib
-
-    from .providers.base import _package_version
     h = hashlib.sha256()
     h.update(_submission_token().encode("ascii"))
     h.update(b"\0")
-    h.update(_package_version().encode("ascii"))
+    h.update(package_version().encode("ascii"))
     return h.hexdigest()[:32]
 
 
@@ -193,23 +204,8 @@ def upload_hf(
     leak). ``upload_folder``'s ``allow_patterns`` is a second line
     of defense against the same class of bug.
     """
-    extras = _unexpected_bundle_files(bundle_dir)
-    if extras:
-        joined = ", ".join(p.name for p in extras)
-        raise FileExistsError(
-            f"refusing to upload {bundle_dir} — unexpected file(s) "
-            f"{joined!r} are not in the v1.0 bundle allowlist "
-            f"{BUNDLE_ALLOWLIST!r}. Remove them or re-run "
-            f"`llmoji analyze` (which clears the bundle dir)."
-        )
-    files = _bundle_files(bundle_dir)
-    if not files:
-        raise FileNotFoundError(
-            f"no allowlisted files in {bundle_dir} — run "
-            f"`llmoji analyze` first"
-        )
-
-    contributor = _submitter_id()
+    files = _check_or_raise(bundle_dir, "upload")
+    contributor = submitter_id()
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target_prefix = f"contributors/{contributor}/bundle-{ts}"
 
@@ -254,6 +250,7 @@ def upload_email(
     """Build a mailto URI and open it in the system mail client; the
     user attaches the tarball manually. We don't ship SMTP."""
     tarball = tar_bundle(bundle_dir)
+    files, _ = _classify_bundle(bundle_dir)
     print(f"target: email {to}")
     print(f"local tarball: {tarball} ({tarball.stat().st_size} bytes)")
     if confirm and not _confirm("open your mail client and attach this bundle?"):
@@ -265,7 +262,7 @@ def upload_email(
         f"Please find an llmoji bundle attached at:\n  {tarball}\n\n"
         "Bundle contents:\n"
     )
-    for f in _bundle_files(bundle_dir):
+    for f in files:
         body += f"  - {f.name} ({f.stat().st_size} bytes)\n"
     body += "\nPaste this email into your mail client and attach the tarball manually.\n"
 
