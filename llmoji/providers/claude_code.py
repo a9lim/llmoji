@@ -29,10 +29,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Provider
+from .base import JsonSettingsProvider
 
 
-class ClaudeCodeProvider(Provider):
+class ClaudeCodeProvider(JsonSettingsProvider):
     name = "claude_code"
     hooks_dir = Path.home() / ".claude" / "hooks"
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -50,12 +50,7 @@ class ClaudeCodeProvider(Provider):
         "Base directory for this skill:",
     ]
 
-    # Nudge: shared template with Codex (the UserPromptSubmit envelope
-    # is byte-identical between the two harnesses).
-    nudge_hook_template = "claude_codex_nudge.sh.tmpl"
-    nudge_hook_filename = "kaomoji-nudge.sh"
-    nudge_event = "UserPromptSubmit"
-    nudge_message = (
-        "Please begin your message with a kaomoji that best represents "
-        "how you feel."
-    )
+    # Nudge attrs (template / filename / event / message) inherited
+    # from JsonSettingsProvider — same wording + envelope shared with
+    # Codex (the UserPromptSubmit envelope is byte-identical between
+    # the two harnesses).

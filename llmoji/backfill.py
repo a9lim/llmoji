@@ -43,6 +43,22 @@ from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
 from .taxonomy import is_kaomoji_candidate
 
 
+def _flush_rows(rows: list[dict[str, Any]], journal: Path) -> int:
+    """Sort rows by ``ts`` and write them as JSONL to ``journal``.
+
+    Shared tail for every ``backfill_*`` function — three providers
+    converge on the same write contract (chronological order, JSONL,
+    truncate-on-write). Drift here is the failure mode this helper
+    exists to prevent.
+    """
+    rows.sort(key=lambda r: r["ts"])
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    with journal.open("w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
 def kaomoji_prefix(text: str) -> str:
     """Mirror the shell hook's awk + sed pipeline.
 
@@ -238,12 +254,7 @@ def backfill_claude_code(transcript_root: Path, journal: Path) -> int:
     paths = sorted(transcript_root.rglob("*.jsonl"))
     for path in paths:
         rows.extend(_replay_claude_transcript(path))
-    rows.sort(key=lambda r: r["ts"])
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    with journal.open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return len(rows)
+    return _flush_rows(rows, journal)
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +374,7 @@ def backfill_codex(rollouts_root: Path, journal: Path) -> int:
     paths = sorted(rollouts_root.rglob("rollout-*.jsonl"))
     for path in paths:
         rows.extend(_replay_codex_rollout(path))
-    rows.sort(key=lambda r: r["ts"])
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    with journal.open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return len(rows)
+    return _flush_rows(rows, journal)
 
 
 # ---------------------------------------------------------------------------
@@ -487,9 +493,4 @@ def backfill_hermes(sessions_root: Path, journal: Path) -> int:
     paths = sorted(sessions_root.glob("session_*.json"))
     for path in paths:
         rows.extend(_replay_hermes_session(path))
-    rows.sort(key=lambda r: r["ts"])
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    with journal.open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    return len(rows)
+    return _flush_rows(rows, journal)

@@ -31,7 +31,7 @@ from __future__ import annotations
 # resolves it dynamically via ``[tool.hatch.version] path =
 # "llmoji/__init__.py"`` (hatch parses the literal without executing
 # the module, so the eager re-exports below don't fire at build time).
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .haiku_prompts import (
     DESCRIBE_PROMPT_NO_USER,

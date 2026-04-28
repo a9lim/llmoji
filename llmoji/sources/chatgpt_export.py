@@ -129,11 +129,21 @@ def _format_timestamp(ct: Any) -> str:
     )
 
 
-def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
-    mapping = conv.get("mapping")
-    if not isinstance(mapping, dict):
-        return
-    chain = _walk_active_branch(mapping, conv.get("current_node"))
+def _iter_conversation_chain(
+    conv: dict[str, Any],
+    chain: list[dict[str, Any]],
+) -> Iterator[ScrapeRow]:
+    """Yield :class:`ScrapeRow` per kaomoji-led assistant message in
+    a pre-walked active branch.
+
+    Caller passes the active-branch chain directly so the
+    ``_walk_active_branch`` cost isn't paid twice (once for scoring,
+    once for iteration).
+
+    Tracks ``last_user_text`` in a single forward pass — replaces the
+    previous ``reversed(chain[:idx])`` per-assistant scan, which was
+    O(n²) over conversation length on long sessions.
+    """
     if not chain:
         return
     session_id = str(conv.get("id") or conv.get("conversation_id") or "")
@@ -143,8 +153,15 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
     # kaomoji filter, mirroring claude_export's semantics so a row
     # of two consecutive non-kaomoji turns doesn't compress.
     turn = -1
-    for idx, node in enumerate(chain):
-        if _node_role(node) != "assistant":
+    last_user_text = ""
+    for node in chain:
+        role = _node_role(node)
+        if role == "user":
+            pt = _message_text(node["message"]) if isinstance(node.get("message"), dict) else ""
+            if pt.strip():
+                last_user_text = pt
+            continue
+        if role != "assistant":
             continue
         msg = node["message"]
         text = _message_text(msg)
@@ -155,20 +172,6 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
         if stripped is None:
             continue
         first_word, body = stripped
-        # Walk backwards through the same chain for the most recent
-        # user-authored message with non-empty text. The active branch
-        # is already linear so a simple reverse iteration suffices —
-        # no parent-pointer hop budget needed (cf. claude_export, where
-        # tool-result chains can stretch dozens of nodes between an
-        # assistant text and its prompting user turn).
-        user_text = ""
-        for prev in reversed(chain[:idx]):
-            if _node_role(prev) != "user":
-                continue
-            pt = _message_text(prev["message"])
-            if pt.strip():
-                user_text = pt
-                break
         model = (msg.get("metadata") or {}).get("model_slug")
         yield ScrapeRow(
             source="chatgpt-export",
@@ -184,29 +187,35 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             had_thinking=False,
             assistant_text=body,
             first_word=first_word,
-            surrounding_user=user_text,
+            surrounding_user=last_user_text,
         )
 
 
-def _conv_content_score(conv: dict[str, Any]) -> int:
-    """Count assistant nodes in the active branch with non-empty text.
+def _conv_chain_and_score(
+    conv: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    """Return ``(chain, score)`` for one conversation in a single
+    branch walk.
 
-    Used to rank duplicate conversations across multiple exports.
-    Symmetric to ``_conv_content_score`` in :mod:`claude_export` —
-    different shape, same intent. Caller (:func:`iter_chatgpt_export`)
-    narrows ``conv`` to ``dict`` before invoking.
+    ``score`` counts assistant nodes in the active branch with
+    non-empty text — used by :func:`iter_chatgpt_export` to pick the
+    richest copy when a conversation id appears in more than one
+    export. Bundling the two return values lets the caller hand the
+    chain straight to :func:`_iter_conversation_chain` without
+    re-walking.
     """
     mapping = conv.get("mapping")
     if not isinstance(mapping, dict):
-        return 0
+        return [], 0
     chain = _walk_active_branch(mapping, conv.get("current_node"))
     score = 0
     for node in chain:
         if _node_role(node) != "assistant":
             continue
-        if _message_text(node["message"]).strip():
+        msg = node.get("message")
+        if isinstance(msg, dict) and _message_text(msg).strip():
             score += 1
-    return score
+    return chain, score
 
 
 def iter_chatgpt_export(
@@ -219,9 +228,10 @@ def iter_chatgpt_export(
     file (the canonical filename in OpenAI's export ZIP). When a
     conversation id appears in more than one export, the version with
     more non-empty assistant messages in its active branch wins —
-    same heuristic as the Claude.ai reader.
+    same heuristic as the Claude.ai reader. The branch walk happens
+    once per conversation: scoring + iteration share the same chain.
     """
-    best: dict[str, dict[str, Any]] = {}
+    best: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
     best_score: dict[str, int] = {}
     for export_dir in export_dirs:
         path = Path(export_dir) / "conversations.json"
@@ -237,10 +247,10 @@ def iter_chatgpt_export(
             cid = conv.get("id") or conv.get("conversation_id")
             if not isinstance(cid, str):
                 continue
-            score = _conv_content_score(conv)
+            chain, score = _conv_chain_and_score(conv)
             if score > best_score.get(cid, -1):
-                best[cid] = conv
+                best[cid] = (conv, chain)
                 best_score[cid] = score
 
-    for conv in best.values():
-        yield from _iter_conversation(conv)
+    for conv, chain in best.values():
+        yield from _iter_conversation_chain(conv, chain)

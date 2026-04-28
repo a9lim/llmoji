@@ -230,29 +230,47 @@ def _stage_b(
     descs_by_canon: dict[str, list[str]],
     *,
     print_progress: bool = True,
+    max_workers: int | None = None,
 ) -> tuple[dict[str, str], int]:
     """Per canonical kaomoji, pool descriptions, synthesize a single
     1-2-sentence meaning. Returns ``(synthesized_by_canonical,
     n_calls)``.
+
+    Synthesis calls dispatch on the same thread pool Stage A uses
+    (``max_workers`` or ``$LLMOJI_CONCURRENCY``, default 2). Each
+    face's synthesis is independent — no shared mutable state, no
+    cache to serialize, so the dispatch is pure parallelism win.
     """
-    out: dict[str, str] = {}
-    n_calls = 0
-    for canon in sorted(descs_by_canon):
-        descs = descs_by_canon[canon]
-        if not descs:
-            continue
+    pending: list[tuple[str, list[str]]] = [
+        (canon, descs_by_canon[canon])
+        for canon in sorted(descs_by_canon)
+        if descs_by_canon[canon]
+    ]
+    if not pending:
+        return {}, 0
+
+    workers = _resolve_concurrency(max_workers)
+
+    def _synth_one(canon: str, descs: list[str]) -> tuple[str, str, int, float]:
         t0 = time.monotonic()
         synth = synthesize_descriptions(
             client, descs,
             model_id=HAIKU_MODEL_ID,
             synth_prompt_template=SYNTHESIZE_PROMPT,
         )
-        out[canon] = synth
-        n_calls += 1
-        if print_progress:
-            _print_stage_progress(
-                "B", canon, len(descs), time.monotonic() - t0, synth,
-            )
+        dt = time.monotonic() - t0 if print_progress else 0.0
+        return canon, synth, len(descs), dt
+
+    out: dict[str, str] = {}
+    n_calls = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_synth_one, c, d) for c, d in pending]
+        for fut in as_completed(futures):
+            canon, synth, n_descs, dt = fut.result()
+            out[canon] = synth
+            n_calls += 1
+            if print_progress:
+                _print_stage_progress("B", canon, n_descs, dt, synth)
     return out, n_calls
 
 

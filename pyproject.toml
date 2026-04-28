@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "llmoji"
 dynamic = ["version"]
-description = "Provider-agnostic kaomoji journal collection, canonical Haiku synthesis, and privacy-preserving aggregate submission for cross-corpus emotional-state research on coding agents."
+description = "Making agents cuter"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
