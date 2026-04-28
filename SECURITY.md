@@ -20,8 +20,8 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 ### What stays on your machine
 
 - **Raw `user_text` or `assistant_text`** at `~/.<harness>/kaomoji-journal.jsonl`. These hold the raw data for every kaomoji-bearing turn. They never leave your machine.
-- **Per-instance synthesizer cache** at `~/.llmoji/cache/per_instance.jsonl`. Each row is a synthesizer-paraphrased description of one turn, keyed by content hash plus the synthesizer model id. The cache is never bundled and never shipped. `llmoji status` prints its size and entry count; `llmoji cache clear` is the explicit wipe.
-- **Submission token** at `~/.llmoji/state.json`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
+- **Per-instance synthesizer cache** at `~/.llmoji/cache/per_instance.jsonl`. Each row is a synthesizer-paraphrased description of one turn, keyed by content hash plus the synthesizer model id, backend, and (for `--backend local`) base URL. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe.
+- **Submission token** at `~/.llmoji/.salt`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
 
 ### What ships when you `upload`
 
