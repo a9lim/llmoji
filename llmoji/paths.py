@@ -54,8 +54,8 @@ def salt_path() -> Path:
     paid for nothing and a flat ``.salt`` is honest about what's
     on disk. The dotfile prefix keeps `ls ~/.llmoji` clean.
 
-    Provider install state is read live from each harness's own
-    settings file — this isn't an install registry.
+    HookInstaller install state is read live from each harness's
+    own settings file — this isn't an install registry.
     """
     return llmoji_home() / ".salt"
 

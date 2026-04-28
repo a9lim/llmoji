@@ -1,4 +1,12 @@
-"""Provider interface — base class + dataclasses + helpers."""
+"""HookInstaller interface — base class + dataclasses + helpers.
+
+The class is named after its job: writing one harness's bash hook
+script(s) and registering them in that harness's settings file.
+``providers/`` stays the directory name — concrete subclasses
+correspond to user-facing harness providers (claude_code, codex,
+hermes) — but the abstraction itself is hook-installation, not a
+generic "provider".
+"""
 
 from __future__ import annotations
 
@@ -16,7 +24,7 @@ from ..taxonomy import KAOMOJI_START_CHARS
 
 @dataclass
 class ProviderStatus:
-    """Result of :meth:`Provider.status` — a snapshot for the CLI.
+    """Result of :meth:`HookInstaller.status` — a snapshot for the CLI.
 
     ``nudge_hook_path`` is ``None`` for providers that don't ship a
     nudge hook; ``nudge_installed`` defaults False in that case so
@@ -83,8 +91,15 @@ def _read_partial(name: str) -> str:
     return importlib.resources.files("llmoji._hooks").joinpath(name).read_text()
 
 
-class Provider:
-    """Base class. Subclass for each first-class harness.
+class HookInstaller:
+    """Base class — one subclass per first-class harness.
+
+    Renamed from ``Provider`` in 1.1.x. The class's job is writing
+    bash hook script(s) and registering them in a harness's
+    settings file; the old name described who not what. The
+    ``providers/`` directory name is kept because concrete
+    subclasses do correspond to user-facing harness providers
+    (claude_code, codex, hermes).
 
     Subclasses fill in the small set of attrs that drive
     :meth:`render_hook` substitution, plus a ``main_event`` hint and
@@ -466,7 +481,7 @@ class Provider:
         return out
 
 
-class JsonSettingsProvider(Provider):
+class JsonSettingsHookInstaller(HookInstaller):
     """JSON-settings provider with the shared Claude Code/Codex nudge.
 
     Both Claude Code and Codex register hooks under a JSON settings

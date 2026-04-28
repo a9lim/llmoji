@@ -3,10 +3,10 @@
 Each ``*.sh.tmpl`` is a per-provider main hook, rendered at install
 time via ``string.Template`` substitution. The ``*.partial`` files
 are shared fragments inlined into every provider's main hook by
-:meth:`llmoji.providers.base.Provider.render_hook` so the kaomoji
-validator and the JSONL journal-writer live in one place.
+:meth:`llmoji.providers.base.HookInstaller.render_hook` so the
+kaomoji validator and the JSONL journal-writer live in one place.
 
-Substitutions performed by ``Provider.render_hook``:
+Substitutions performed by ``HookInstaller.render_hook``:
 
   ``$JOURNAL_PATH``           absolute path to the journal JSONL
   ``$KAOMOJI_VALIDATE``       expanded contents of

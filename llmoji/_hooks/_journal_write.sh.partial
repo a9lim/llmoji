@@ -1,5 +1,5 @@
 # Shared journal-write tail. Substituted into every provider's main
-# hook by ``Provider.render_hook``.
+# hook by ``HookInstaller.render_hook``.
 #
 # Inputs (all set by the per-provider header above):
 #   $ASSISTANT_TEXT  the assistant message body
