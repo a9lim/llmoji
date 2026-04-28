@@ -119,6 +119,16 @@ class HermesProvider(HookInstaller):
     _MARKER_BEGIN = "# >>> llmoji begin (managed) >>>"
     _MARKER_END = "# <<< llmoji end (managed) <<<"
 
+    # Empty-placeholder hooks lines that Hermes ships in its default
+    # config — ``hooks: {}`` and ``hooks: []`` — are functionally
+    # identical to having no ``hooks:`` key at all. We replace them in
+    # place with our managed stanza on install rather than refusing
+    # the way we would for a populated hooks block.
+    _EMPTY_HOOKS_RE = re.compile(
+        r"^hooks:[ \t]*(?:\{[ \t]*\}|\[[ \t]*\])[ \t]*$",
+        re.MULTILINE,
+    )
+
     # --- YAML stanza ---
 
     def _stanza(self) -> str:
@@ -146,11 +156,13 @@ class HermesProvider(HookInstaller):
         )
         if self._MARKER_BEGIN in existing:
             return  # idempotent
-        # Refuse to clobber an existing top-level `hooks:` key —
+        # Refuse to clobber a populated top-level `hooks:` key —
         # appending a fresh `hooks:` to a YAML file that already has
         # one yields a duplicate-key document; most YAML parsers
         # silently last-write-wins, which would discard the user's
-        # prior hook config.
+        # prior hook config. Empty placeholders (``hooks: {}`` /
+        # ``hooks: []``, the Hermes default) are handled below — we
+        # replace those in place rather than refusing.
         if self._has_unmanaged_hooks_top_level(existing):
             raise SettingsCorruptError(
                 self.settings_path,
@@ -158,6 +170,19 @@ class HermesProvider(HookInstaller):
                 "llmoji. Add the hermes hooks under that block by "
                 "hand, or move the file aside and re-run.",
             )
+        empty_match = self._EMPTY_HOOKS_RE.search(existing)
+        if empty_match is not None:
+            # Replace the empty placeholder line with our managed
+            # stanza in place. Avoids creating duplicate top-level
+            # ``hooks:`` keys (which YAML parsers resolve via silent
+            # last-write-wins, leaving the file ambiguous).
+            new_text = (
+                existing[: empty_match.start()]
+                + self._stanza().rstrip()
+                + existing[empty_match.end():]
+            )
+            atomic_write_text(self.settings_path, new_text)
+            return
         sep = "\n\n" if existing and not existing.endswith("\n") else "\n"
         atomic_write_text(self.settings_path, existing + sep + self._stanza())
 
@@ -189,15 +214,20 @@ class HermesProvider(HookInstaller):
 
     @classmethod
     def _has_unmanaged_hooks_top_level(cls, text: str) -> bool:
-        """Return True iff the YAML text contains a top-level
-        ``hooks:`` key not inside our managed marker block.
+        """Return True iff the YAML text contains a populated
+        top-level ``hooks:`` key not inside our managed marker block.
 
         Strategy: cut every ``BEGIN…END`` managed span out of the text
-        and search the remainder for a ``^hooks:`` line. Conservative
-        — matches lines that start with ``hooks:`` with no leading
-        whitespace, which is exactly the top-level YAML key shape
-        Hermes documents.
+        and search the remainder for ``^hooks:`` lines. Empty
+        placeholders (``hooks: {}`` / ``hooks: []``, the Hermes
+        default config shape) don't count — :meth:`_register`
+        replaces those in place. Conservative on the populated
+        case: any ``^hooks:`` line outside our marker block that
+        doesn't match :attr:`_EMPTY_HOOKS_RE` triggers refusal.
         """
         pattern = re.escape(cls._MARKER_BEGIN) + r".*?" + re.escape(cls._MARKER_END)
         unmanaged = re.sub(pattern, "", text, flags=re.DOTALL)
-        return bool(re.search(r"^hooks:", unmanaged, flags=re.MULTILINE))
+        for m in re.finditer(r"^hooks:.*$", unmanaged, flags=re.MULTILINE):
+            if not cls._EMPTY_HOOKS_RE.match(m.group(0)):
+                return True
+        return False

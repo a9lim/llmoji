@@ -643,3 +643,99 @@ def test_nudge_install_uninstall_roundtrip():
             s = p.status()
             assert not s.installed
             assert not s.nudge_installed
+
+
+def test_hermes_install_replaces_empty_hooks_placeholder():
+    """Hermes ships with ``hooks: {}`` (empty dict) as the default
+    config shape. Installing into that config replaces the empty
+    placeholder with our managed marker-fenced stanza in place,
+    rather than refusing the way it would for a populated
+    ``hooks:`` block.
+
+    Three placeholder shapes are recognized: ``hooks: {}``,
+    ``hooks: []``, and (future-proof) the same with internal
+    whitespace.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+
+    placeholders = [
+        "hooks: {}\n",
+        "hooks: []\n",
+        "hooks:    {}\n",      # extra spaces between key and value
+        "hooks:\t{}\n",        # tab separator
+    ]
+    for placeholder in placeholders:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            p = HermesProvider()
+            p.hooks_dir = td / "agent-hooks"
+            p.settings_path = td / "config.yaml"
+            p.journal_path = td / "kaomoji-journal.jsonl"
+
+            # Seed the config with a representative shape: some prose,
+            # the empty placeholder, more prose. Install must replace
+            # the placeholder in place and leave everything else alone.
+            p.settings_path.write_text(
+                "model:\n  default: foo\n"
+                + placeholder
+                + "hooks_auto_accept: false\n"
+            )
+            p.install()
+            text = p.settings_path.read_text()
+            # The empty-placeholder line is gone, replaced by our
+            # managed stanza. The neighboring prose is preserved.
+            assert "hooks: {}" not in text
+            assert "hooks: []" not in text
+            assert HermesProvider._MARKER_BEGIN in text
+            assert HermesProvider._MARKER_END in text
+            assert "hooks_auto_accept: false" in text
+            assert "model:\n  default: foo" in text
+
+            s = p.status()
+            assert s.installed
+            assert s.nudge_installed
+
+            # Round-trip: uninstall removes the managed stanza; the
+            # neighbor lines stay intact.
+            p.uninstall()
+            cleaned = p.settings_path.read_text()
+            assert HermesProvider._MARKER_BEGIN not in cleaned
+            assert "hooks_auto_accept: false" in cleaned
+            assert "model:\n  default: foo" in cleaned
+
+
+def test_hermes_install_refuses_populated_hooks():
+    """A non-empty existing ``hooks:`` block still triggers
+    SettingsCorruptError — the marker-fence string surgery can't
+    safely merge into an existing block without a YAML parser.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+    from llmoji.providers.base import SettingsCorruptError
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = HermesProvider()
+        p.hooks_dir = td / "agent-hooks"
+        p.settings_path = td / "config.yaml"
+        p.journal_path = td / "kaomoji-journal.jsonl"
+
+        p.settings_path.write_text(
+            "model:\n  default: foo\n"
+            "hooks:\n"
+            "  pre_llm_call:\n"
+            "    - command: /path/to/user/script.sh\n"
+        )
+        try:
+            p.install()
+        except SettingsCorruptError as exc:
+            assert "hooks:" in str(exc)
+        else:
+            raise AssertionError(
+                "populated hooks block didn't trigger SettingsCorruptError"
+            )
