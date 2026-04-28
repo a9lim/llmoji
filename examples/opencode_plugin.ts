@@ -38,7 +38,7 @@
 //      `chat.message` and read it back on each assistant
 //      `message.updated`.
 //
-// Compared to the openclaw_hook.ts example: that one ports the
+// Compared to the openclaw_plugin/ example: that one ports the
 // validator the same way, but assumes a stop-event payload it can
 // inspect directly. opencode doesn't fire one-shot stop events with
 // the assistant text inline — events are partial state updates and

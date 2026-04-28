@@ -8,11 +8,12 @@ HF target:
     bundle's loose files into a contributor-named, timestamped
     subfolder of a public dataset (``a9lim/llmoji`` by default). The
     final repo layout is
-    ``contributors/<hash>/bundle-<ts>/{manifest.json,descriptions.jsonl}``.
+    ``contributors/<hash>/bundle-<ts>/{manifest.json,<slug>.jsonl,...}``
+    — one ``<source-model-slug>.jsonl`` per model the journal saw.
     Loose files (rather than a tarball) so the HF dataset viewer can
-    auto-load ``descriptions.jsonl`` directly via a
-    ``data_files: contributors/**/descriptions.jsonl`` configs entry
-    on the dataset card. ``upload_folder`` does a single atomic
+    auto-load every per-source-model ``*.jsonl`` directly via a
+    ``data_files: contributors/**/*.jsonl`` configs entry on the
+    dataset card. ``upload_folder`` does a single atomic
     commit so partial uploads can't land. The submitter's identifier
     is a 32-hex-char salted hash of (a per-machine random token +
     the package version), persisted at ``~/.llmoji/state.json``. We

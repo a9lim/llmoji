@@ -474,8 +474,8 @@ def _write_bundle(
     # Reject sanitization collisions before we write — two distinct
     # source-model strings landing on the same slug (e.g. ``A/B``
     # and ``a__b`` both → ``a__b``) would silently overwrite each
-    # other's descriptions.jsonl. Loud failure beats a half-shipped
-    # bundle.
+    # other's per-source-model ``<slug>.jsonl``. Loud failure beats a
+    # half-shipped bundle.
     slug_owners: dict[str, list[str]] = defaultdict(list)
     for source_model in synthesized_by_cell:
         slug_owners[sanitize_model_id_for_path(source_model)].append(
@@ -571,7 +571,8 @@ def run_analyze(
         rows_list,
     )
     # counts_by_cell[source_model][canonical] = total rows in that cell
-    # (used for the ``count`` column in descriptions.jsonl).
+    # (used for the ``count`` column in each per-source-model
+    # ``<slug>.jsonl``).
     counts_by_cell: dict[str, dict[str, int]] = {
         sm: {canon: len(rs) for canon, rs in per_canon.items()}
         for sm, per_canon in buckets.items()
