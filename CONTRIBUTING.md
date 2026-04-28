@@ -39,9 +39,7 @@ A first-class provider is one bash hook template under `llmoji/_hooks/` plus one
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `_atomic_write_text`.
-
-If the harness has a hook that fires before each turn (Claude Code's `UserPromptSubmit`, Hermes' `pre_llm_call`, Codex's `UserPromptSubmit`), please wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_is_nudge_registered`. The nudge is what keeps the journal dense; without it the model drifts away from leading kaomoji over a session.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `_atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_is_nudge_registered`.
 
 Please include in the PR:
 
