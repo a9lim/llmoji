@@ -110,9 +110,9 @@ The synthesizer is one of three backends, chosen via `--backend`. The same synth
 ```
 ~/.llmoji/bundle/
   manifest.json
-  claude-sonnet-4-5-20250929.jsonl
-  claude-haiku-4-5-20251001.jsonl
-  gpt-5.4-mini-2026-03-17.jsonl
+  claude-sonnet-4-6.jsonl
+  claude-opus-4-7.jsonl
+  gpt-5.5.jsonl
 ```
 
 - **`manifest.json`**: package version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
