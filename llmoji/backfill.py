@@ -80,12 +80,13 @@ def strip_leading_kaomoji(text: str, kaomoji: str) -> str:
 
 
 def _collect_assistant_text(message: dict[str, Any]) -> str:
-    """Return the first text block of a Claude Code assistant message.
+    """Return the first text block of one Claude Code assistant entry.
 
-    Claude Code assistant turns can interleave ``text + tool_use +
-    text``; the kaomoji-prefixed response is always the FIRST text
-    block, and subsequent text is post-tool-call continuation —
-    irrelevant to kaomoji analysis. Matches the live hook.
+    Each Claude Code assistant entry persists one content block —
+    text, tool_use, or thinking — so "first text block" reduces to
+    "the entry's text" for typical traffic. Multi-text-block entries
+    are uncommon; if they happen, only the first text block is
+    considered (matches the live hook).
     """
     content = message.get("content")
     if isinstance(content, list):
@@ -160,39 +161,19 @@ def _resolve_user_text_claude(
     return ""
 
 
-def _is_real_user_event(ev: dict[str, Any]) -> bool:
-    """Real user event = content is a string OR a content-block array
-    that is NOT a tool_result delivery. Tool-result user events don't
-    start a new conversational turn — they're machine-generated
-    interleaving inside one.
-    """
-    if ev.get("type") != "user":
-        return False
-    m = ev.get("message")
-    if not isinstance(m, dict):
-        return False
-    c = m.get("content")
-    if isinstance(c, str):
-        return True
-    if isinstance(c, list):
-        return not any(
-            isinstance(b, dict) and b.get("type") == "tool_result"
-            for b in c
-        )
-    return False
-
-
 def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
-    """Walk a Claude Code transcript JSONL and emit at most one
-    journal row per turn.
+    """Walk a Claude Code transcript JSONL and emit one journal row
+    per kaomoji-led assistant text entry.
 
-    Mirrors the live hook's first-text-since-latest-user logic:
-    each real user prompt opens a turn, and within a turn the first
-    text-bearing non-sidechain assistant entry is taken as the
-    kaomoji-led reply. The naive "iterate every assistant entry"
-    pattern would emit one row per text block, which over-counts
-    turns where the model writes preamble + post-tool text in
-    separate entries.
+    Mirrors the live hook's per-entry walk: every text-bearing,
+    non-sidechain assistant entry whose first text block leads with
+    a valid kaomoji becomes its own row. A tool-heavy turn (text →
+    tool_use → text → tool_use → text) emits up to one row per text
+    block. Real user events delineate turns; each row's ``user_text``
+    resolves to the originating prompt of its turn via the parent-
+    Uuid walk, so all rows from one turn share the same
+    ``user_text`` (the parentUuid chain leads back through every
+    tool_result/assistant pair to the same originating user event).
     """
     try:
         raw = path.read_text(errors="replace")
@@ -209,13 +190,7 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
             continue
     by_uuid = {ev["uuid"]: ev for ev in events if isinstance(ev.get("uuid"), str)}
 
-    emitted_for_turn = False
     for ev in events:
-        if _is_real_user_event(ev):
-            # New turn boundary — reset the per-turn flag so the
-            # next text-bearing assistant entry can emit.
-            emitted_for_turn = False
-            continue
         if ev.get("type") != "assistant":
             continue
         # Skip sidechain (subagent) turns. Agent-to-agent dispatches
@@ -223,22 +198,14 @@ def _replay_claude_transcript(path: Path) -> Iterator[dict[str, Any]]:
         # otherwise contaminate user_text with subagent prompts.
         if ev.get("isSidechain"):
             continue
-        if emitted_for_turn:
-            continue
         m = ev.get("message", {})
         if not isinstance(m, dict):
             continue
         text = _collect_assistant_text(m)
         if not text.strip():
-            # Tool-use-only or thinking-only entries don't close out
-            # the turn's emission slot — keep scanning forward for
-            # the first real text in this turn.
+            # Tool-use-only / thinking-only entries have no text to
+            # validate — skip without affecting any other entry.
             continue
-        # First text-bearing entry of the turn — this is our shot.
-        # Whether or not the kaomoji filter passes, mark the slot
-        # consumed so a later text block in the same turn (e.g. a
-        # post-tool follow-up) doesn't double-emit.
-        emitted_for_turn = True
         prefix = kaomoji_prefix(text)
         if not prefix:
             continue
@@ -288,6 +255,19 @@ _CODEX_INJECTED_PREFIXES: tuple[str, ...] = tuple(
 
 
 def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
+    """Walk a Codex rollout JSONL and emit one journal row per
+    kaomoji-led ``event_msg.agent_message`` event.
+
+    Codex emits each model message as its own ``agent_message``
+    event (``payload.message`` carries the text); a tool-heavy turn
+    emits 5–10 of these. Pre-fix this only emitted on
+    ``task_complete.last_agent_message``, dropping every kaomoji-led
+    progress message. Per-turn invariants (``model``, ``cwd``,
+    ``user_text``) are tracked via ``turn_context`` and user
+    response_items as we walk; ``current_turn_id`` is the most
+    recent turn_context's id and applies to every subsequent
+    agent_message until the next turn_context.
+    """
     try:
         raw = path.read_text(errors="replace")
     except OSError:
@@ -318,12 +298,20 @@ def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
                     "cwd": str(p.get("cwd") or session_cwd),
                 }
 
-    # Walk in order; track latest user text; emit on task_complete.
-    # Codex puts the kaomoji on the LAST agent message (per turn,
-    # task_complete.last_agent_message). Progress messages go first.
+    # Walk events in order. Maintain rolling state for the current
+    # turn (turn_id, latest user_text); emit per agent_message.
+    # ``agent_message`` events don't carry turn_id themselves, so we
+    # use the last turn_context's id as a proxy — fine because
+    # rollouts are chronological and turn_context fires at turn
+    # start.
+    current_turn_id = ""
     latest_user = ""
     for ev in events:
         t = ev.get("type")
+        if t == "turn_context":
+            p = ev.get("payload") or {}
+            current_turn_id = str(p.get("turn_id") or "")
+            continue
         if t == "response_item":
             p = ev.get("payload") or {}
             if p.get("role") == "user":
@@ -337,26 +325,28 @@ def _replay_codex_rollout(path: Path) -> Iterator[dict[str, Any]]:
                     txt = "\n".join(s for s in parts if s)
                     if txt and not txt.startswith(_CODEX_INJECTED_PREFIXES):
                         latest_user = txt
-        elif t == "event_msg":
-            p = ev.get("payload") or {}
-            if p.get("type") != "task_complete":
-                continue
-            last_agent = str(p.get("last_agent_message") or "")
-            if not last_agent:
-                continue
-            prefix = kaomoji_prefix(last_agent)
-            if not prefix:
-                continue
-            ctx = turn_ctx.get(str(p.get("turn_id") or ""), {})
-            ts = ev.get("timestamp") or p.get("completed_at") or ""
-            yield {
-                "ts": str(ts),
-                "model": ctx.get("model", ""),
-                "cwd": ctx.get("cwd", session_cwd),
-                "kaomoji": prefix,
-                "user_text": latest_user,
-                "assistant_text": strip_leading_kaomoji(last_agent, prefix),
-            }
+            continue
+        if t != "event_msg":
+            continue
+        p = ev.get("payload") or {}
+        if p.get("type") != "agent_message":
+            continue
+        text = str(p.get("message") or "")
+        if not text:
+            continue
+        prefix = kaomoji_prefix(text)
+        if not prefix:
+            continue
+        ctx = turn_ctx.get(current_turn_id, {})
+        ts = ev.get("timestamp") or ""
+        yield {
+            "ts": str(ts),
+            "model": ctx.get("model", ""),
+            "cwd": ctx.get("cwd", session_cwd),
+            "kaomoji": prefix,
+            "user_text": latest_user,
+            "assistant_text": strip_leading_kaomoji(text, prefix),
+        }
 
 
 def backfill_codex(rollouts_root: Path, journal: Path) -> int:

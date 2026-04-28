@@ -4,45 +4,53 @@
 # llmoji/_hooks/codex.sh.tmpl. Edits will be lost.
 #
 # Codex Stop hook: read-only journal logger. NEVER blocks.
-# Appends one JSONL row per assistant turn to the configured
-# journal in the canonical 6-field schema:
+# Appends one JSONL row PER kaomoji-led agent_message in the current
+# turn. A tool-heavy turn easily writes 5–10 ``event_msg.agent_message``
+# events (each its own line in the rollout JSONL); any of them can
+# be kaomoji-led, and the journal captures every kaomoji-led one,
+# not just the final summary.
 #
+# Schema (canonical 6-field journal row):
 #   ts             ISO-8601 UTC  hook fire time
-#   model          str           active model slug
-#   cwd            str           working directory
-#   kaomoji        str           leading non-letter prefix of last
-#                                assistant message, ≥2 bytes; rows
-#                                without one are skipped (no write)
-#   user_text      str           latest real user turn from rollout
-#   assistant_text str           last assistant text MINUS the
-#                                leading kaomoji + surrounding
-#                                whitespace
+#   model          str           active model slug (Stop event)
+#   cwd            str           working directory (Stop event)
+#   kaomoji        str           leading non-letter prefix of an
+#                                agent_message, ≥2 bytes
+#   user_text      str           latest real user turn (per-turn,
+#                                resolved from the rollout)
+#   assistant_text str           agent_message MINUS the leading
+#                                kaomoji + surrounding whitespace
 #
 # Consumed by `llmoji analyze` via llmoji.sources.journal.
 set -u
 
 INPUT=$(cat)
 
-# Codex puts the kaomoji on the LAST agent message, not the first —
-# the final summary lands on .last_assistant_message after the
-# tool-calling loop completes. Per-message events fire repeatedly
-# during a turn; we read this one stop-event field directly.
-ASSISTANT_TEXT=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || printf '')
-[ -z "$ASSISTANT_TEXT" ] && exit 0
-
 MODEL=$(printf '%s' "$INPUT"   | jq -r '.model           // empty' 2>/dev/null || printf '')
 CWD=$(printf '%s' "$INPUT"     | jq -r '.cwd             // empty' 2>/dev/null || printf '')
 ROLLOUT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || printf '')
 
-# Latest real user turn. Codex injects AGENTS.md,
-# <environment_context>, and bare <INSTRUCTIONS> blocks as
-# user-role response_items at session start; the last user
-# response_item in the rollout is the actual prompt by the time
-# Stop fires. We still drop the synthetic prefixes defensively.
-USER_TEXT=""
-if [ -n "$ROLLOUT" ] && [ -f "$ROLLOUT" ]; then
-  USER_TEXT=$(jq -rs '
-    [ .[]
+[ -z "$ROLLOUT" ] && exit 0
+[ ! -f "$ROLLOUT" ] && exit 0
+
+# Find the start of the current turn — index of the latest
+# turn_context event in the rollout. ``turn_context`` fires once at
+# the start of every turn; the last one is for THIS turn (Stop fires
+# after the turn's task_complete). ``// 0`` falls back to the start
+# of the file if there's no turn_context (shouldn't happen in real
+# rollouts, but keeps the walk well-defined).
+START_IDX=$(jq -s '
+  [to_entries[] | select(.value.type == "turn_context") | .key] | last // 0
+' "$ROLLOUT" 2>/dev/null || printf '0')
+
+# Latest real user turn for THIS turn. Codex injects AGENTS.md /
+# <environment_context> / <INSTRUCTIONS> as user-role response_items
+# at session start (BEFORE turn_context); slicing from turn_context
+# already drops them, but the prefix filter remains as defense-in-
+# depth in case Codex changes the placement.
+USER_TEXT=$(jq -rs --argjson s "$START_IDX" '
+  .[$s:]
+  | [ .[]
       | select(.type == "response_item" and (.payload.role // "") == "user")
       | (.payload.content
          | if type == "array"
@@ -51,12 +59,27 @@ if [ -n "$ROLLOUT" ] && [ -f "$ROLLOUT" ]; then
       | select(. != "")
       | select($INJECTED_PREFIXES_FILTER)
     ]
-    | last // ""
-  ' "$ROLLOUT" 2>/dev/null || printf '')
-fi
+  | last // ""
+' "$ROLLOUT" 2>/dev/null || printf '')
 
-${KAOMOJI_VALIDATE}
-
-${JOURNAL_WRITE}
+# Walk every event_msg.agent_message in the current turn and emit
+# one journal row per kaomoji-led message. ``payload.message`` is
+# the assistant text; ``payload.phase`` is ``"commentary"`` for
+# progress messages and ``"final_answer"`` for the closing message,
+# but we don't filter on phase — every kaomoji-led message counts.
+#
+# The validate partial is rendered with ``SKIP_ACTION=continue`` so
+# a non-kaomoji message skips its row without aborting the walk.
+jq -cs --argjson s "$START_IDX" '
+  .[$s:]
+  | .[]
+  | select(.type == "event_msg" and (.payload.type // "") == "agent_message")
+  | (.payload.message // "")
+' "$ROLLOUT" 2>/dev/null | while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  ASSISTANT_TEXT=$(printf '%s' "$line" | jq -r '.')
+  ${KAOMOJI_VALIDATE}
+  ${JOURNAL_WRITE}
+done
 
 exit 0

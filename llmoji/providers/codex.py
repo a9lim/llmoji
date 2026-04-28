@@ -23,10 +23,14 @@ user_prompt_submit.rs``), so a single shared
 
 Per-provider quirks (vs claude_code / hermes):
 
-  - **Kaomoji on the LAST agent message of a turn.** Codex emits each
-    agent message as its own ``event_msg.agent_message`` event;
-    progress messages come first, the kaomoji-bearing summary lands
-    last as ``task_complete.last_agent_message``.
+  - **One row per kaomoji-led agent_message in the current turn.**
+    Codex emits each model message as its own
+    ``event_msg.agent_message`` event with the text on
+    ``payload.message``. A tool-heavy turn writes 5–10 of these
+    (``phase: "commentary"`` for progress messages, ``"final_answer"``
+    for the closing one); the journal captures every kaomoji-led
+    message, not just the final summary. ``last_agent_message`` on
+    the Stop payload is now ignored.
   - **No subagent concept** — sidechain filtering is unnecessary.
     ``collaboration_mode`` is ``"default"`` for every observed
     turn_context.
@@ -48,6 +52,11 @@ class CodexProvider(Provider):
     settings_path = Path.home() / ".codex" / "hooks.json"
     journal_path = Path.home() / ".codex" / "kaomoji-journal.jsonl"
     hook_template = "codex.sh.tmpl"
+    # Same per-entry-loop reasoning as ClaudeCodeProvider: the validate
+    # partial sits inside a ``while read``-loop iterating every
+    # event_msg.agent_message in the current turn, so ``continue`` is
+    # the right skip action.
+    skip_action = "continue"
     system_injected_prefixes = [
         "# AGENTS.md",
         "<environment_context>",

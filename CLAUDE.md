@@ -74,8 +74,10 @@ first-class harness. Each provider knows:
 - where the journal lives (`journal_path`)
 - which Stop-equivalent event the harness fires on (`main_event`)
 - how the bash hook should bail when the kaomoji filter rejects a
-  turn (`skip_action` — `exit 0` for claude_code/codex,
-  `echo '{}'; exit 0` for hermes's stdout-JSON contract)
+  message (`skip_action` — `continue` for claude_code/codex
+  because the validate partial sits inside a per-message
+  `while read` loop, `echo '{}'; exit 0` for hermes's stdout-JSON
+  single-shot contract)
 - which prefixes mark a system-injected user-role payload
   (`system_injected_prefixes`)
 - nudge attrs (template / filename / event / message) if the
@@ -291,7 +293,7 @@ llmoji/
     analyze.py             # the analyze pipeline (Stage A + B + bundle;
                            # clears bundle dir before writing). Stage A
                            # dispatches cache-miss Haiku calls on a
-                           # ThreadPoolExecutor (default 4 workers, env
+                           # ThreadPoolExecutor (default 2 workers, env
                            # $LLMOJI_CONCURRENCY); cache appends serialize
                            # on the main thread via as_completed.
                            # Manifest stamps haiku_model_id, submitter_id,
@@ -355,78 +357,62 @@ without the kaomoji). One-time re-call cost on the next analyze.
 If you find another copy of the set, delete it and route through
 `llmoji.taxonomy`.
 
-### Per-provider kaomoji position (current capture)
+### Per-provider kaomoji capture — one row per kaomoji-led message
 
-- **Claude Code**: kaomoji on the **first** text-bearing entry of
-  the current turn. Claude Code persists each assistant content
-  block — text, tool_use, thinking — as its OWN top-level entry in
-  the transcript JSONL; one turn produces many assistant entries.
-  The hook scopes to events at-or-after the latest real-user
-  message (string content OR text-block array, NOT tool_result),
-  picks the first text-bearing assistant entry, and reads its
-  first text block. Naive `last(assistant)` only catches turns
-  that finish on text and never resume.
-- **Codex**: kaomoji on the **last** agent message of a turn. Each
-  agent message is its own `event_msg.agent_message` event;
-  progress messages come first. The hook keys on
-  `task_complete.last_agent_message`, which Codex itself surfaces
-  on the Stop payload — no transcript walking, harness curates the
-  field.
+**Both Claude Code and Codex emit N rows per turn**, one per
+kaomoji-led model message. A tool-heavy turn easily writes 5–10
+kaomoji-led messages interleaved with tool calls; pre-fix the
+hooks emitted at most one row per turn, dropping every progress
+message. Post-fix the hooks walk the transcript / rollout and emit
+per-message.
+
+- **Claude Code**: each assistant content block (text, tool_use,
+  thinking) is its own top-level transcript JSONL entry; one turn
+  produces many entries. The Stop hook scopes to entries at-or-
+  after the latest real-user message (string content OR text-block
+  array, NOT tool_result) and walks every text-bearing non-side
+  chain entry in that window. Each entry's first text block runs
+  through the kaomoji validator; non-kaomoji entries skip their
+  row without aborting the rest of the walk. The `BOUNDARY_TS`
+  query slurps the transcript once; the per-entry walk is `jq -c`
+  streamed line-by-line into a `while read` loop with `SKIP_ACTION
+  =continue`.
+- **Codex**: each model message is its own `event_msg.agent_message`
+  event with `payload.message` carrying the text and `payload.phase`
+  flagging `"commentary"` (progress) vs `"final_answer"` (closing).
+  The Stop hook finds the latest `turn_context` index in the
+  rollout (current turn boundary), slices forward, and walks every
+  agent_message in the slice. `task_complete.last_agent_message`
+  is no longer read on either side. `user_text` resolves to the
+  latest non-injected user response_item in the same slice.
 - **Hermes**: **single** final-text field per turn
-  (`extra.assistant_response`). No first/last ambiguity, harness
-  curates.
+  (`extra.assistant_response`). The Hermes hook payload doesn't
+  expose the per-LLM-call message stream we'd need to walk, so the
+  multi-message fix doesn't apply on this side. If real-traffic
+  inspection reveals `post_llm_call` fires per LLM call (which
+  would mean the harness already gives us the right granularity),
+  no change. If it fires once at end-of-turn (one final message
+  per turn), the limitation is harness-side and we can't fix it
+  from a hook. Treat hermes per-canonical-face counts as docs-
+  confirmed-but-untested under the multi-emission contract until
+  real traffic verifies.
 
-⚠ **All three undercount on tool-heavy turns.** See the next
-section for the planned fix.
+Per-row invariants for the multi-emission case:
 
-### Multi-message-per-turn capture (planned fix, post-1.0)
-
-Both Codex and Claude Code emit MULTIPLE kaomoji-led messages per
-tool-heavy turn, but the current Stop hooks emit **at most one
-journal row per turn**. Real example pulled from one of a9's Codex
-rollouts — a single turn wrote ten `agent_message` events, each
-kaomoji-led with a distinct affect:
-
-```
-(｀・ω・´) plan
-(ง •̀_•́) attack
-(⌐■_■) scaffold
-(｡•̀ᴗ-)✧ research
-(＾▽＾) build
-( •̀ᴗ•́ ) first pass landed
-(；￣Д￣) build broke
-(｀・ω・´) fixed
-(╯°□°）╯ runtime error
-(⊙_⊙) bug confusion
-─── task_complete: last_agent_message = (｀・ω・´) shipped
-```
-
-Eleven kaomoji-bearing messages, **one row in the journal**. Same
-shape on Claude Code: text(kaomoji-led) → tool_use → text(more) →
-tool_use → text(more) within one turn captures only the first
-text block, not the post-tool continuations.
-
-The right capture is "one journal row per kaomoji-led message,"
-not "one row per turn." That means:
-
-- The Stop hook walks the rollout/transcript and emits N rows per
-  fire, one per kaomoji-led `agent_message` (Codex) or
-  kaomoji-led assistant text block (Claude Code). N can be 0.
-- `last_agent_message` / `last_assistant_message` become useless
-  for both — the walk is mandatory.
-- `user_text` resolution stays per-turn: every row from one turn
+- `user_text` is resolved once per turn — every row from one turn
   carries the same originating prompt.
-- `backfill_codex` / `backfill_claude_code` need the same change.
-- The cache key already hashes `(canonical, user_text,
-  assistant_text)` — different assistant texts within the same
-  turn produce different keys, so per-instance caching still
-  works without collisions.
-- One-time mandatory rebackfill after the fix lands (existing
-  journals are systematically thin).
-
-This sat as a known issue at audit time; the fix is staged for a
-follow-up session. Until it lands, treat per-canonical-face counts
-as a lower bound.
+- The cache key hashes `(canonical, user_text, assistant_text)` —
+  different assistant texts within the same turn produce different
+  keys, so per-instance caching works without collisions.
+- Backfills (`backfill_codex`, `backfill_claude_code`) implement
+  the same per-message walk and stay parity-tested against the
+  live hooks via `tests/test_pipeline_parity.py`. The
+  `_PARITY_FIELDS` contract holds row-for-row in chronological
+  order.
+- Existing journals from before the fix are systematically thin
+  (1 row per turn vs. N). On first analyze post-fix, prefer a
+  one-shot `backfill_*` rebuild over the live-hook journal so
+  per-canonical-face counts reflect real traffic.
 
 ### Nudge hooks — what gives the corpus its size
 
@@ -655,11 +641,19 @@ Two coupling points to keep in mind:
   non-bash hook formats; if a harness needs one, that's a post-v1.0
   first-class adapter, and the generic-JSONL-append contract is the
   v1.0 path until then.
-- Stage-A Haiku calls run on a small thread pool (default 4,
+- Stage-A Haiku calls run on a small thread pool (default 2,
   `$LLMOJI_CONCURRENCY` to override). The Anthropic httpx.Client is
   thread-safe; cache writes serialize on the main thread via
   `as_completed`, so no append interleaving. Set
   `$LLMOJI_CONCURRENCY=1` to force serial dispatch when debugging.
+  The default sits at 2 because the org-level Haiku rate limit is
+  50 req/min; 4 concurrent workers reliably trip it on a multi-
+  hundred-row backfill, and the SDK's `max_retries=8` exponential
+  backoff (set explicitly in `run_analyze`, vs the SDK's default
+  of 2) recovers but burns wallclock. Per-face sample cap
+  `INSTANCE_SAMPLE_CAP` is 4 — popular faces (>4 rows) get capped,
+  rare faces fully sampled. Same value as Eriskii's original
+  Claude-faces work, kept for cross-corpus comparability.
 - Public-API freeze: anything in §"v1.0 frozen public surface" gets
   a major-version bump if changed. Internal helpers (everything in
   `llmoji._util`, leading-underscore names in `llmoji.providers.base`,
