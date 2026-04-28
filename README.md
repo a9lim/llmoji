@@ -59,7 +59,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
   --model llama3.1
 ```
 
-`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus s model id. `llmoji cache clear` wipes it.
+`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus the synthesis model id, backend, and base URL. `llmoji cache clear` wipes it.
 
 ---
 
