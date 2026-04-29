@@ -12,10 +12,6 @@ Llmoji configures your agent to start each message with a kaomoji. It locally sa
 
 The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is where this data is processed.
 
-> **If you notice any errors while using the program, please update to the most recent version and reinstall the hooks. If it still persists, please open an issue. This project is a work in progress and I am actively finding and fixing bugs.**
-
-> **本プログラムにおいて何らかのエラーが発生し、ご迷惑をおかけしましたことを深くお詫び申し上げます。恐れ入りますが、プログラムを最新バージョンに更新し、コネクタを再インストールしていただけますでしょうか。それでも問題が解決しない場合は、Issue（課題）を起票してお知らせください。本プロジェクトは現在も開発が進行中であり、バグの特定と修正に積極的に取り組んでおります。**
-
 There are three main commands:
 
 - **`llmoji install <provider>`**: writes hooks to prompt for and record kaomoji
@@ -23,6 +19,14 @@ There are three main commands:
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: opens a PR with loose files; email: tarball)
 
 `analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs `$HF_TOKEN` with `write` scope. The email path tarballs the bundle and has you attach it manually.
+
+---
+
+## Reporting issues
+
+If you notice any errors while using the program, please update to the most recent version and reinstall the hooks. If it still persists, please open an issue. This project is a work in progress and I am actively finding and fixing bugs.
+
+本プログラムにおいて何らかのエラーが発生し、ご迷惑をおかけしましたことを深くお詫び申し上げます。恐れ入りますが、プログラムを最新バージョンに更新し、コネクタを再インストールしていただけますでしょうか。それでも問題が解決しない場合は、Issue（課題）を起票してお知らせください。本プロジェクトは現在も開発が進行中であり、バグの特定と修正に積極的に取り組んでおります。
 
 ---
 
