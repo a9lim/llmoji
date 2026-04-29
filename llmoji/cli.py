@@ -79,10 +79,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
             human_bytes(s.journal_bytes) if s.journal_exists else "no journal"
         )
         print(f"  {marker} {name:<14} {kw:<14} ({journal})")
-        print(f"        hook:    {s.hook_path}")
+        # Annotate per-piece state only on failure — the ✓ marker
+        # already implies both halves are good when set.
+        hook_suffix = "" if s.main_installed else "  (missing)"
+        print(f"        hook:    {s.hook_path}{hook_suffix}")
         if s.nudge_hook_path is not None:
-            nudge_state = "registered" if s.nudge_installed else "missing"
-            print(f"        nudge:   {s.nudge_hook_path} ({nudge_state})")
+            nudge_suffix = "" if s.nudge_installed else "  (missing)"
+            print(f"        nudge:   {s.nudge_hook_path}{nudge_suffix}")
         print(f"        journal: {s.journal_path}")
     cache_path = paths.cache_per_instance_path()
     n_bytes = cache_size(cache_path)
