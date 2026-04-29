@@ -174,8 +174,8 @@ llmoji analyze [--notes …]     scrape + canonicalize + synthesize
                                API; local uses Chat Completions
                                (Ollama / vLLM / llama.cpp HTTP)
 llmoji upload --target {hf,email} [--yes]   ship the bundle (HF: loose
-                                            files via single atomic
-                                            commit; email: tarball)
+                                            files via dataset PR;
+                                            email: tarball)
 llmoji cache clear             wipe ~/.llmoji/cache/
 ```
 
@@ -491,12 +491,26 @@ shape. The three together mean stale per-instance descriptions,
 user-added notes, hidden-state caches, leftover subfolders, etc.
 cannot accidentally leak through `upload`.
 
-### HF upload is loose files, not a tarball
+### HF upload is loose files via a PR, not a direct commit or tarball
 
 `upload --target hf` pushes `manifest.json` plus each
 `<source-model>.jsonl` as loose files at
-`contributors/<hash>/bundle-<ts>/` via `HfApi.upload_folder` (single
-atomic commit). The dataset card has a `configs:` YAML pointing at
+`contributors/<hash>/bundle-<ts>/` via
+`HfApi.upload_folder(..., create_pr=True)` (single atomic commit on
+the PR branch). PR-based because the dataset is owned by `a9lim`
+with no contributor-write team — a direct `upload_folder` 403s for
+anyone who isn't the owner. PRs let any authenticated HF user
+submit; the maintainer reviews the inline diff (allowlist +
+manifest visible) and merges.
+
+`upload_folder` with `create_pr=True` returns a `CommitInfo` whose
+`pr_url` attribute points at the PR; `upload_hf` surfaces that URL
+both in stdout and the returned result dict (`result["pr_url"]`)
+so a scripted caller can link to / track the submission. Older
+huggingface_hub versions returned a bare URL string from
+`upload_folder` — `upload_hf` defensively unwraps both shapes.
+
+The dataset card has a `configs:` YAML pointing at
 `contributors/**/*.jsonl`, which is what the auto-loader needs to
 surface the dataset viewer. The `**` is recursive (matches
 `bundle-<ts>/<model>.jsonl`); the `*.jsonl` suffix matches every
