@@ -26,6 +26,9 @@ from ..taxonomy import KAOMOJI_START_CHARS
 class ProviderStatus:
     """Result of :meth:`HookInstaller.status` — a snapshot for the CLI.
 
+    ``installed`` rolls up main + nudge; ``main_installed`` and
+    ``nudge_installed`` carry the per-piece state so the CLI can
+    point at which half is broken when ``installed`` is False.
     ``nudge_hook_path`` is ``None`` for providers that don't ship a
     nudge hook; ``nudge_installed`` defaults False in that case so
     downstream callers don't need to special-case absence.
@@ -33,8 +36,8 @@ class ProviderStatus:
 
     name: str
     installed: bool
+    main_installed: bool
     journal_exists: bool
-    journal_rows: int
     journal_bytes: int
     hook_path: Path
     settings_path: Path
@@ -265,21 +268,18 @@ class HookInstaller:
             nudge_installed = False
             installed = main_installed
         journal_exists = self.journal_path.exists()
-        # ``status()`` reports byte-size only — counting rows requires
-        # walking the whole file and ``analyze`` re-walks it via
-        # ``iter_journal`` immediately after, so the per-row scan
-        # here is wasted work on multi-hundred-MB journals. The
-        # ``journal_rows`` field stays on :class:`ProviderStatus` for
-        # backwards compat with callers that still read it; it just
-        # never increments past zero in this default impl.
+        # Byte-size only — counting rows would require walking the
+        # whole file and ``analyze`` re-walks it via ``iter_journal``
+        # immediately after, so the per-row scan here is wasted work
+        # on multi-hundred-MB journals.
         journal_bytes = (
             self.journal_path.stat().st_size if journal_exists else 0
         )
         return ProviderStatus(
             name=self.name,
             installed=installed,
+            main_installed=main_installed,
             journal_exists=journal_exists,
-            journal_rows=0,
             journal_bytes=journal_bytes,
             hook_path=self.hook_path,
             settings_path=self.settings_path,
