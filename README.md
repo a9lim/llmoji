@@ -16,9 +16,9 @@ There are three main commands:
 
 - **`llmoji install <provider>`**: writes hooks to prompt for and record kaomoji
 - **`llmoji analyze`**: scrape and aggregate your logs
-- **`llmoji upload --target {hf,email}`**: ship the bundle (HF: opens a dataset PR with loose files; email: tarball)
+- **`llmoji upload --target {hf,email}`**: ship the bundle (HF: opens a PR with loose files; email: tarball)
 
-`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs an `$HF_TOKEN` with `write` scope (the token authenticates the PR author; you do not need write access on the dataset itself). The email path tarballs the bundle and has you attach it manually.
+`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs `$HF_TOKEN` with `write` scope. The email path tarballs the bundle and has you attach it manually.
 
 ---
 
