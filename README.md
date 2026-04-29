@@ -12,6 +12,8 @@ Llmoji configures your agent to start each message with a kaomoji. It locally sa
 
 The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-study) is where this data is processed.
 
+> **If you're getting errors on the program, whether with installing or uploading, please pull the most recent update. This project is a work in progress and I am actively finding and fixing bugs.**
+
 There are three main commands:
 
 - **`llmoji install <provider>`**: writes hooks to prompt for and record kaomoji
