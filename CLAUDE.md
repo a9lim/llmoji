@@ -201,7 +201,14 @@ llmoji/
                                # release.yml (tag → PyPI → release)
   examples/                    # inspect_bundle.py (audit script);
                                # openclaw_plugin/ (definePluginEntry plugin);
-                               # opencode_plugin.ts (generic-JSONL example)
+                               # opencode_plugin.ts (generic-JSONL example);
+                               # _kaomoji_taxonomy.ts.partial (canonical
+                               # TS port of is_kaomoji_candidate / 
+                               # _leading_bracket_span / NUDGE — both
+                               # plugins inline this block between
+                               # BEGIN/END SHARED TAXONOMY markers,
+                               # asserted byte-identical by 
+                               # test_examples_taxonomy_partial_matches)
   llmoji/
     py.typed                   # PEP 561 marker
     __init__.py                # public surface re-exports

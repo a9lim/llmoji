@@ -707,6 +707,58 @@ def test_hermes_install_replaces_empty_hooks_placeholder():
             assert "model:\n  default: foo" in cleaned
 
 
+def test_examples_taxonomy_partial_matches():
+    """The two TS plugin examples (opencode_plugin.ts and
+    openclaw_plugin/index.ts) re-implement the kaomoji validator and
+    leading-bracket-span extractor in TypeScript because the taxonomy
+    is part of the v1.0 frozen public surface and TS-plugin hosts
+    can't import Python.
+
+    The shared block is canonical at
+    ``examples/_kaomoji_taxonomy.ts.partial``. Both plugin files must
+    include the partial verbatim between
+    ``// BEGIN SHARED TAXONOMY`` / ``// END SHARED TAXONOMY`` markers
+    so a change to KAOMOJI_START_CHARS / NUDGE / either function can't
+    silently land in only one of the two TS ports. The plugins
+    themselves are still self-contained — the partial is a
+    drift-prevention asset, not a runtime import.
+    """
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    partial = (
+        repo / "examples" / "_kaomoji_taxonomy.ts.partial"
+    ).read_text()
+
+    BEGIN = "// BEGIN SHARED TAXONOMY"
+    END = "// END SHARED TAXONOMY"
+
+    plugin_paths = (
+        repo / "examples" / "opencode_plugin.ts",
+        repo / "examples" / "openclaw_plugin" / "index.ts",
+    )
+    for path in plugin_paths:
+        text = path.read_text()
+        assert BEGIN in text, f"{path} missing BEGIN SHARED TAXONOMY marker"
+        assert END in text, f"{path} missing END SHARED TAXONOMY marker"
+        # Slice from the line after BEGIN's newline up to (but not
+        # including) the END marker line. The partial is pure content
+        # — no markers — so the comparison is exact on the body.
+        start_idx = text.index(BEGIN)
+        body_start = text.index("\n", start_idx) + 1
+        end_idx = text.index(END)
+        block = text[body_start:end_idx]
+        # Trim a single trailing newline on each side so we tolerate
+        # the conventional "block ends with a newline" shape without
+        # demanding it.
+        assert block.rstrip("\n") == partial.rstrip("\n"), (
+            f"{path} taxonomy block drifted from canonical "
+            f"examples/_kaomoji_taxonomy.ts.partial — re-paste the "
+            f"partial verbatim between the BEGIN/END SHARED TAXONOMY "
+            f"markers"
+        )
+
+
 def test_hermes_install_refuses_populated_hooks():
     """A non-empty existing ``hooks:`` block still triggers
     SettingsCorruptError — the marker-fence string surgery can't
