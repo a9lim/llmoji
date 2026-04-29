@@ -645,16 +645,44 @@ def test_nudge_install_uninstall_roundtrip():
             assert not s.nudge_installed
 
 
-def test_hermes_install_replaces_empty_hooks_placeholder():
-    """Hermes ships with ``hooks: {}`` (empty dict) as the default
-    config shape. Installing into that config replaces the empty
-    placeholder with our managed marker-fenced stanza in place,
-    rather than refusing the way it would for a populated
-    ``hooks:`` block.
+def test_hermes_install_into_empty_or_missing_file():
+    """Empty / missing ``~/.hermes/config.yaml`` is the simplest case:
+    install writes a minimal valid YAML doc with both hook entries
+    under ``hooks:``, status reports both registered, uninstall
+    removes the file (since hooks was the only top-level key)."""
+    from pathlib import Path
+    import tempfile
 
-    Three placeholder shapes are recognized: ``hooks: {}``,
-    ``hooks: []``, and (future-proof) the same with internal
-    whitespace.
+    from llmoji.providers import HermesProvider
+
+    for seed in (None, "", "\n\n  \n"):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            p = HermesProvider()
+            p.hooks_dir = td / "agent-hooks"
+            p.settings_path = td / "config.yaml"
+            p.journal_path = td / "kaomoji-journal.jsonl"
+            if seed is not None:
+                p.settings_path.write_text(seed)
+            p.install()
+            assert p.settings_path.exists()
+            text = p.settings_path.read_text()
+            assert "post_llm_call:" in text
+            assert "pre_llm_call:" in text
+            s = p.status()
+            assert s.installed
+            assert s.nudge_installed
+            p.uninstall()
+            # No surviving top-level keys → file is unlinked.
+            assert not p.settings_path.exists()
+
+
+def test_hermes_install_replaces_placeholder_hooks_shapes():
+    """The Hermes default config ships ``hooks: {}``; some users
+    write ``hooks: []`` or ``hooks: ~``. All three are functionally
+    equivalent to "no hooks configured" and get replaced with our
+    populated mapping in place. Neighboring prose + comments survive
+    the round-trip.
     """
     from pathlib import Path
     import tempfile
@@ -664,8 +692,8 @@ def test_hermes_install_replaces_empty_hooks_placeholder():
     placeholders = [
         "hooks: {}\n",
         "hooks: []\n",
-        "hooks:    {}\n",      # extra spaces between key and value
-        "hooks:\t{}\n",        # tab separator
+        "hooks: ~\n",
+        "hooks:\n",          # bare key → null value
     ]
     for placeholder in placeholders:
         with tempfile.TemporaryDirectory() as td:
@@ -674,44 +702,169 @@ def test_hermes_install_replaces_empty_hooks_placeholder():
             p.hooks_dir = td / "agent-hooks"
             p.settings_path = td / "config.yaml"
             p.journal_path = td / "kaomoji-journal.jsonl"
-
-            # Seed the config with a representative shape: some prose,
-            # the empty placeholder, more prose. Install must replace
-            # the placeholder in place and leave everything else alone.
             p.settings_path.write_text(
+                "# top comment\n"
                 "model:\n  default: foo\n"
                 + placeholder
                 + "hooks_auto_accept: false\n"
+                "# trailing comment\n"
             )
             p.install()
             text = p.settings_path.read_text()
-            # The empty-placeholder line is gone, replaced by our
-            # managed stanza. The neighboring prose is preserved.
+            # Placeholder is gone, our hooks present, neighbors intact.
             assert "hooks: {}" not in text
             assert "hooks: []" not in text
-            assert HermesProvider._MARKER_BEGIN in text
-            assert HermesProvider._MARKER_END in text
+            assert "post_llm_call:" in text
+            assert "pre_llm_call:" in text
             assert "hooks_auto_accept: false" in text
-            assert "model:\n  default: foo" in text
+            assert "default: foo" in text
+            assert "# top comment" in text
+            assert "# trailing comment" in text
 
             s = p.status()
             assert s.installed
             assert s.nudge_installed
 
-            # Round-trip: uninstall removes the managed stanza; the
-            # neighbor lines stay intact.
             p.uninstall()
             cleaned = p.settings_path.read_text()
-            assert HermesProvider._MARKER_BEGIN not in cleaned
+            assert "post_llm_call:" not in cleaned
+            assert "pre_llm_call:" not in cleaned
             assert "hooks_auto_accept: false" in cleaned
-            assert "model:\n  default: foo" in cleaned
+            assert "default: foo" in cleaned
+            assert "# top comment" in cleaned
+            assert "# trailing comment" in cleaned
 
 
-def test_hermes_install_refuses_populated_hooks():
-    """A non-empty existing ``hooks:`` block still triggers
-    SettingsCorruptError — the marker-fence string surgery can't
-    safely merge into an existing block without a YAML parser.
+def test_hermes_install_merges_into_populated_hooks_block():
+    """A populated ``hooks:`` block with the user's own pre_llm_call
+    and a third event we don't touch: install merges our entries
+    into the existing structure rather than refusing.
+
+    Specifically:
+      - our ``pre_llm_call`` command is appended to the existing list
+        (next to the user's command, not replacing it)
+      - our ``post_llm_call`` is added as a new key with our entry
+      - the user's unrelated ``tool_call`` block is preserved verbatim
+
+    Uninstall is the inverse: removes only our entries, leaves the
+    user's surrounding hooks intact.
     """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = HermesProvider()
+        p.hooks_dir = td / "agent-hooks"
+        p.settings_path = td / "config.yaml"
+        p.journal_path = td / "kaomoji-journal.jsonl"
+        p.settings_path.write_text(
+            "model:\n  default: foo\n"
+            "hooks:\n"
+            "  pre_llm_call:\n"
+            "    - command: /home/user/my_custom_hook.sh\n"
+            "  tool_call:\n"
+            "    - command: /home/user/tool_audit.sh\n"
+        )
+        p.install()
+        text = p.settings_path.read_text()
+        # User's commands preserved.
+        assert "/home/user/my_custom_hook.sh" in text
+        assert "/home/user/tool_audit.sh" in text
+        # Our commands now present.
+        assert str(p.hook_path) in text
+        assert p.nudge_hook_path is not None
+        assert str(p.nudge_hook_path) in text
+        # tool_call key still there.
+        assert "tool_call:" in text
+
+        s = p.status()
+        assert s.installed
+        assert s.nudge_installed
+
+        # Idempotent: re-running install is a no-op.
+        before = p.settings_path.read_text()
+        p.install()
+        after = p.settings_path.read_text()
+        assert before == after
+
+        p.uninstall()
+        cleaned = p.settings_path.read_text()
+        # User's entries survive.
+        assert "/home/user/my_custom_hook.sh" in cleaned
+        assert "/home/user/tool_audit.sh" in cleaned
+        # Ours are gone.
+        assert str(p.hook_path) not in cleaned
+        assert str(p.nudge_hook_path) not in cleaned
+        # And the user's tool_call key is preserved.
+        assert "tool_call:" in cleaned
+
+
+def test_hermes_install_preserves_in_block_comments():
+    """A hand-curated hooks block with comments around the user's
+    own entries: install merges our entries WITHOUT touching the
+    user's comments. This is the load-bearing reason hermes uses
+    surgical text edits instead of load-mutate-dump — ruamel's
+    serialization rewrap would silently shift comment positions
+    and (worse) corrupt double-quoted scalars at wrap boundaries.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = HermesProvider()
+        p.hooks_dir = td / "agent-hooks"
+        p.settings_path = td / "config.yaml"
+        p.journal_path = td / "kaomoji-journal.jsonl"
+        original = (
+            "model:\n  default: foo\n"
+            "# user-curated hooks below\n"
+            "hooks:\n"
+            "  # primary audit hook fires on every tool call\n"
+            "  tool_call:\n"
+            "    - command: /home/user/audit.sh  # inline note\n"
+            "  # extra inline comment between events\n"
+            "  pre_llm_call:\n"
+            "    - command: /home/user/nudge.sh\n"
+            "# post-block trailing comment\n"
+            "hooks_auto_accept: false\n"
+        )
+        p.settings_path.write_text(original)
+        p.install()
+        text = p.settings_path.read_text()
+
+        # Every user comment survives byte-for-byte.
+        for comment in (
+            "# user-curated hooks below",
+            "# primary audit hook fires on every tool call",
+            "# inline note",
+            "# extra inline comment between events",
+            "# post-block trailing comment",
+        ):
+            assert comment in text, f"lost comment: {comment}"
+        # User commands preserved.
+        assert "/home/user/audit.sh" in text
+        assert "/home/user/nudge.sh" in text
+        # Our commands present.
+        assert str(p.hook_path) in text
+        assert p.nudge_hook_path is not None
+        assert str(p.nudge_hook_path) in text
+
+        s = p.status()
+        assert s.installed
+        assert s.nudge_installed
+
+
+def test_hermes_install_refuses_corrupt_yaml():
+    """Unparseable YAML triggers SettingsCorruptError. The hook
+    files don't exist on disk at the point of refusal because
+    HookInstaller.install does the registration last; the test
+    confirms the file isn't mutated either."""
     from pathlib import Path
     import tempfile
 
@@ -724,18 +877,133 @@ def test_hermes_install_refuses_populated_hooks():
         p.hooks_dir = td / "agent-hooks"
         p.settings_path = td / "config.yaml"
         p.journal_path = td / "kaomoji-journal.jsonl"
-
-        p.settings_path.write_text(
-            "model:\n  default: foo\n"
-            "hooks:\n"
-            "  pre_llm_call:\n"
-            "    - command: /path/to/user/script.sh\n"
-        )
+        original = "key: [unclosed flow seq\n"
+        p.settings_path.write_text(original)
         try:
             p.install()
         except SettingsCorruptError as exc:
-            assert "hooks:" in str(exc)
+            assert "unparseable YAML" in str(exc)
         else:
-            raise AssertionError(
-                "populated hooks block didn't trigger SettingsCorruptError"
-            )
+            raise AssertionError("corrupt YAML didn't trigger SettingsCorruptError")
+        # File contents preserved on refusal.
+        assert p.settings_path.read_text() == original
+
+
+def test_hermes_install_refuses_non_mapping_top_level():
+    """A YAML doc whose top-level is a list / scalar isn't a config
+    we can edit. Refuse loudly, leave the file alone."""
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+    from llmoji.providers.base import SettingsCorruptError
+
+    seeds = [
+        "- a\n- b\n",          # top-level sequence
+        "just a string\n",     # top-level scalar
+    ]
+    for seed in seeds:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            p = HermesProvider()
+            p.hooks_dir = td / "agent-hooks"
+            p.settings_path = td / "config.yaml"
+            p.journal_path = td / "kaomoji-journal.jsonl"
+            p.settings_path.write_text(seed)
+            try:
+                p.install()
+            except SettingsCorruptError as exc:
+                assert "not a mapping" in str(exc)
+            else:
+                raise AssertionError(
+                    f"non-mapping top-level didn't refuse: {seed!r}"
+                )
+            assert p.settings_path.read_text() == seed
+
+
+def test_hermes_install_refuses_non_mapping_hooks_value():
+    """``hooks:`` set to a populated sequence or scalar (not the
+    placeholder ``[]`` / ``{}`` / null shapes, which we replace)
+    isn't safe to merge into — the contract is
+    ``hooks: {event: [...]}``, mapping at the top level. Refuse."""
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import HermesProvider
+    from llmoji.providers.base import SettingsCorruptError
+
+    seeds = [
+        # Populated sequence under hooks.
+        "hooks:\n  - some_string\n",
+        # Scalar.
+        "hooks: enabled\n",
+    ]
+    for seed in seeds:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            p = HermesProvider()
+            p.hooks_dir = td / "agent-hooks"
+            p.settings_path = td / "config.yaml"
+            p.journal_path = td / "kaomoji-journal.jsonl"
+            p.settings_path.write_text(seed)
+            try:
+                p.install()
+            except SettingsCorruptError as exc:
+                assert "hooks" in str(exc)
+            else:
+                raise AssertionError(f"non-mapping hooks didn't refuse: {seed!r}")
+            assert p.settings_path.read_text() == seed
+
+
+def test_examples_taxonomy_partial_matches():
+    """The two TS plugin examples (opencode_plugin.ts and
+    openclaw_plugin/index.ts) re-implement the kaomoji validator and
+    leading-bracket-span extractor in TypeScript because the taxonomy
+    is part of the v1.0 frozen public surface and TS-plugin hosts
+    can't import Python.
+
+    The shared block is canonical at
+    ``examples/_kaomoji_taxonomy.ts.partial``. Both plugin files must
+    include the partial verbatim between
+    ``// BEGIN SHARED TAXONOMY`` / ``// END SHARED TAXONOMY`` markers
+    so a change to KAOMOJI_START_CHARS / NUDGE / either function can't
+    silently land in only one of the two TS ports. The plugins
+    themselves are still self-contained — the partial is a
+    drift-prevention asset, not a runtime import.
+    """
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    partial = (
+        repo / "examples" / "_kaomoji_taxonomy.ts.partial"
+    ).read_text()
+
+    BEGIN = "// BEGIN SHARED TAXONOMY"
+    END = "// END SHARED TAXONOMY"
+
+    plugin_paths = (
+        repo / "examples" / "opencode_plugin.ts",
+        repo / "examples" / "openclaw_plugin" / "index.ts",
+    )
+    for path in plugin_paths:
+        text = path.read_text()
+        assert BEGIN in text, f"{path} missing BEGIN SHARED TAXONOMY marker"
+        assert END in text, f"{path} missing END SHARED TAXONOMY marker"
+        # Slice from the line after BEGIN's newline up to (but not
+        # including) the END marker line. The partial is pure content
+        # — no markers — so the comparison is exact on the body.
+        start_idx = text.index(BEGIN)
+        body_start = text.index("\n", start_idx) + 1
+        end_idx = text.index(END)
+        block = text[body_start:end_idx]
+        # Trim a single trailing newline on each side so we tolerate
+        # the conventional "block ends with a newline" shape without
+        # demanding it.
+        assert block.rstrip("\n") == partial.rstrip("\n"), (
+            f"{path} taxonomy block drifted from canonical "
+            f"examples/_kaomoji_taxonomy.ts.partial — re-paste the "
+            f"partial verbatim between the BEGIN/END SHARED TAXONOMY "
+            f"markers"
+        )
+
+
