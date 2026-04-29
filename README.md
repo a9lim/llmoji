@@ -77,7 +77,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is three packages: `anthropic`, `openai`, and `huggingface_hub`. Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependency footprint is four packages: `anthropic`, `openai`, `huggingface_hub`, and `ruamel.yaml` (parsing-only, used by the `hermes` provider for surgical edits to `~/.hermes/config.yaml`). Hooks run in `bash` and need `jq`.
 
 From source:
 
@@ -154,20 +154,22 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ### Hermes with custom hooks
 
-`llmoji install hermes` refuses to edit `~/.hermes/config.yaml` when there's an existing populated `hooks:` block. The empty default `hooks: {}` is fine, the installer replaces that in place. The reason for the refusal is that a sibling top-level `hooks:` key would yield a duplicate-key YAML document, and most parsers silently last-write-wins, which would discard one side or the other depending on the parser. Merging into an existing block safely needs a YAML parser dependency, and the package does not pull one in by design.
+`llmoji install hermes` merges its two entries into an existing populated `hooks:` block in `~/.hermes/config.yaml`. A hand-curated config with other event buckets (`tool_call:`, `subagent_stop:`, anything else) keeps every entry intact, including comments interleaved with the user's own entries. The merge is structural — each entry's `command:` field is the dedup key, so repeated installs are a no-op.
 
-The bash hook scripts at `~/.hermes/agent-hooks/post-llm-call.sh` and `~/.hermes/agent-hooks/pre-llm-call.sh` get written before the config edit fails, so after a refused install they're already on disk. Please add two entries under your existing `hooks:` block by hand:
+The implementation uses `ruamel.yaml` for parsing only, never for serialization. Edits apply as text splices on the original file at the line ranges ruamel's `lc.data` line/col marks pin down; the user's PyYAML-written wrap style, quoting, and surrounding comments stay byte-stable across install / uninstall. Earlier versions tried a load-mutate-dump approach via ruamel's `RoundTripDumper`; that path silently corrupted any double-quoted scalar PyYAML had wrapped at a non-whitespace boundary (kaomoji literals like `(◕‿◕)` inside personality prompts gained a single inserted space at the wrap point), and the parsing-only design is the fix.
 
-```yaml
-hooks:
-  pre_llm_call:
-    - command: "/Users/<you>/.hermes/agent-hooks/pre-llm-call.sh"
-  post_llm_call:
-    - command: "/Users/<you>/.hermes/agent-hooks/post-llm-call.sh"
-  # your existing hook entries stay below, untouched
-```
+Empty placeholder shapes (`hooks: {}` — the Hermes default — plus `hooks: []` and `hooks: ~`) are treated as "no hooks configured" and replaced with a populated block in place. The installer refuses (with a `SettingsCorruptError` calling out the shape) on:
 
-`llmoji uninstall hermes` will not remove these manually-added entries (the uninstall path only touches the marker-fenced managed block, which a manual install never creates). Please remove the two `command:` lines by hand if you want to fully back out. The hook script files themselves get unlinked by `uninstall` the normal way.
+- a top-level `hooks:` value that isn't a mapping (`hooks: enabled`, `hooks: [some_string]`)
+- a flow-style hooks block (`hooks: {pre_llm_call: [...]}`)
+- an event bucket that isn't a sequence
+- an event bucket that's empty (`pre_llm_call: []` — surgical edit isn't well-defined when there's no anchor item to copy list-indent from)
+
+Fix the file by hand and re-run.
+
+`llmoji uninstall hermes` removes only entries whose `command:` field equals one of ours. The user's entries under the same event keys, and any other event buckets, stay untouched. If our entries were the only contents of an event bucket the empty bucket is dropped; if our entries were the only contents of the entire `hooks:` block the `hooks:` key is dropped.
+
+Pre-1.2.x installs that used the old `# >>> llmoji begin (managed) >>>` / `# <<< llmoji end (managed) <<<` marker comments are handled transparently: the new install parses the structure inside the markers as a populated `hooks:` block and is idempotent against it. After a subsequent uninstall the marker comment lines themselves remain at column 0 (they're inert YAML comments outside our managed surface) and can be deleted by hand.
 
 ---
 
