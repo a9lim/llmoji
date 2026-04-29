@@ -77,7 +77,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is three packages: `anthropic`, `openai`, and `huggingface_hub`. Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependency footprint is four packages: `anthropic`, `openai`, `huggingface_hub`, and `ruamel.yaml`. Hooks run in `bash` and need `jq`.
 
 From source:
 
@@ -151,23 +151,6 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 | `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
 
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
-
-### Hermes with custom hooks
-
-`llmoji install hermes` refuses to edit `~/.hermes/config.yaml` when there's an existing populated `hooks:` block. The empty default `hooks: {}` is fine, the installer replaces that in place. The reason for the refusal is that a sibling top-level `hooks:` key would yield a duplicate-key YAML document, and most parsers silently last-write-wins, which would discard one side or the other depending on the parser. Merging into an existing block safely needs a YAML parser dependency, and the package does not pull one in by design.
-
-The bash hook scripts at `~/.hermes/agent-hooks/post-llm-call.sh` and `~/.hermes/agent-hooks/pre-llm-call.sh` get written before the config edit fails, so after a refused install they're already on disk. Please add two entries under your existing `hooks:` block by hand:
-
-```yaml
-hooks:
-  pre_llm_call:
-    - command: "/Users/<you>/.hermes/agent-hooks/pre-llm-call.sh"
-  post_llm_call:
-    - command: "/Users/<you>/.hermes/agent-hooks/post-llm-call.sh"
-  # your existing hook entries stay below, untouched
-```
-
-`llmoji uninstall hermes` will not remove these manually-added entries (the uninstall path only touches the marker-fenced managed block, which a manual install never creates). Please remove the two `command:` lines by hand if you want to fully back out. The hook script files themselves get unlinked by `uninstall` the normal way.
 
 ---
 

@@ -57,6 +57,14 @@ dependencies = [
     # Already a transitive dep via huggingface_hub and openai, listed
     # explicitly so the surface stays honest if either upstream drops it.
     "tqdm>=4.65",
+    # ruamel.yaml drives the hermes provider's settings-file merge in
+    # :mod:`llmoji.providers.hermes`: ``~/.hermes/config.yaml`` lands
+    # in arbitrary user shapes (empty placeholder, populated `hooks:`
+    # block, custom hand-curated config), and merging our two entries
+    # without clobbering the user's surrounding YAML needs a real
+    # round-trip parser. PyYAML alone loses comments and key order on
+    # dump; ruamel's rt mode preserves both. ~118 KB wheel.
+    "ruamel.yaml>=0.18",
 ]
 
 [project.optional-dependencies]
