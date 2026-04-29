@@ -77,7 +77,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is four packages: `anthropic`, `openai`, `huggingface_hub`, and `ruamel.yaml` (parsing-only, used by the `hermes` provider for surgical edits to `~/.hermes/config.yaml`). Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependency footprint is four packages: `anthropic`, `openai`, `huggingface_hub`, and `ruamel.yaml`. Hooks run in `bash` and need `jq`.
 
 From source:
 
@@ -151,25 +151,6 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 | `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
 
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
-
-### Hermes with custom hooks
-
-`llmoji install hermes` merges its two entries into an existing populated `hooks:` block in `~/.hermes/config.yaml`. A hand-curated config with other event buckets (`tool_call:`, `subagent_stop:`, anything else) keeps every entry intact, including comments interleaved with the user's own entries. The merge is structural — each entry's `command:` field is the dedup key, so repeated installs are a no-op.
-
-The implementation uses `ruamel.yaml` for parsing only, never for serialization. Edits apply as text splices on the original file at the line ranges ruamel's `lc.data` line/col marks pin down; the user's PyYAML-written wrap style, quoting, and surrounding comments stay byte-stable across install / uninstall. Earlier versions tried a load-mutate-dump approach via ruamel's `RoundTripDumper`; that path silently corrupted any double-quoted scalar PyYAML had wrapped at a non-whitespace boundary (kaomoji literals like `(◕‿◕)` inside personality prompts gained a single inserted space at the wrap point), and the parsing-only design is the fix.
-
-Empty placeholder shapes (`hooks: {}` — the Hermes default — plus `hooks: []` and `hooks: ~`) are treated as "no hooks configured" and replaced with a populated block in place. The installer refuses (with a `SettingsCorruptError` calling out the shape) on:
-
-- a top-level `hooks:` value that isn't a mapping (`hooks: enabled`, `hooks: [some_string]`)
-- a flow-style hooks block (`hooks: {pre_llm_call: [...]}`)
-- an event bucket that isn't a sequence
-- an event bucket that's empty (`pre_llm_call: []` — surgical edit isn't well-defined when there's no anchor item to copy list-indent from)
-
-Fix the file by hand and re-run.
-
-`llmoji uninstall hermes` removes only entries whose `command:` field equals one of ours. The user's entries under the same event keys, and any other event buckets, stay untouched. If our entries were the only contents of an event bucket the empty bucket is dropped; if our entries were the only contents of the entire `hooks:` block the `hooks:` key is dropped.
-
-Pre-1.2.x installs that used the old `# >>> llmoji begin (managed) >>>` / `# <<< llmoji end (managed) <<<` marker comments are handled transparently: the new install parses the structure inside the markers as a populated `hooks:` block and is idempotent against it. After a subsequent uninstall the marker comment lines themselves remain at column 0 (they're inert YAML comments outside our managed surface) and can be deleted by hand.
 
 ---
 
