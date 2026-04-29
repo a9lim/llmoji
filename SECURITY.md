@@ -55,12 +55,12 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 - **`--backend openai`**: calls the OpenAI Responses API with your `$OPENAI_API_KEY`. Your journal text goes to OpenAI for paraphrasing.
 - **`--backend local`**: calls a local OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp's HTTP server, etc.) at the `--base-url` you pass. Your journal text stays on whatever machine the endpoint runs on; nothing is sent to a third party.
 
-`llmoji upload --target hf` uses your `$HF_TOKEN` to commit the bundle's loose files (one manifest, plus one `<source-model>.jsonl` per source model) to the central dataset in a single atomic commit. The token is not stored or echoed by llmoji; it's read by `huggingface_hub` from your standard HF credential cache.
+`llmoji upload --target hf` uses your `$HF_TOKEN` (with `write` scope) to open a dataset PR containing the bundle under `contributors/<your-submitter-id>/bundle-<ts>/`. The diff is visible at the PR URL printed by `upload`. Your token authenticates the PR and is not stored by llmoji.
 
 `llmoji upload --target email` builds a `mailto:` URI with the bundle path printed in the body and asks you to attach the tarball manually.
 
 ## Receiving end
 
-The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` lands in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`) and becomes publicly downloadable. Please review every `~/.llmoji/bundle/<source-model>.jsonl` before uploading.
+The HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is public. Anything you ship through `llmoji upload --target hf` becomes publicly visible on the PR immediately, and once merged, appears in a subfolder (`contributors/<your-submitter-id>/bundle-<ts>/`) and becomes publicly downloadable. Please review every `~/.llmoji/bundle/<source-model>.jsonl` before uploading.
 
 If you upload a bundle and later want it removed from the dataset, please email mx@a9l.im with your submitter id and I'll take down the matching folders.
