@@ -4,23 +4,30 @@ Both targets are opt-in and require explicit ``--target`` selection;
 no implicit default.
 
 HF target:
-    Uses ``huggingface_hub.HfApi.upload_folder`` to commit the
-    bundle's loose files into a contributor-named, timestamped
-    subfolder of a public dataset (``a9lim/llmoji`` by default). The
-    final repo layout is
+    Uses ``huggingface_hub.HfApi.upload_folder`` with
+    ``create_pr=True`` to open a dataset PR containing the bundle's
+    loose files in a contributor-named, timestamped subfolder of a
+    public dataset (``a9lim/llmoji`` by default). The final repo
+    layout (once the PR is merged) is
     ``contributors/<hash>/bundle-<ts>/{manifest.json,<slug>.jsonl,...}``
     — one ``<source-model-slug>.jsonl`` per model the journal saw.
-    Loose files (rather than a tarball) so the HF dataset viewer can
-    auto-load every per-source-model ``*.jsonl`` directly via a
-    ``data_files: contributors/**/*.jsonl`` configs entry on the
-    dataset card. ``upload_folder`` does a single atomic
-    commit so partial uploads can't land. The submitter's identifier
-    is a 32-hex-char salted hash of (a per-machine random token +
-    the package version), persisted at ``~/.llmoji/.salt`` (a flat
-    64-hex-char file; pre-1.1.x had it wrapped in a JSON envelope at
-    ``state.json``). We do NOT collect HF usernames or any
-    account-bound identifier; the salted hash is just enough to
-    dedup repeat submissions from the same machine.
+    PR-based instead of direct commit because the dataset is
+    owned by ``a9lim`` and there is no contributor-write team:
+    direct ``upload_folder`` calls from non-owners 403 at the Hub.
+    PRs let any authenticated HF user submit; the maintainer
+    reviews the diff (the allowlist + manifest are visible inline)
+    and merges. Loose files (rather than a tarball) so the HF
+    dataset viewer can auto-load every per-source-model ``*.jsonl``
+    directly via a ``data_files: contributors/**/*.jsonl`` configs
+    entry on the dataset card. ``upload_folder`` does a single
+    atomic commit (on the PR branch) so partial uploads can't land.
+    The submitter's identifier is a 32-hex-char salted hash of (a
+    per-machine random token + the package version), persisted at
+    ``~/.llmoji/.salt`` (a flat 64-hex-char file; pre-1.1.x had it
+    wrapped in a JSON envelope at ``state.json``). We do NOT
+    collect HF usernames or any account-bound identifier; the
+    salted hash is just enough to dedup repeat submissions from the
+    same machine.
 
 Email target:
     Build a ``mailto:`` URI with the bundle path printed in the
@@ -231,9 +238,10 @@ def upload_hf(
     repo: str = DEFAULT_HF_REPO,
     confirm: bool = True,
 ) -> dict[str, Any]:
-    """Upload the bundle's loose files under
+    """Open a dataset PR containing the bundle's loose files under
     ``contributors/<hash>/bundle-<ts>/`` in the chosen HF dataset
-    repo. Returns the submission metadata dict.
+    repo. Returns the submission metadata dict (including
+    ``pr_url`` so the user can link to it / track merge status).
 
     Pre-flight: refuse to upload if anything outside the flat
     allowlist (top-level ``manifest.json`` plus per-source-model
@@ -242,33 +250,50 @@ def upload_hf(
     ``upload_folder``'s ``allow_patterns`` is a second line of
     defense against the same class of bug.
 
+    PR-based (``create_pr=True``) rather than direct commit: the
+    dataset is owned by ``a9lim`` and has no contributor-write team,
+    so a direct ``upload_folder`` 403s for anyone who isn't the
+    owner. PRs let any authenticated HF user submit; the maintainer
+    reviews the diff (the allowlist + manifest land inline) and
+    merges. The submitter's HF token still needs `write` scope —
+    that's what authenticates the PR author — but the user does NOT
+    need write access on the target repo.
+
     The dataset card's ``data_files: contributors/**/*.jsonl`` glob
     surfaces every per-source-model data file across contributors
-    into the dataset viewer's single train split.
+    into the dataset viewer's single train split (after the PR
+    merges).
     """
     files = _check_or_raise(bundle_dir, "upload")
     contributor = submitter_id()
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target_prefix = f"contributors/{contributor}/bundle-{ts}"
 
-    print(f"target: HF dataset {repo} → {target_prefix}/")
+    print(f"target: HF dataset {repo} → {target_prefix}/ (as PR)")
     for f in files:
         print(
             f"  {f.relative_to(bundle_dir).as_posix()} "
             f"({f.stat().st_size} bytes)"
         )
-    if confirm and not _confirm("submit this bundle?"):
+    if confirm and not _confirm("open a PR with this bundle?"):
         print("aborted.")
         return {"submitted": False}
 
     from huggingface_hub import HfApi
     api = HfApi()
-    api.upload_folder(
+    commit_info = api.upload_folder(
         folder_path=str(bundle_dir),
         path_in_repo=target_prefix,
         repo_id=repo,
         repo_type="dataset",
         commit_message=f"llmoji bundle from {contributor}",
+        commit_description=(
+            f"Submitted by contributor `{contributor}` via "
+            f"`llmoji upload --target hf` (llmoji "
+            f"{package_version()}). Bundle path in repo: "
+            f"`{target_prefix}/`."
+        ),
+        create_pr=True,
         # Top-level manifest + every per-source-model
         # ``<slug>.jsonl`` at the bundle root. The structural
         # allowlist check above is the primary defense; this is
@@ -278,13 +303,28 @@ def upload_hf(
             f"*{BUNDLE_DATA_SUFFIX}",
         ],
     )
-    print(f"submitted to {repo} as {target_prefix}/.")
+    # ``upload_folder`` returns a ``CommitInfo``; with
+    # ``create_pr=True`` the ``pr_url`` attribute is set. Older
+    # huggingface_hub releases returned a bare URL string from
+    # ``upload_folder`` — defensively fall through to ``str()`` if
+    # the structured attrs aren't available.
+    pr_url = getattr(commit_info, "pr_url", None)
+    if pr_url is None and not isinstance(commit_info, str):
+        pr_url = getattr(commit_info, "commit_url", None)
+    if pr_url is None:
+        pr_url = str(commit_info)
+    print(f"submitted to {repo} as {target_prefix}/ — PR: {pr_url}")
+    print(
+        "the maintainer will review and merge; nothing lands on the "
+        "main branch until then."
+    )
     return {
         "submitted": True,
         "repo": repo,
         "path_in_repo": target_prefix,
         "contributor": contributor,
         "files": [f.relative_to(bundle_dir).as_posix() for f in files],
+        "pr_url": pr_url,
     }
 
 
