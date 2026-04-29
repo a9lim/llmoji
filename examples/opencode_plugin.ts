@@ -47,9 +47,14 @@
 //
 // This is a faithful port of llmoji.taxonomy's `is_kaomoji_candidate`
 // validator and `_leading_bracket_span` extractor as of llmoji v1.0.
-// The Python module is canonical; if its rules change in v2.0 (the
-// taxonomy is part of the v1.0 frozen public surface, so a change
-// implies a major version bump) this file needs an update to match.
+// The shared block lives at examples/_kaomoji_taxonomy.ts.partial and
+// is asserted byte-identical between this plugin and the openclaw
+// example by tests/test_public_surface.py — re-paste from the partial
+// rather than hand-editing the BEGIN/END SHARED TAXONOMY block. The
+// Python module is the upstream source of truth; if its rules change
+// in v2.0 (the taxonomy is part of the v1.0 frozen public surface, so
+// a change implies a major version bump) the partial and both plugins
+// need an update to match.
 
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { AssistantMessage, Part, TextPart } from "@opencode-ai/sdk";
@@ -57,6 +62,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// BEGIN SHARED TAXONOMY — keep in sync with examples/_kaomoji_taxonomy.ts.partial
 // Mirror of llmoji.taxonomy.KAOMOJI_START_CHARS — the literal Python
 // frozenset, character for character. These are Unicode glyphs, not
 // ASCII. Keep in sync with taxonomy.py.
@@ -142,6 +148,7 @@ function leadingBracketSpan(text: string): string {
 
 const NUDGE =
   "Please begin your message with a kaomoji that best represents how you feel.";
+// END SHARED TAXONOMY
 
 // Per-session cache of the most recent user-message text. Stamped
 // on `chat.message`, read back on each assistant `message.updated`
