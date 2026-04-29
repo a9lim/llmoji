@@ -17,7 +17,13 @@ on saklas, torch, sentence-transformers, or matplotlib. Runtime deps
 are **`anthropic`** (default synth backend), **`openai`** (the
 `--backend openai` Responses-API path AND the `--backend local`
 OpenAI-compatible Chat-Completions path against Ollama / vLLM /
-llama.cpp's HTTP server), and **`huggingface_hub`** (upload target).
+llama.cpp's HTTP server), **`huggingface_hub`** (upload target), and
+**`ruamel.yaml`** (parsing-only — used by the hermes provider for
+line/col marks on the parsed YAML tree so we can compute exact
+splice ranges for surgical text edits to ``~/.hermes/config.yaml``;
+we never call ``yaml.dump`` on this, see the "HookInstaller.install
+refuses to clobber" gotcha for the data-corruption story that
+forced the parsing-only design).
 Everything else — embedding, eriskii axis projection, clustering,
 figures — is research-side and lives in `llmoji-study`, which
 `pip install llmoji>=1.1,<2` and reads our public surface.
@@ -259,8 +265,13 @@ llmoji/
                                # feature flag is Stage::Stable +
                                # default_enabled in codex-rs/features
       hermes.py                # ~/.hermes/config.yaml YAML
-                               # pre_llm_call + post_llm_call
-                               # (marker-fenced hooks: stanza)
+                               # pre_llm_call + post_llm_call;
+                               # surgical text-edit merge — ruamel
+                               # parses for line/col marks, edits
+                               # apply as text splices on the original
+                               # file (never yaml.dump). Dedup is
+                               # structural (entry's command field
+                               # equals our hook path).
     _hooks/
       claude_code.sh.tmpl
       codex.sh.tmpl
@@ -456,19 +467,111 @@ Three corruption paths are explicitly defended:
    Codex's `codex_hooks` feature flag is `Stage::Stable` +
    `default_enabled: true`, payload byte-identical to claude_code's,
    so the JSON helpers are reused.
-3. **Existing top-level `hooks:` key in `~/.hermes/config.yaml`** —
-   appending another would duplicate-key the YAML doc (silent
-   last-write-wins). `HermesProvider._has_unmanaged_hooks_top_level`
-   refuses.
+3. **Unparseable `~/.hermes/config.yaml`** — ruamel raises
+   `YAMLError` on load; `HermesProvider._read_and_parse` rewraps as
+   `SettingsCorruptError`. Same defense for non-mapping top-level
+   docs (top-level scalar / sequence) and for a populated `hooks:`
+   value that isn't a mapping (e.g. `hooks: [some_string]` or
+   `hooks: enabled`). Pre-1.2.x ALSO refused on any populated
+   top-level `hooks:` mapping, because the marker-fence text
+   surgery couldn't safely merge into existing YAML; 1.2.x makes
+   the merge structural and safe by surgical-editing line ranges
+   that ruamel's `lc.data` marks pin down, so populated mappings
+   no longer refuse.
 
 In all three cases the user gets a `SettingsCorruptError` with path
 + reason. Edit the file (move-aside or merge by hand) and re-run.
 
 The non-managed analogue — re-running `install` after already
-installing once — is fully idempotent. The marker fence in hermes
-makes the second install a no-op; the JSON-edit path in
-claude_code/codex checks for an existing entry with our command
-string and skips. Main and nudge dedup independently.
+installing once — is fully idempotent across all three. JSON-edit
+in claude_code/codex checks for an existing entry with our command
+string and skips. Hermes' merge does the same structural dedup at
+the parsed-YAML object level: an entry whose `command` field equals
+our hook path is recognized as ours and not re-added. Main and nudge
+dedup independently.
+
+### Hermes settings.yaml: parsing-only ruamel + surgical text edits
+
+ruamel.yaml is used in `HermesProvider` ONLY for parsing — we never
+call `yaml.dump` on the loaded document. The 1.2.x release tried a
+load-mutate-dump approach and shipped a silent-data-corruption bug
+that motivated the rewrite to surgical edits. The story:
+
+PyYAML (which Hermes itself uses to write `~/.hermes/config.yaml`)
+escapes non-ASCII characters by default and uses backslash
+line-continuations in double-quoted scalars to suppress the space
+that YAML 1.2 fold rules would otherwise insert at a non-whitespace
+wrap boundary. ruamel's `RoundTripDumper` does neither — it emits
+raw Unicode and bare line wraps. So a string PyYAML had wrapped
+at, say, the middle of a kaomoji literal `(◕‿◕)` would round-trip
+through ruamel as `(◕‿◕ )` — one character longer, single ASCII
+space inserted at the fold point. For a config that the user
+hadn't touched. Verified live on `~/.hermes/config.yaml` against
+the `agent.personalities.kawaii` string: PyYAML wrap fell on
+`(◕‿◕\` immediately before `)`, ruamel's no-`\`
+re-emit produced the space-inserted variant on read-back.
+
+A 1-char silent mutation to a personality prompt on a config the
+user didn't edit is exactly the class of bug that surfaces weeks
+later as "the AI is acting slightly different and I can't repro
+it". Not a tradeoff worth taking for the auto-merge feature.
+
+The 1.2.1 implementation:
+
+1. Read the file as text.
+2. Parse with ruamel to get the document tree, with each
+   `CommentedMap` / `CommentedSeq` carrying `lc.data` line/col
+   marks for every key + item.
+3. Compute per-edit operations as `(insert_at_line, lines_to_insert)`
+   tuples (for `_register`) or `(start, end)` deletion ranges (for
+   `_unregister`), using the marks to find exact line numbers.
+4. Apply the edits as text splices on the original file content.
+   ruamel never serializes; the user's file stays byte-stable
+   everywhere except the lines we explicitly insert or delete.
+
+Quirks of ruamel's `lc.data` worth knowing:
+
+- For `CommentedMap.lc.data[key]` returns `(key_line, key_col,
+  value_line, value_col)` — the key column is exactly where the
+  key starts, no offset.
+- For `CommentedSeq.lc.data[i]` returns `(item_line, item_col)` —
+  but `item_col` reports the column of the *value content* (after
+  `- `), not the column of the dash. For the standard `- key:
+  value` form, the dash is at `item_col - 2`. `_infer_list_indent`
+  applies the offset; the unregister path applies it when computing
+  `_block_end_excl` for a last-in-list item.
+
+Surgical-edit rules and refusals:
+
+- **Placeholder shapes** (`hooks: {}`, `hooks: []`, `hooks: ~`,
+  `hooks:` bare) are all functionally "no hooks configured". We
+  replace the placeholder line with a fresh PyYAML-style block.
+  The Hermes default config ships `hooks: {}`.
+- **Populated mappings** are merged into. For each event we either
+  insert a new sub-block at the end of the hooks block, append a
+  list item at the end of an existing event's list, or skip
+  (idempotent dedup by command path).
+- **Indent style is inferred** from the user's existing first
+  sub-key (mapping indent) and first list item (list indent),
+  falling back to PyYAML defaults (mapping=2, list=4) when there's
+  no precedent to copy. Adjacent additions land at the same column
+  as the user's existing entries.
+- **Refused shapes**: top-level `hooks` value that's not a mapping
+  / placeholder (e.g. populated sequence or scalar), flow-style
+  hooks block (`hooks: {pre_llm_call: [...]}`), flow-style bucket
+  for an individual event, empty bucket (`event: []` or bare
+  `event:`). All raise `SettingsCorruptError` with the specific
+  shape called out so the user can fix and retry.
+- **No migration prepass for pre-1.2.x marker-fenced configs.** A
+  config with the old `# >>> llmoji begin (managed) >>>` /
+  `# <<< llmoji end (managed) <<<` markers is structurally a
+  valid YAML doc with a populated `hooks:` block — the new install
+  is idempotent against it (sees our commands present, no-ops),
+  but uninstall removes our entries and the marker comments stay
+  behind dangling at column 0. Verified live: the markers end up
+  adjacent to each other on consecutive lines bracketing nothing,
+  which the user can clean up by hand. Trivial enough not to
+  warrant a regex pre-pass.
 
 Settings writes go through `llmoji._util.atomic_write_text` (tmp
 file + `os.replace`) so a power loss / SIGINT mid-write leaves the
@@ -478,6 +581,7 @@ the same way. JSON-settings providers also batch their main+nudge
 edits into a single read-modify-write cycle per install (via
 `_register_json_settings_batch`), so a SIGKILL between registering
 the Stop hook and the UserPromptSubmit nudge can't half-install.
+Hermes does the same one-pass mutate-then-dump in `_register`.
 
 ### Bundle is allowlisted, not just-ship-everything
 
@@ -544,9 +648,17 @@ The hermes provider installs **two** hooks:
 - `~/.hermes/agent-hooks/pre-llm-call.sh` — nudge that injects the
   kaomoji-reminder context via `{context: "<msg>"}`.
 
-Both registered in `~/.hermes/config.yaml` under `hooks:`, inside
-our managed marker fence so re-running install is idempotent and
-uninstall removes the stanza cleanly.
+Both registered in `~/.hermes/config.yaml` under `hooks:`. Register
+/ unregister apply as surgical text edits on the original file
+(ruamel parses for line/col marks, never serializes) so install
+merges into a populated `hooks:` block without disturbing
+neighbors — see "Hermes settings.yaml: parsing-only ruamel +
+surgical text edits" gotcha for the wrap-corruption story that
+forced the design and the placeholder/refusal/dedup rules.
+Re-running install is idempotent (structural dedup against the
+entry's `command` field); uninstall removes only our entries and
+leaves the user's surrounding hooks (and any in-block comments)
+intact.
 
 The implementation cross-checks the documented [Event Hooks][hermes-hooks]
 contract against the actual source at
