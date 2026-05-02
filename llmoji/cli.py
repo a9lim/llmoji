@@ -30,7 +30,7 @@ from typing import Callable, Iterator
 
 from . import paths
 from ._util import human_bytes, scrape_row_to_journal_line
-from .providers import PROVIDERS, get_provider
+from .providers import PROVIDERS, HookInstaller, ProviderStatus, get_provider
 from .scrape import ScrapeRow
 from .sources.chatgpt_export import iter_chatgpt_export
 from .sources.claude_export import iter_claude_export
@@ -43,16 +43,85 @@ from .synth import cache_size
 # ---------------------------------------------------------------------------
 
 
-def _cmd_install(args: argparse.Namespace) -> int:
-    p = get_provider(args.provider)
-    p.install()
-    s = p.status()
+def _print_install_summary(p: HookInstaller, s: ProviderStatus) -> None:
+    """One block of post-install output per provider."""
     print(f"installed {p.name}.")
     print(f"  hook:     {s.hook_path}")
     if s.nudge_hook_path is not None:
         print(f"  nudge:    {s.nudge_hook_path}")
     print(f"  settings: {s.settings_path}")
     print(f"  journal:  {s.journal_path}")
+
+
+def _install_one(name: str) -> tuple[bool, str | None]:
+    """Install a single provider by name. Returns
+    ``(succeeded, error_message)``. Used by the autodetect path so
+    one corrupt config doesn't take down the rest of the batch.
+    """
+    p = get_provider(name)
+    try:
+        p.install()
+    except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
+        return False, f"{type(e).__name__}: {e}"
+    _print_install_summary(p, p.status())
+    return True, None
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
+    # Explicit provider: legacy single-target path.
+    if args.provider is not None:
+        ok, err = _install_one(args.provider)
+        if not ok:
+            print(f"install failed for {args.provider}: {err}", file=sys.stderr)
+            return 1
+        return 0
+
+    # Autodetect path: enumerate every registered provider, install
+    # for each whose harness home dir exists on disk.
+    detected = [
+        name for name in PROVIDERS if get_provider(name).is_present()
+    ]
+    if not detected:
+        print(
+            "no harnesses detected (looked for "
+            + ", ".join(
+                f"{name} ({get_provider(name).settings_path.parent})"
+                for name in PROVIDERS
+            )
+            + "). install a supported harness, or pass an explicit "
+            "provider name (e.g. `llmoji install claude_code`).",
+            file=sys.stderr,
+        )
+        return 2
+
+    print("detected harnesses:")
+    for name in detected:
+        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+    if not args.yes:
+        try:
+            ans = input(
+                f"install llmoji hooks into {len(detected)} harness(es)? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    print()
+
+    # Partial success: one corrupt config doesn't kill the rest.
+    failures: list[tuple[str, str]] = []
+    for name in detected:
+        ok, err = _install_one(name)
+        if not ok:
+            failures.append((name, err or ""))
+        print()
+    if failures:
+        print(f"{len(failures)} of {len(detected)} provider(s) failed:",
+              file=sys.stderr)
+        for name, err in failures:
+            print(f"  - {name}: {err}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -324,8 +393,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("install", help="install a provider's hook")
-    sp.add_argument("provider", choices=sorted(PROVIDERS))
+    sp = sub.add_parser(
+        "install",
+        help="install a provider's hook (no arg → autodetect all)",
+    )
+    sp.add_argument(
+        "provider", nargs="?", default=None, choices=sorted(PROVIDERS),
+        help=(
+            "explicit provider; omit to autodetect every harness whose "
+            "home directory exists under $HOME"
+        ),
+    )
+    sp.add_argument(
+        "--yes", action="store_true",
+        help="skip the autodetect confirmation prompt (no-op with explicit provider)",
+    )
     sp.set_defaults(func=_cmd_install)
 
     sp = sub.add_parser("uninstall", help="remove a provider's hook")

@@ -167,6 +167,22 @@ class HookInstaller:
             and self.nudge_event
         )
 
+    def is_present(self) -> bool:
+        """Heuristic: does this harness's home directory exist on disk?
+
+        Used by ``llmoji install`` (no provider arg) to decide which
+        providers to install for. The signal is the same one a user
+        would get from ``ls ~`` — ``~/.claude`` exists for Claude Code,
+        ``~/.codex`` for Codex, ``~/.hermes`` for Hermes. Trying to be
+        cleverer (distinguishing "installed" from "ran once and
+        aborted") is fragile and not worth it; if a parent dir exists
+        the harness has at least left a footprint, and a user who
+        deleted their harness home but kept the parent dir is an edge
+        case we accept the false-positive on. Subclasses are free to
+        override if a more specific signal turns out to matter.
+        """
+        return self.settings_path.parent.exists()
+
     def render_hook(self) -> str:
         """Read the bash template from package data and substitute the
         provider-specific placeholders. Returns the rendered hook as a

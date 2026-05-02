@@ -40,6 +40,8 @@ The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datase
 
 ```bash
 pip install llmoji
+llmoji install                  # autodetect: install for every detected harness
+# or, target a single harness explicitly:
 llmoji install claude_code      # or: codex, hermes
 ```
 
