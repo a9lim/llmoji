@@ -226,3 +226,132 @@ def test_stage_a_writes_one_cache_row_per_unique_key(tmp_path: Path) -> None:
     assert len(keys) == len(set(keys)) == 2, (
         f"expected 2 unique cache rows, got {keys!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage-A — partial cache flush survives mid-wave error
+# ---------------------------------------------------------------------------
+
+
+class _FailOnceSynth(Synthesizer):
+    """Counter-based synth that raises on the Nth call. Pre-Wave-6,
+    a Stage-A error caused the deferred cache flush to never run, so
+    *all* dispatched results were lost — a re-run paid the full API
+    cost again. Wave 6 flushes per-future inside the as_completed
+    loop, and surfaces the failure as :class:`AnalyzeError` once the
+    loop has drained.
+    """
+
+    backend = "fake"
+    model_id = "fake-model-1"
+    base_url = ""
+
+    def __init__(self, fail_on_call: int) -> None:
+        super().__init__()
+        self._fail_on = fail_on_call
+        self._lock = threading.Lock()
+        self._n = 0
+        self.calls = 0
+
+    def call(self, prompt: str, *, max_tokens: int = 200) -> str:
+        del prompt, max_tokens
+        with self._lock:
+            self._n += 1
+            self.calls += 1
+            if self._n == self._fail_on:
+                raise RuntimeError(f"simulated failure on call {self._n}")
+            return f"d{self._n}"
+
+
+def test_stage_a_partial_cache_on_error_then_resume(tmp_path: Path) -> None:
+    """A Stage-A failure mid-wave must leave the cache flushed for
+    cells that succeeded before the raise. A re-run with a passing
+    synth then pays API cost only for the cells that previously
+    failed — the rest hit the cache.
+
+    Concurrency forced to 1 so the futures-complete order is
+    deterministic (== submission order == walk order). Pre-Wave-6
+    the cache file was empty after the cold-run failure; warm run
+    re-dispatched all 4 cells.
+    """
+    import pytest
+
+    from llmoji.analyze import AnalyzeError, _stage_a
+
+    rows = [
+        _make_row("m1", "(◕‿◕)", f"u{i}", f"(◕‿◕) a{i}")
+        for i in range(4)
+    ]
+    buckets = {"m1": {"(◕‿◕)": rows}}
+    cache_path = tmp_path / "cache.jsonl"
+
+    cold = _FailOnceSynth(fail_on_call=2)
+    with pytest.raises(AnalyzeError, match=r"stage A:.*re-run"):
+        _stage_a(
+            cold, buckets, cache_path=cache_path,
+            print_progress=False, max_workers=1,
+        )
+
+    # 4 dispatched, 1 raised → 3 cache rows on disk.
+    cached_rows = [
+        json.loads(line) for line in cache_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(cached_rows) == 3, (
+        f"expected 3 cache rows after partial Stage-A failure, "
+        f"got {len(cached_rows)}: {cached_rows!r}"
+    )
+
+    # Resume: passing synth on the second run. Only the 1 failed
+    # cell should dispatch — the other 3 hit the cache.
+    warm = _CountingFakeSynth()
+    descs, n_calls, n_cached = _stage_a(
+        warm, buckets, cache_path=cache_path,
+        print_progress=False, max_workers=1,
+    )
+    assert warm.calls == 1
+    assert n_calls == 1
+    assert n_cached == 3
+    # Every walk position has a description; none are None.
+    assert all(d for d in descs["m1"]["(◕‿◕)"])
+    assert len(descs["m1"]["(◕‿◕)"]) == 4
+
+
+def test_stage_b_failure_preserves_stage_a_cache(tmp_path: Path) -> None:
+    """A Stage-B failure mid-wave must NOT touch Stage A's cache.
+    Re-running short-circuits Stage A entirely on cached cells and
+    retries only the Stage B syntheses.
+    """
+    import pytest
+
+    from llmoji.analyze import AnalyzeError, _stage_a, _stage_b
+
+    rows = [
+        _make_row("m1", "(◕‿◕)", "u1", "(◕‿◕) one"),
+        _make_row("m1", "(◕‿◕)", "u2", "(◕‿◕) two"),
+    ]
+    buckets = {"m1": {"(◕‿◕)": rows}}
+    cache_path = tmp_path / "cache.jsonl"
+
+    # Stage A succeeds completely.
+    synth_a = _CountingFakeSynth()
+    descs_by_cell, _, _ = _stage_a(
+        synth_a, buckets, cache_path=cache_path,
+        print_progress=False, max_workers=1,
+    )
+
+    # Stage B raises on its only cell.
+    synth_b = _FailOnceSynth(fail_on_call=1)
+    with pytest.raises(AnalyzeError, match=r"stage B:.*re-run"):
+        _stage_b(
+            synth_b, descs_by_cell,
+            print_progress=False, max_workers=1,
+        )
+
+    # Stage A cache file is unchanged: still has its 2 successful
+    # entries, untouched by Stage B's blowup.
+    cached_rows = [
+        json.loads(line) for line in cache_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(cached_rows) == 2

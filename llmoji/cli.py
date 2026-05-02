@@ -383,7 +383,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--concurrency", type=int, default=None,
         help=(
-            "Stage-A worker count (default 2; bump if your synth "
+            "Stage-A/B worker count (default 1; bump if your synth "
             "rate-limit tier has headroom). env: LLMOJI_CONCURRENCY."
         ),
     )

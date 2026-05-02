@@ -296,11 +296,14 @@ llmoji/
                                # source_model = ScrapeRow.model or
                                # falls back to ScrapeRow.source. Stage A
                                # dispatches on a ThreadPoolExecutor
-                               # (default 2 workers, $LLMOJI_CONCURRENCY);
-                               # cache appends serialize on the main
-                               # thread via as_completed. Clears bundle
-                               # of all top-level files AND any
-                               # subdirs before writing.
+                               # (default 1 worker, $LLMOJI_CONCURRENCY);
+                               # cache appends happen on the main thread
+                               # as each future succeeds (immediate flush,
+                               # no deferred batch), so a mid-wave failure
+                               # raises AnalyzeError with the cache already
+                               # flushed for cells that succeeded — re-run
+                               # to resume. Clears bundle of all top-level
+                               # files AND any subdirs before writing.
     upload.py                  # tar + HF / email targets;
                                # BUNDLE_TOPLEVEL_ALLOWLIST +
                                # BUNDLE_DATA_SUFFIX enforce the flat
@@ -767,17 +770,26 @@ Two coupling points:
   formats; if a harness needs one, that's a post-1.0 first-class
   adapter, and the generic-JSONL-append contract is the path until
   then.
-- Stage-A synth calls run on a small thread pool (default 2,
+- Stage-A/B synth calls run on a small thread pool (default 1,
   `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Both
-  Anthropic and OpenAI SDKs use thread-safe httpx clients; cache
-  writes serialize on the main thread after futures complete, in
-  deterministic walk order, so the cache file's row order matches
-  the bundle's Stage-B input order. Default is 2
-  because the org-level Haiku rate limit is 50 req/min; 4 concurrent
-  workers reliably trip it on a multi-hundred-row backfill, and the
-  SDK's `max_retries=8` exponential backoff (set explicitly in
-  `AnthropicSynthesizer.__init__` and `OpenAISynthesizer.__init__`,
-  vs the SDK default of 2) recovers but burns wallclock.
+  Anthropic and OpenAI SDKs use thread-safe httpx clients. Cache
+  writes happen on the main thread inside the `as_completed` loop,
+  immediately after each future succeeds — no deferred batch flush
+  — so a mid-wave failure leaves the cache populated for cells that
+  succeeded before the raise; we collect errors, drain the loop,
+  and raise `AnalyzeError` with a "re-run to resume" message. The
+  user re-runs and pays API cost only for the cells that previously
+  failed. Default 1 because the org-level Haiku rate cap (50 req/min)
+  trips intermittently even at concurrency=2 on multi-hundred-row
+  backfills; the SDK's `max_retries=8` exponential backoff (set
+  explicitly in `AnthropicSynthesizer.__init__` /
+  `OpenAISynthesizer.__init__`, vs the SDK default of 2) recovers
+  but burns wallclock. Bump via `LLMOJI_CONCURRENCY=4+` if your
+  rate-limit tier has the headroom. `descs_by_cell` is still
+  assembled in deterministic walk order so Stage B sees identical
+  numbered descriptions across runs; only the on-disk cache row
+  order is non-deterministic, and that's fine because the cache is
+  hash-keyed (load_cache reads it into a dict).
   `INSTANCE_SAMPLE_CAP` is 4 — popular faces get capped, rare faces
   fully sampled. Same value as Eriskii's original Claude-faces work,
   kept for cross-corpus comparability.
