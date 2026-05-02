@@ -192,6 +192,11 @@ llmoji analyze [--notes …]     scrape + canonicalize + synthesize
 [--base-url …]                 to anthropic; openai uses Responses
                                API; local uses Chat Completions
                                (Ollama / vLLM / llama.cpp HTTP)
+llmoji analyze --dry-run       print plan + token + cost estimate
+                               without making any synth calls.
+                               Costs use char/4 heuristic + per-1M
+                               rate table in synth_prompts.py —
+                               approximate, not a quote.
 llmoji upload --target {hf,email} [--yes]   ship the bundle (HF: loose
                                             files via dataset PR;
                                             email: tarball)

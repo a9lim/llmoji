@@ -61,8 +61,14 @@ from .synth import (
     synthesize_descriptions,
 )
 from .synth_prompts import (
+    BACKEND_RATES_USD_PER_1M_TOKENS,
+    CHARS_PER_TOKEN_HEURISTIC,
+    DEFAULT_ANTHROPIC_MODEL_ID,
+    DEFAULT_OPENAI_MODEL_ID,
     DESCRIBE_PROMPT_NO_USER,
     DESCRIBE_PROMPT_WITH_USER,
+    ESTIMATE_STAGE_A_OUTPUT_CHARS,
+    ESTIMATE_STAGE_B_OUTPUT_CHARS,
     SYNTHESIZE_PROMPT,
 )
 from .taxonomy import canonicalize_kaomoji
@@ -119,6 +125,35 @@ class AnalyzeResult:
     stage_a_calls_made: int
     stage_a_calls_cached: int
     stage_b_calls_made: int
+
+
+@dataclass
+class AnalyzePlan:
+    """``--dry-run`` snapshot — what an ``analyze`` invocation would
+    compute, without actually making any synth calls.
+
+    Counts assume a cold cache (worst case for cost — a warm-cache
+    re-run pays for fewer dispatches). Per-cell sample counts respect
+    :data:`INSTANCE_SAMPLE_CAP`. Token counts and cost are
+    approximate (see :data:`CHARS_PER_TOKEN_HEURISTIC` /
+    :data:`ESTIMATE_STAGE_*_OUTPUT_CHARS` in :mod:`synth_prompts` for
+    the heuristics) — reliable for "is this $0.04 or $4?" but not as
+    a quote.
+    """
+
+    total_rows: int
+    canonical_unique: int
+    providers_seen: list[str]
+    model_counts: dict[str, int]
+    counts_by_cell: dict[str, dict[str, int]]
+    stage_a_unique_calls: int
+    stage_a_max_calls: int  # before duplicate-key dedupe
+    stage_b_calls: int
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_cost_usd: float | None  # None when backend isn't priced
+    backend: str
+    model_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +650,149 @@ def _print_preview(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _resolve_default_model_id(backend: str, model_id: str | None) -> str:
+    """Mirror :func:`llmoji.synth.make_synthesizer`'s pinning rules
+    without instantiating a synthesizer (which would import an SDK).
+    Used by :func:`plan_analyze` so a dry-run never touches the
+    Anthropic / OpenAI clients.
+    """
+    if model_id is not None:
+        return model_id
+    if backend == "anthropic":
+        return DEFAULT_ANTHROPIC_MODEL_ID
+    if backend == "openai":
+        return DEFAULT_OPENAI_MODEL_ID
+    # local: caller should have passed model_id; fall back to a
+    # placeholder string so the cache_key hash works in dry-run mode.
+    return "(local)"
+
+
+def plan_analyze(
+    rows: Iterable[ScrapeRow],
+    *,
+    backend: str = "anthropic",
+    base_url: str | None = None,
+    model_id: str | None = None,
+) -> AnalyzePlan:
+    """Build an :class:`AnalyzePlan` without calling any synth backend.
+
+    Walks rows, buckets them, runs the same deterministic Stage-A
+    sampling :func:`_stage_a` would, computes the cache-key dedupe
+    that :func:`_stage_a` applies, and estimates token usage / cost
+    against the per-1M rate table in :mod:`synth_prompts`. Backend
+    SDKs are not imported (``cache_key`` is pure-Python; the synth
+    classes that pull in SDKs are not invoked).
+    """
+    rows_list = list(rows)
+    buckets, providers_seen, model_counts = (
+        _bucket_by_source_model_and_canonical(rows_list)
+    )
+    counts_by_cell: dict[str, dict[str, int]] = {
+        sm: {canon: len(rs) for canon, rs in per_canon.items()}
+        for sm, per_canon in buckets.items()
+    }
+
+    resolved_model_id = _resolve_default_model_id(backend, model_id)
+    base_url_str = base_url or ""
+
+    # Walk the same cells / sample the same rows / compute the same
+    # cache keys :func:`_stage_a` would. Track unique keys + accumulate
+    # input chars per dispatch so the estimate matches what the real
+    # run would issue at cold cache.
+    seen_keys: set[str] = set()
+    stage_a_input_chars = 0
+    stage_a_max_calls = 0
+    samples_per_cell: dict[tuple[str, str], int] = {}
+
+    for sm in sorted(buckets):
+        per_canon = buckets[sm]
+        for canon in sorted(per_canon):
+            sampled = _sample(
+                per_canon[canon],
+                cap=INSTANCE_SAMPLE_CAP,
+                seed_label=f"{sm}:{canon}",
+            )
+            samples_per_cell[(sm, canon)] = len(sampled)
+            stage_a_max_calls += len(sampled)
+            for r in sampled:
+                user_text = (r.surrounding_user or "").strip()
+                assistant = r.assistant_text or ""
+                key = cache_key(
+                    resolved_model_id, backend, base_url_str,
+                    canon, user_text, assistant,
+                )
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                # mask_kaomoji-equivalent: the masked text is
+                # "[FACE] " + assistant, length-equivalent for
+                # estimation purposes.
+                masked_chars = len("[FACE] ") + len(assistant)
+                if user_text:
+                    prompt_chars = (
+                        len(DESCRIBE_PROMPT_WITH_USER)
+                        + len(user_text) + masked_chars
+                    )
+                else:
+                    prompt_chars = (
+                        len(DESCRIBE_PROMPT_NO_USER) + masked_chars
+                    )
+                stage_a_input_chars += prompt_chars
+
+    stage_a_unique_calls = len(seen_keys)
+    stage_a_output_chars = (
+        stage_a_unique_calls * ESTIMATE_STAGE_A_OUTPUT_CHARS
+    )
+
+    # Stage B: one call per non-empty cell. Input = the prompt template
+    # plus N stage-A descriptions concatenated. Output ≈ one summary
+    # per cell.
+    stage_b_calls = sum(
+        1 for sm in buckets for _ in buckets[sm]
+    )
+    stage_b_input_chars = sum(
+        len(SYNTHESIZE_PROMPT)
+        + samples_per_cell.get((sm, canon), 0)
+        * ESTIMATE_STAGE_A_OUTPUT_CHARS
+        for sm in buckets for canon in buckets[sm]
+    )
+    stage_b_output_chars = stage_b_calls * ESTIMATE_STAGE_B_OUTPUT_CHARS
+
+    total_input_chars = stage_a_input_chars + stage_b_input_chars
+    total_output_chars = stage_a_output_chars + stage_b_output_chars
+    input_tokens = total_input_chars // CHARS_PER_TOKEN_HEURISTIC
+    output_tokens = total_output_chars // CHARS_PER_TOKEN_HEURISTIC
+
+    rates = BACKEND_RATES_USD_PER_1M_TOKENS.get(backend)
+    if rates:
+        cost = (
+            (input_tokens / 1_000_000) * rates["input"]
+            + (output_tokens / 1_000_000) * rates["output"]
+        )
+    else:
+        cost = None
+
+    n_unique_canon = len({
+        canon for per_canon in buckets.values() for canon in per_canon
+    })
+
+    return AnalyzePlan(
+        total_rows=len(rows_list),
+        canonical_unique=n_unique_canon,
+        providers_seen=providers_seen,
+        model_counts=model_counts,
+        counts_by_cell=counts_by_cell,
+        stage_a_unique_calls=stage_a_unique_calls,
+        stage_a_max_calls=stage_a_max_calls,
+        stage_b_calls=stage_b_calls,
+        estimated_input_tokens=int(input_tokens),
+        estimated_output_tokens=int(output_tokens),
+        estimated_cost_usd=cost,
+        backend=backend,
+        model_id=resolved_model_id,
+    )
 
 
 def run_analyze(

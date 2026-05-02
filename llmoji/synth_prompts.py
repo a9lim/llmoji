@@ -78,3 +78,34 @@ SYNTHESIZE_PROMPT = (
 # pass ``--model`` explicitly.
 DEFAULT_ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"
 DEFAULT_OPENAI_MODEL_ID = "gpt-5.4-mini-2026-03-17"
+
+
+# Per-1M-token USD rates for the pinned default models, used by
+# ``llmoji analyze --dry-run`` to print an order-of-magnitude cost
+# estimate before the user pays for a real synthesis wave. NOT used
+# by the runtime path — the actual synth call doesn't price itself
+# — and definitely NOT cross-corpus invariant; rates change without
+# notice and a stale entry just produces a slightly wrong estimate.
+# Edit freely as upstream pricing moves. Local backends aren't
+# priced; the dry-run reports only call counts there.
+BACKEND_RATES_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
+    "anthropic": {"input": 0.80, "output": 4.00},
+    "openai":    {"input": 0.25, "output": 2.00},
+}
+
+# Char→token heuristic for the dry-run estimate. Real tokenizers
+# vary by 1.5–4x depending on language and content; we use a flat
+# 4-chars-per-token approximation, which is roughly right for
+# English prose (the vast majority of what the synthesis prompts
+# carry) and is consistent enough that the estimate's "is this $0.04
+# or $4?" axis is reliable. The estimate prints with an explicit
+# "approx" label so the user doesn't treat it as a quote.
+CHARS_PER_TOKEN_HEURISTIC = 4
+
+# Placeholder per-call output sizes for the dry-run estimate. Stage A
+# describes a single instance in 1-2 sentences (~150 tokens ≈ 600
+# chars in our corpus); Stage B synthesizes pooled descriptions into
+# one 1-2-sentence summary (~100 tokens ≈ 400 chars). Drift over
+# corpus content is fine — the estimate is order-of-magnitude.
+ESTIMATE_STAGE_A_OUTPUT_CHARS = 600
+ESTIMATE_STAGE_B_OUTPUT_CHARS = 400

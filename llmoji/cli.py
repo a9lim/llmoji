@@ -522,10 +522,58 @@ def _gather_rows() -> Iterator[ScrapeRow]:
             yield from iter_journal(j, source=label)
 
 
+def _print_analyze_plan(plan: Any) -> None:
+    """Render an :class:`llmoji.analyze.AnalyzePlan` for the
+    ``--dry-run`` path. Typed as ``Any`` so cli.py doesn't need to
+    eagerly import :mod:`llmoji.analyze` (which would pull in tqdm
+    + the Stage-A/B machinery before the user even runs analyze).
+    """
+    print("--- analyze plan (dry run, no synth calls) ---")
+    print(
+        f"sources: {plan.total_rows} rows / "
+        f"{plan.canonical_unique} canonical kaomoji across "
+        f"{len(plan.counts_by_cell)} source model(s)"
+    )
+    if plan.providers_seen:
+        print(f"providers seen: {', '.join(plan.providers_seen)}")
+    if plan.model_counts:
+        # Most-rows-first so the "where's the bulk of the corpus"
+        # answer is visible at a glance.
+        ranked = sorted(plan.model_counts.items(), key=lambda kv: -kv[1])
+        print("source model row counts:")
+        for sm, n in ranked:
+            print(f"  {n:>6}  {sm}")
+    n_cells = sum(len(p) for p in plan.counts_by_cell.values())
+    print(
+        f"\nstage A: up to {plan.stage_a_max_calls} sampled rows "
+        f"across {n_cells} cell(s); {plan.stage_a_unique_calls} "
+        f"unique cache key(s) → that's the cold-cache call count."
+    )
+    print(f"stage B: {plan.stage_b_calls} cell(s) → {plan.stage_b_calls} call(s)")
+    print(
+        f"\nestimated tokens (approx, char/4 heuristic): "
+        f"input {plan.estimated_input_tokens:,} / "
+        f"output {plan.estimated_output_tokens:,}"
+    )
+    if plan.estimated_cost_usd is not None:
+        print(
+            f"estimated cost: ~${plan.estimated_cost_usd:.4f} "
+            f"(backend={plan.backend}, model={plan.model_id})"
+        )
+    else:
+        print(
+            f"estimated cost: n/a — backend {plan.backend!r} not in "
+            f"the rate table (local backends, or new pricing). "
+            f"Edit BACKEND_RATES_USD_PER_1M_TOKENS in synth_prompts.py "
+            f"to add."
+        )
+    print("\nrun without --dry-run to execute.")
+
+
 def _cmd_analyze(args: argparse.Namespace) -> int:
     # Lazy import — analyze pulls in the chosen backend's SDK,
     # which we don't want to require for `status` / `install`.
-    from .analyze import run_analyze
+    from .analyze import plan_analyze, run_analyze
 
     backend = args.backend
     base_url = args.base_url
@@ -561,6 +609,14 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.dry_run:
+        plan = plan_analyze(
+            rows, backend=backend, base_url=base_url, model_id=model_id,
+        )
+        _print_analyze_plan(plan)
+        return 0
+
     result = run_analyze(
         rows,
         notes=args.notes or "",
@@ -746,6 +802,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Stage-A/B worker count (default 1; bump if your synth "
             "rate-limit tier has headroom). env: LLMOJI_CONCURRENCY."
+        ),
+    )
+    sp.add_argument(
+        "--dry-run", action="store_true",
+        help=(
+            "print the plan + cost estimate without making any synth "
+            "calls. token + cost figures are approximate (char/4 "
+            "heuristic) — order-of-magnitude reliable, not a quote."
         ),
     )
     sp.set_defaults(func=_cmd_analyze)
