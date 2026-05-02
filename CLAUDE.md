@@ -176,7 +176,14 @@ llmoji install [--yes]         no-arg autodetect: install for every
                                OK — one corrupt config doesn't kill
                                the rest of the batch.
 llmoji uninstall <provider>    inverse; idempotent (journal preserved)
-llmoji status                  installed providers, journal sizes, paths
+llmoji status                  installed providers, journal sizes,
+                               paths, + cheap health checks (stale-
+                               hook detection, settings parseability)
+llmoji status --stats          adds journal walk: kaomoji frequency
+[--top N] [--provider N]       tables (top N canonical, per-source,
+                               per-source-model) + row schema
+                               validation in one pass
+llmoji status --json           machine-readable JSON output for CI
 llmoji parse --provider <n> P  ingest a static export dump (claude.ai
                                or chatgpt conversations.json) into
                                ~/.llmoji/journals/
