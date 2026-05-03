@@ -207,8 +207,13 @@ llmoji analyze --dry-run       print plan + token + cost estimate
                                Costs use char/4 heuristic + per-1M
                                rate table in synth_prompts.py —
                                approximate, not a quote.
-llmoji upload --target {hf,email} [--yes]   ship the bundle (HF: loose
-                                            files via dataset PR;
+llmoji upload --target {hf,email} [--yes]   ship the bundle (HF:
+                                            push to per-submission
+                                            branch via shared
+                                            encrypted credential —
+                                            user's HF token is used
+                                            only for whoami proof-
+                                            of-life and discarded;
                                             email: tarball)
 llmoji cache clear             wipe ~/.llmoji/cache/
 ```
@@ -337,6 +342,16 @@ llmoji/
                                # BUNDLE_DATA_SUFFIX enforce the flat
                                # shape. submitter_id() is public so
                                # analyze can stamp the manifest.
+                               # HF target is two-token: user HF
+                               # token for whoami proof-of-life only,
+                               # decrypted shared credential for the
+                               # actual upload_folder call.
+    _shared_token.py           # encrypted shared HF submission
+                               # credential + PBKDF2/HMAC-keystream
+                               # cipher (stdlib only). encrypt_for_
+                               # release() builds the blob at
+                               # release time; decrypt_with_password()
+                               # resolves it at upload time.
     cli.py                     # argparse entry, [project.scripts]
                                # llmoji. analyze takes
                                # --backend/--base-url/--model with env
@@ -633,24 +648,115 @@ shape. The three together mean stale per-instance descriptions,
 user-added notes, hidden-state caches, leftover subfolders, etc.
 cannot accidentally leak through `upload`.
 
-### HF upload is loose files via a PR, not a direct commit or tarball
+### HF upload: per-submission branch via shared encrypted credential
 
 `upload --target hf` pushes `manifest.json` plus each
 `<source-model>.jsonl` as loose files at
 `contributors/<hash>/bundle-<ts>/` via
-`HfApi.upload_folder(..., create_pr=True)` (single atomic commit on
-the PR branch). PR-based because the dataset is owned by `a9lim`
-with no contributor-write team — a direct `upload_folder` 403s for
-anyone who isn't the owner. PRs let any authenticated HF user
-submit; the maintainer reviews the inline diff (allowlist +
-manifest visible) and merges.
+`HfApi.upload_folder(..., revision=branch_name, create_pr=False)`
+(single atomic commit on a per-submission branch). The branch
+name is `submission-<contributor[:12]>-<ts>`. The maintainer
+reviews each branch by diff and merges to `main` by hand.
 
-`upload_folder` with `create_pr=True` returns a `CommitInfo` whose
-`pr_url` attribute points at the PR; `upload_hf` surfaces that URL
-both in stdout and the returned result dict (`result["pr_url"]`)
-so a scripted caller can link to / track the submission. Older
+Three keys in play (mirrored in SECURITY.md's user-facing
+explanation):
+
+1. **User's HF token** — read once via `huggingface_hub.get_token()`,
+   used for one `HfApi.whoami()` proof-of-life call, discarded
+   immediately. Never authenticates the upload itself; never
+   logged; never written to disk. The user gets a friendly
+   `HFAuthError` with "run `hf auth login`" if no token is
+   configured, or with the whoami exception text wrapped if the
+   Hub rejects the token.
+2. **Upload password** — read from `$LLMOJI_UPLOAD_PASSWORD` or
+   prompted via `getpass.getpass`. Posted on the dataset card and
+   on Twitter ([@_a9lim](https://twitter.com/_a9lim)). The
+   password gates decryption of the shared submission credential.
+3. **Shared submission HF token** — encrypted under the upload
+   password and shipped in `llmoji/_shared_token.py` as
+   `ENCRYPTED_TOKEN_B64` (opaque base64). At runtime,
+   `decrypt_with_password(password)` returns the plaintext token,
+   which is passed as `HfApi(token=...)` for the upload only.
+   Constructed at release time via `encrypt_for_release(token,
+   password)` from the same module.
+
+Encryption design: PBKDF2-SHA256 (200,000 iterations) for the
+KDF, HMAC-SHA256-keystream XOR for the cipher, HMAC-SHA256 for
+integrity (encrypt-then-MAC, constant-time `hmac.compare_digest`).
+Stdlib only; no `cryptography` dep. Layout:
+`base64([16-byte salt][32-byte mac][N-byte ciphertext])`. See the
+module docstring for the full construction; CI smoke tests catch
+the placeholder blob at decrypt time so a release that forgot the
+rotation step bails loudly.
+
+Pre-1.2.0 used the user's HF token directly with `create_pr=True`,
+which put the user's HF username on every submission and
+contradicted the privacy claim that submissions can't be traced
+back to a user. The dataset has Discussions and Pull Requests
+DISABLED (HF setting) so pre-1.2.0 clients fail at the API layer
+with a clear error rather than silently leaking the username on a
+PR; this is the enforcement mechanism that forces the upgrade.
+
+#### Operational checklist (one-time + per-rotation)
+
+One-time setup on the HF side:
+
+1. Create the `llmoji-submissions` HF account (or pick another
+   submission identity).
+2. Add `llmoji-submissions` as a collaborator on `a9lim/llmoji`
+   with write access.
+3. Disable Discussions and Pull Requests on `a9lim/llmoji`
+   (Settings → "Disabling Discussions / Pull Requests" toggle).
+   This breaks pre-1.2.0 clients cleanly.
+4. Generate a fine-grained HuggingFace token on the
+   `llmoji-submissions` account scoped to write on
+   `a9lim/llmoji` only.
+
+Per-release / per-rotation:
+
+```python
+from llmoji._shared_token import encrypt_for_release, generate_password
+
+password = generate_password()         # ~16-char random urlsafe-base64
+blob = encrypt_for_release("hf_<the_real_token>", password)
+print(f"password: {password}")
+print(f"blob: {blob}")
+```
+
+Then:
+
+1. Paste `blob` into `ENCRYPTED_TOKEN_B64` in
+   `llmoji/_shared_token.py`.
+2. Bump the package version, release.
+3. Post `password` on the dataset card (top of the README in the
+   HF dataset web UI) and on Twitter at
+   [@_a9lim](https://twitter.com/_a9lim).
+4. If rotating because of a compromise: delete the previous
+   `llmoji-submissions` token from HF settings to invalidate any
+   in-flight stolen-token uses.
+
+Maintainer review of submission branches:
+
+```bash
+# Fetch the submission branch
+git fetch origin submission-<contributor>-<ts>:submission-<contributor>-<ts>
+git diff main..submission-<contributor>-<ts>
+# If approved:
+git checkout main
+git merge --no-ff submission-<contributor>-<ts>
+git push origin main
+git push origin --delete submission-<contributor>-<ts>
+```
+
+Or use the HF web UI's "merge branch" + "delete branch" buttons.
+Same effect either way.
+
+#### `CommitInfo` unwrap
+
+`upload_folder` returns a `CommitInfo` whose `commit_url`
+attribute points at the submission-branch commit. Older
 huggingface_hub versions returned a bare URL string from
-`upload_folder` — `upload_hf` defensively unwraps both shapes.
+`upload_folder`; `upload_hf` defensively unwraps both shapes.
 
 The dataset card has a `configs:` YAML pointing at
 `contributors/**/*.jsonl`, which is what the auto-loader needs to
