@@ -289,10 +289,7 @@ def _read_upload_password(prompt: bool = True) -> str | None:
         return None
     import getpass
     print(
-        "to submit, please enter the upload password "
-        "(posted on the dataset card at "
-        "https://huggingface.co/datasets/a9lim/llmoji "
-        "and on Twitter at https://twitter.com/_a9lim)."
+        "to submit, please enter the upload password."
     )
     try:
         pw = getpass.getpass("upload password: ")
@@ -399,8 +396,7 @@ def upload_hf(
     if user_token is None:
         raise HFAuthError(
             "No HF token found. llmoji uses your HF account as a "
-            "proof-of-life check (one whoami call, discarded "
-            "immediately, never used to push the bundle). Please "
+            "proof-of-life check. Please "
             "run `hf auth login` and try again."
         )
     user_name = _proof_of_life(user_token)
@@ -430,8 +426,7 @@ def upload_hf(
         raise HFAuthError(
             "no upload password provided. The current password "
             "is posted on the dataset card at "
-            "https://huggingface.co/datasets/a9lim/llmoji and on "
-            f"Twitter at https://twitter.com/_a9lim, or set "
+            "https://huggingface.co/datasets/a9lim/llmoji or set "
             f"${UPLOAD_PASSWORD_ENV} for scripted use."
         )
     try:
