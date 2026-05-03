@@ -61,8 +61,14 @@ from .synth import (
     synthesize_descriptions,
 )
 from .synth_prompts import (
+    BACKEND_RATES_USD_PER_1M_TOKENS,
+    CHARS_PER_TOKEN_HEURISTIC,
+    DEFAULT_ANTHROPIC_MODEL_ID,
+    DEFAULT_OPENAI_MODEL_ID,
     DESCRIBE_PROMPT_NO_USER,
     DESCRIBE_PROMPT_WITH_USER,
+    ESTIMATE_STAGE_A_OUTPUT_CHARS,
+    ESTIMATE_STAGE_B_OUTPUT_CHARS,
     SYNTHESIZE_PROMPT,
 )
 from .taxonomy import canonicalize_kaomoji
@@ -82,12 +88,30 @@ INSTANCE_SAMPLE_SEED = 0
 # beyond per-future result handling on the main thread.
 # Override via $LLMOJI_CONCURRENCY (>=1).
 #
-# Default 2 keeps us well under the 50 req/min Haiku org cap once
-# retries kick in. Bumping past 2 starts to trip the cap mid-run on
-# corpora with hundreds of cache misses; the SDK's exponential
-# backoff (max_retries=8) recovers but burns wallclock. Set
-# ``LLMOJI_CONCURRENCY=4+`` if you have a higher rate limit tier.
-DEFAULT_STAGE_A_CONCURRENCY = 2
+# Default 1 because the org-level Haiku rate cap (50 req/min) trips
+# intermittently even at concurrency=2 on multi-hundred-row backfills.
+# Pre-Wave-6 default was 2; the SDK's ``max_retries=8`` exponential
+# backoff (set explicitly in ``AnthropicSynthesizer.__init__`` /
+# ``OpenAISynthesizer.__init__``, vs the SDK default of 2) recovered
+# but burned wallclock and, more importantly, a mid-wave failure
+# could lose successful Stage-A results that hadn't reached the
+# deferred cache flush. Wave 6 fixed the cache-on-error bug AND
+# dropped the default to 1 so the safe path is also the default;
+# bump via ``LLMOJI_CONCURRENCY=4+`` (or ``--concurrency 4``) if your
+# rate limit tier has the headroom.
+DEFAULT_STAGE_A_CONCURRENCY = 1
+
+
+class AnalyzeError(RuntimeError):
+    """Stage A or Stage B aborted with one or more failed synth calls.
+
+    Stage A errors leave the cache flushed for cells that succeeded
+    before the failure — re-running ``llmoji analyze`` resumes from
+    cache, paying API cost only for the cells that previously failed.
+    Stage B errors leave Stage A's cache fully intact, so a re-run
+    short-circuits Stage A entirely on cached cells and retries only
+    the Stage B syntheses.
+    """
 
 
 @dataclass
@@ -101,6 +125,35 @@ class AnalyzeResult:
     stage_a_calls_made: int
     stage_a_calls_cached: int
     stage_b_calls_made: int
+
+
+@dataclass
+class AnalyzePlan:
+    """``--dry-run`` snapshot — what an ``analyze`` invocation would
+    compute, without actually making any synth calls.
+
+    Counts assume a cold cache (worst case for cost — a warm-cache
+    re-run pays for fewer dispatches). Per-cell sample counts respect
+    :data:`INSTANCE_SAMPLE_CAP`. Token counts and cost are
+    approximate (see :data:`CHARS_PER_TOKEN_HEURISTIC` /
+    :data:`ESTIMATE_STAGE_*_OUTPUT_CHARS` in :mod:`synth_prompts` for
+    the heuristics) — reliable for "is this $0.04 or $4?" but not as
+    a quote.
+    """
+
+    total_rows: int
+    canonical_unique: int
+    providers_seen: list[str]
+    model_counts: dict[str, int]
+    counts_by_cell: dict[str, dict[str, int]]
+    stage_a_unique_calls: int
+    stage_a_max_calls: int  # before duplicate-key dedupe
+    stage_b_calls: int
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_cost_usd: float | None  # None when backend isn't priced
+    backend: str
+    model_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -202,11 +255,19 @@ def _stage_a(
     outputs for the cell — one entry per sampled row.
 
     Cache-miss API calls run on a small thread pool (``max_workers``
-    or ``$LLMOJI_CONCURRENCY``, default 2). Both SDK clients are
-    thread-safe; cache appends happen serially on the main thread
-    after all dispatched futures complete, in deterministic walk
-    order, so the bundle and the cache file are identical regardless
-    of the order futures finish in.
+    or ``$LLMOJI_CONCURRENCY``, default 1). Both SDK clients are
+    thread-safe.
+
+    Cache writes happen as each future succeeds, immediately, on the
+    main thread inside the ``as_completed`` loop. If any dispatch
+    raises, the cache is already flushed for cells that succeeded
+    before the failure; we collect errors and raise
+    :class:`AnalyzeError` once the loop has fully drained, so the
+    user can re-run and resume from the cache. ``descs_by_cell`` is
+    still assembled in deterministic walk order from the populated
+    walk entries — only the on-disk cache row order depends on which
+    futures finished first, and the cache is hash-keyed (order on
+    disk is not load-bearing).
     """
     cache = load_cache(cache_path)
     n_cached = 0
@@ -267,6 +328,7 @@ def _stage_a(
         if not e["cached"]:
             pending_by_key[e["key"]].append(i)
 
+    n_calls = 0
     if pending_by_key:
         workers = _resolve_concurrency(max_workers)
         if print_progress:
@@ -279,6 +341,11 @@ def _stage_a(
         def _describe_one(prompt: str) -> str:
             return synth.call(prompt)
 
+        # Catching ``Exception`` (not ``BaseException``) so Ctrl-C
+        # propagates naturally — the user gets the same partial-flush
+        # behavior on interrupt as on a synth error, and a re-run
+        # resumes from cache either way.
+        errors: dict[str, Exception] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_key = {
                 pool.submit(_describe_one, walk[indices[0]]["prompt"]): key
@@ -296,41 +363,50 @@ def _stage_a(
                 )
             for fut in iterator:
                 key = future_to_key[fut]
-                description = fut.result()
+                try:
+                    description = fut.result()
+                except Exception as e:  # noqa: BLE001 — error captured + reraised
+                    errors[key] = e
+                    continue
                 indices = pending_by_key[key]
+                # Populate every walk entry that shares this key, so
+                # the deterministic-walk-order assembly below sees a
+                # full description for the cell.
                 for i in indices:
                     walk[i]["description"] = description
+                # Flush cache immediately. A later future raising
+                # can't lose this row.
+                row = {
+                    "key": key,
+                    "kaomoji": walk[indices[0]]["canon"],
+                    "description": description,
+                    "model": synth.model_id,
+                    "backend": synth.backend,
+                }
+                append_cache(cache_path, row)
+                cache[key] = row
+                n_calls += 1
 
-    # Serialize: assemble descs_by_cell + append cache in deterministic
-    # walk order. Order matters for Stage B because SYNTHESIZE_PROMPT
-    # numbers the descriptions; if Stage B sees the same list in the
-    # same order across runs, it produces the same prose. The cache
-    # is written once per unique key — duplicate walk entries share
-    # the cached row so a warm-cache rerun resolves all duplicates
-    # to the same description.
+        if errors:
+            first_err = next(iter(errors.values()))
+            raise AnalyzeError(
+                f"stage A: {n_calls} of {len(pending_by_key)} dispatch(es) "
+                f"succeeded ({len(errors)} failed). cache flushed for "
+                f"successes; re-run `llmoji analyze` to resume.\n"
+                f"first failure: {first_err!r}"
+            ) from first_err
+
+    # Assemble ``descs_by_cell`` in deterministic walk order. Every
+    # walk entry is now populated (cache hit, or successfully
+    # dispatched — we'd have raised above otherwise). Order matters
+    # for Stage B because ``SYNTHESIZE_PROMPT`` numbers the
+    # descriptions; if Stage B sees the same list in the same order
+    # across runs, it produces the same prose.
     descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    n_calls = 0
-    written_keys: set[str] = set()
     for entry in walk:
-        sm = entry["sm"]
-        canon = entry["canon"]
-        description = entry["description"]
-        descs_by_cell[sm][canon].append(description)
-        key = entry["key"]
-        if not entry["cached"] and key not in written_keys:
-            row = {
-                "key": key,
-                "kaomoji": canon,
-                "description": description,
-                "model": synth.model_id,
-                "backend": synth.backend,
-            }
-            append_cache(cache_path, row)
-            cache[key] = row
-            written_keys.add(key)
-            n_calls += 1
+        descs_by_cell[entry["sm"]][entry["canon"]].append(entry["description"])
 
     return _freeze_two_level(descs_by_cell), n_calls, n_cached
 
@@ -358,9 +434,14 @@ def _stage_b(
     ``(synthesized_by_cell, n_calls)``.
 
     Synthesis calls dispatch on the same thread pool Stage A uses
-    (``max_workers`` or ``$LLMOJI_CONCURRENCY``, default 2). Each
+    (``max_workers`` or ``$LLMOJI_CONCURRENCY``, default 1). Each
     cell's synthesis is independent — no shared mutable state, no
     cache to serialize, so the dispatch is pure parallelism win.
+
+    Errors are collected per cell and raised together as
+    :class:`AnalyzeError` once the loop drains. Stage A's cache is
+    untouched, so a re-run hits the cache for every Stage A cell and
+    only retries the failed Stage B syntheses.
     """
     pending: list[tuple[str, str, list[str]]] = []
     for sm in sorted(descs_by_cell):
@@ -386,22 +467,41 @@ def _stage_b(
 
     out: dict[str, dict[str, str]] = defaultdict(dict)
     n_calls = 0
+    errors: list[tuple[str, str, Exception]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_synth_one, sm, c, d) for sm, c, d in pending]
-        iterator = as_completed(futures)
+        future_to_cell = {
+            pool.submit(_synth_one, sm, c, d): (sm, c)
+            for sm, c, d in pending
+        }
+        iterator = as_completed(future_to_cell)
         if print_progress:
             iterator = tqdm(
                 iterator,
-                total=len(futures),
+                total=len(future_to_cell),
                 desc="stage B",
                 unit="cell",
                 dynamic_ncols=True,
                 leave=True,
             )
         for fut in iterator:
-            sm, canon, line = fut.result()
+            sm, canon = future_to_cell[fut]
+            try:
+                _, _, line = fut.result()
+            except Exception as e:  # noqa: BLE001 — error captured + reraised
+                errors.append((sm, canon, e))
+                continue
             out[sm][canon] = line
             n_calls += 1
+
+    if errors:
+        first_sm, first_canon, first_err = errors[0]
+        raise AnalyzeError(
+            f"stage B: {n_calls} of {len(pending)} cell(s) succeeded "
+            f"({len(errors)} failed). stage A cache is intact; "
+            f"re-run `llmoji analyze` to resume.\n"
+            f"first failure ({first_sm!r}, {first_canon!r}): {first_err!r}"
+        ) from first_err
+
     return {sm: dict(per_canon) for sm, per_canon in out.items()}, n_calls
 
 
@@ -550,6 +650,149 @@ def _print_preview(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _resolve_default_model_id(backend: str, model_id: str | None) -> str:
+    """Mirror :func:`llmoji.synth.make_synthesizer`'s pinning rules
+    without instantiating a synthesizer (which would import an SDK).
+    Used by :func:`plan_analyze` so a dry-run never touches the
+    Anthropic / OpenAI clients.
+    """
+    if model_id is not None:
+        return model_id
+    if backend == "anthropic":
+        return DEFAULT_ANTHROPIC_MODEL_ID
+    if backend == "openai":
+        return DEFAULT_OPENAI_MODEL_ID
+    # local: caller should have passed model_id; fall back to a
+    # placeholder string so the cache_key hash works in dry-run mode.
+    return "(local)"
+
+
+def plan_analyze(
+    rows: Iterable[ScrapeRow],
+    *,
+    backend: str = "anthropic",
+    base_url: str | None = None,
+    model_id: str | None = None,
+) -> AnalyzePlan:
+    """Build an :class:`AnalyzePlan` without calling any synth backend.
+
+    Walks rows, buckets them, runs the same deterministic Stage-A
+    sampling :func:`_stage_a` would, computes the cache-key dedupe
+    that :func:`_stage_a` applies, and estimates token usage / cost
+    against the per-1M rate table in :mod:`synth_prompts`. Backend
+    SDKs are not imported (``cache_key`` is pure-Python; the synth
+    classes that pull in SDKs are not invoked).
+    """
+    rows_list = list(rows)
+    buckets, providers_seen, model_counts = (
+        _bucket_by_source_model_and_canonical(rows_list)
+    )
+    counts_by_cell: dict[str, dict[str, int]] = {
+        sm: {canon: len(rs) for canon, rs in per_canon.items()}
+        for sm, per_canon in buckets.items()
+    }
+
+    resolved_model_id = _resolve_default_model_id(backend, model_id)
+    base_url_str = base_url or ""
+
+    # Walk the same cells / sample the same rows / compute the same
+    # cache keys :func:`_stage_a` would. Track unique keys + accumulate
+    # input chars per dispatch so the estimate matches what the real
+    # run would issue at cold cache.
+    seen_keys: set[str] = set()
+    stage_a_input_chars = 0
+    stage_a_max_calls = 0
+    samples_per_cell: dict[tuple[str, str], int] = {}
+
+    for sm in sorted(buckets):
+        per_canon = buckets[sm]
+        for canon in sorted(per_canon):
+            sampled = _sample(
+                per_canon[canon],
+                cap=INSTANCE_SAMPLE_CAP,
+                seed_label=f"{sm}:{canon}",
+            )
+            samples_per_cell[(sm, canon)] = len(sampled)
+            stage_a_max_calls += len(sampled)
+            for r in sampled:
+                user_text = (r.surrounding_user or "").strip()
+                assistant = r.assistant_text or ""
+                key = cache_key(
+                    resolved_model_id, backend, base_url_str,
+                    canon, user_text, assistant,
+                )
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                # mask_kaomoji-equivalent: the masked text is
+                # "[FACE] " + assistant, length-equivalent for
+                # estimation purposes.
+                masked_chars = len("[FACE] ") + len(assistant)
+                if user_text:
+                    prompt_chars = (
+                        len(DESCRIBE_PROMPT_WITH_USER)
+                        + len(user_text) + masked_chars
+                    )
+                else:
+                    prompt_chars = (
+                        len(DESCRIBE_PROMPT_NO_USER) + masked_chars
+                    )
+                stage_a_input_chars += prompt_chars
+
+    stage_a_unique_calls = len(seen_keys)
+    stage_a_output_chars = (
+        stage_a_unique_calls * ESTIMATE_STAGE_A_OUTPUT_CHARS
+    )
+
+    # Stage B: one call per non-empty cell. Input = the prompt template
+    # plus N stage-A descriptions concatenated. Output ≈ one summary
+    # per cell.
+    stage_b_calls = sum(
+        1 for sm in buckets for _ in buckets[sm]
+    )
+    stage_b_input_chars = sum(
+        len(SYNTHESIZE_PROMPT)
+        + samples_per_cell.get((sm, canon), 0)
+        * ESTIMATE_STAGE_A_OUTPUT_CHARS
+        for sm in buckets for canon in buckets[sm]
+    )
+    stage_b_output_chars = stage_b_calls * ESTIMATE_STAGE_B_OUTPUT_CHARS
+
+    total_input_chars = stage_a_input_chars + stage_b_input_chars
+    total_output_chars = stage_a_output_chars + stage_b_output_chars
+    input_tokens = total_input_chars // CHARS_PER_TOKEN_HEURISTIC
+    output_tokens = total_output_chars // CHARS_PER_TOKEN_HEURISTIC
+
+    rates = BACKEND_RATES_USD_PER_1M_TOKENS.get(backend)
+    if rates:
+        cost = (
+            (input_tokens / 1_000_000) * rates["input"]
+            + (output_tokens / 1_000_000) * rates["output"]
+        )
+    else:
+        cost = None
+
+    n_unique_canon = len({
+        canon for per_canon in buckets.values() for canon in per_canon
+    })
+
+    return AnalyzePlan(
+        total_rows=len(rows_list),
+        canonical_unique=n_unique_canon,
+        providers_seen=providers_seen,
+        model_counts=model_counts,
+        counts_by_cell=counts_by_cell,
+        stage_a_unique_calls=stage_a_unique_calls,
+        stage_a_max_calls=stage_a_max_calls,
+        stage_b_calls=stage_b_calls,
+        estimated_input_tokens=int(input_tokens),
+        estimated_output_tokens=int(output_tokens),
+        estimated_cost_usd=cost,
+        backend=backend,
+        model_id=resolved_model_id,
+    )
 
 
 def run_analyze(

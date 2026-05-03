@@ -267,6 +267,21 @@ class HermesProvider(HookInstaller):
         nudge_reg = results[1] if self.has_nudge else False
         return main_reg, nudge_reg
 
+    def _check_settings_health(self) -> str | None:
+        """YAML-aware override: ``_read_and_parse`` raises
+        :class:`SettingsCorruptError` for bad YAML / non-mapping
+        top-levels with the same ``why`` framing the JSON loader
+        uses, so the diagnostic surface stays uniform across
+        providers.
+        """
+        if not self.settings_path.exists():
+            return None
+        try:
+            self._read_and_parse()
+        except SettingsCorruptError as e:
+            return e.why
+        return None
+
     # --- read+parse ---
 
     def _read_and_parse(self) -> tuple[str, CommentedMap]:

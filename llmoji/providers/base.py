@@ -32,6 +32,18 @@ class ProviderStatus:
     ``nudge_hook_path`` is ``None`` for providers that don't ship a
     nudge hook; ``nudge_installed`` defaults False in that case so
     downstream callers don't need to special-case absence.
+
+    Health-check fields (``main_hook_current``, ``nudge_hook_current``,
+    ``settings_parse_error``) layer cheap diagnostics onto the
+    install-presence check. ``main_hook_current`` is False when the
+    hook file exists but its content doesn't match what
+    :meth:`HookInstaller.render_hook` produces for the running
+    package version — typically caused by upgrading llmoji without
+    re-running ``install``. ``settings_parse_error`` carries the
+    why-string from :class:`SettingsCorruptError` when the settings
+    file is unparseable, ``None`` otherwise; the CLI surfaces it so
+    a user with a hand-broken config sees the reason inline rather
+    than a silent "not installed" marker.
     """
 
     name: str
@@ -44,6 +56,9 @@ class ProviderStatus:
     journal_path: Path
     nudge_hook_path: Path | None = None
     nudge_installed: bool = False
+    main_hook_current: bool = True
+    nudge_hook_current: bool = True
+    settings_parse_error: str | None = None
 
 
 def _shell_quote(s: str) -> str:
@@ -167,6 +182,22 @@ class HookInstaller:
             and self.nudge_event
         )
 
+    def is_present(self) -> bool:
+        """Heuristic: does this harness's home directory exist on disk?
+
+        Used by ``llmoji install`` (no provider arg) to decide which
+        providers to install for. The signal is the same one a user
+        would get from ``ls ~`` — ``~/.claude`` exists for Claude Code,
+        ``~/.codex`` for Codex, ``~/.hermes`` for Hermes. Trying to be
+        cleverer (distinguishing "installed" from "ran once and
+        aborted") is fragile and not worth it; if a parent dir exists
+        the harness has at least left a footprint, and a user who
+        deleted their harness home but kept the parent dir is an edge
+        case we accept the false-positive on. Subclasses are free to
+        override if a more specific signal turns out to matter.
+        """
+        return self.settings_path.parent.exists()
+
     def render_hook(self) -> str:
         """Read the bash template from package data and substitute the
         provider-specific placeholders. Returns the rendered hook as a
@@ -275,6 +306,22 @@ class HookInstaller:
         journal_bytes = (
             self.journal_path.stat().st_size if journal_exists else 0
         )
+        # Health checks: cheap O(few-file-reads) diagnostics on top
+        # of the install-presence check. Stale-hook detection compares
+        # the on-disk hook content against what render_hook() would
+        # produce now, so an upgrade-without-reinstall surfaces as
+        # a "stale" warning rather than silently running yesterday's
+        # bash. Skip when the hook file is missing — that's already
+        # captured by ``main_installed=False``.
+        if main_installed:
+            main_hook_current = self._is_main_hook_current()
+        else:
+            main_hook_current = True
+        if self.has_nudge and nudge_installed:
+            nudge_hook_current = self._is_nudge_hook_current()
+        else:
+            nudge_hook_current = True
+        settings_parse_error = self._check_settings_health()
         return ProviderStatus(
             name=self.name,
             installed=installed,
@@ -286,7 +333,42 @@ class HookInstaller:
             journal_path=self.journal_path,
             nudge_hook_path=nudge_hook_path,
             nudge_installed=nudge_installed,
+            main_hook_current=main_hook_current,
+            nudge_hook_current=nudge_hook_current,
+            settings_parse_error=settings_parse_error,
         )
+
+    def _is_main_hook_current(self) -> bool:
+        """Hook file content matches what :meth:`render_hook` produces
+        right now. False on file read errors (defensive — the user
+        sees "stale" and re-runs install)."""
+        try:
+            return self.hook_path.read_text() == self.render_hook()
+        except OSError:
+            return False
+
+    def _is_nudge_hook_current(self) -> bool:
+        if self.nudge_hook_path is None:
+            return True
+        try:
+            return self.nudge_hook_path.read_text() == self.render_nudge_hook()
+        except OSError:
+            return False
+
+    def _check_settings_health(self) -> str | None:
+        """``None`` if the settings file is parseable (or absent),
+        else a short error message describing why parsing failed.
+
+        Default implementation handles JSON-settings providers via
+        :func:`_load_json_strict`. YAML providers (hermes) override.
+        """
+        if not self.settings_path.exists():
+            return None
+        try:
+            _load_json_strict(self.settings_path)
+        except SettingsCorruptError as e:
+            return e.why
+        return None
 
     # --- subclass hooks ---
     #
