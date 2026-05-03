@@ -660,39 +660,115 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _import_one(
+    name: str, *, since: str | None, dry_run: bool,
+) -> tuple[bool, str | None]:
+    """Wrap ``import_provider`` so the autodetect path can keep going
+    on per-provider failure. Mirrors ``_install_one``'s contract:
+    returns ``(succeeded, error_message)`` and prints the per-provider
+    summary on success.
+    """
+    from .backfill import import_provider
+
+    try:
+        result = import_provider(name, since=since, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
+        return False, f"{type(e).__name__}: {e}"
+
+    label = "would append" if dry_run else "appended"
+    skipped = result.rows_seen - result.rows_novel
+    print(
+        f"{name}: saw {result.rows_seen} row(s); {label} "
+        f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
+    )
+    if dry_run:
+        print("(dry run — journal not modified)")
+    elif result.rows_novel:
+        print(
+            f"journal: {get_provider(name).journal_path}\n"
+            f"run `llmoji analyze` to fold them into the next bundle."
+        )
+    return True, None
+
+
 def _cmd_import(args: argparse.Namespace) -> int:
-    """``llmoji import <provider>`` — dedup-aware merge of historical
+    """``llmoji import [<provider>]`` — dedup-aware merge of historical
     session/transcript files into the live journal. Internal module
     is :mod:`llmoji.backfill`; ``import`` is the user-facing verb
     because "replay session files into the journal" is the dominant
     mental model and ``backfill`` collides namewise with what users
     might expect to be "redo the analyze pass."
-    """
-    from .backfill import import_provider
 
-    try:
-        result = import_provider(
-            args.provider,
-            since=args.since,
-            dry_run=args.dry_run,
+    No-arg path mirrors ``llmoji install``'s autodetect: enumerate
+    every importable provider whose harness home dir exists on disk,
+    prompt unless ``--yes``, run each. Partial success OK — a single
+    provider failing doesn't take down the rest of the batch.
+    """
+    from .backfill import IMPORTABLE_PROVIDERS
+
+    # Explicit provider: legacy single-target path.
+    if args.provider is not None:
+        ok, err = _import_one(
+            args.provider, since=args.since, dry_run=args.dry_run,
         )
-    except ValueError as e:
-        print(f"import failed: {e}", file=sys.stderr)
+        if not ok:
+            print(f"import failed for {args.provider}: {err}", file=sys.stderr)
+            return 2
+        return 0
+
+    # Autodetect path: importable providers (claude_code, codex,
+    # hermes) whose harness home dir exists. TS-plugin providers
+    # (opencode, openclaw) don't expose a replayable on-disk
+    # transcript shape and so are excluded — see
+    # ``backfill.IMPORTABLE_PROVIDERS``.
+    detected = [
+        name for name in IMPORTABLE_PROVIDERS
+        if get_provider(name).is_present()
+    ]
+    if not detected:
+        print(
+            "no importable harnesses detected (looked for "
+            + ", ".join(
+                f"{name} ({get_provider(name).settings_path.parent})"
+                for name in IMPORTABLE_PROVIDERS
+            )
+            + "). install a supported harness, or pass an explicit "
+            "provider name (e.g. `llmoji import claude_code`).",
+            file=sys.stderr,
+        )
         return 2
 
-    label = "would append" if args.dry_run else "appended"
-    skipped = result.rows_seen - result.rows_novel
-    print(
-        f"{args.provider}: saw {result.rows_seen} row(s); {label} "
-        f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
-    )
-    if args.dry_run:
-        print("(dry run — journal not modified)")
-    elif result.rows_novel:
-        print(
-            f"journal: {get_provider(args.provider).journal_path}\n"
-            f"run `llmoji analyze` to fold them into the next bundle."
+    print("detected harnesses:")
+    for name in detected:
+        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+    if not args.yes:
+        try:
+            ans = input(
+                f"import session history from {len(detected)} "
+                f"harness(es)? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    print()
+
+    # Partial success: one provider failing doesn't kill the rest.
+    failures: list[tuple[str, str]] = []
+    for name in detected:
+        ok, err = _import_one(
+            name, since=args.since, dry_run=args.dry_run,
         )
+        if not ok:
+            failures.append((name, err or ""))
+        print()
+    if failures:
+        print(f"{len(failures)} of {len(detected)} provider(s) failed:",
+              file=sys.stderr)
+        for name, err in failures:
+            print(f"  - {name}: {err}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -877,12 +953,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "import",
         help=(
             "replay a provider's native session/transcript files into "
-            "its journal (dedup-aware merge — re-runnable)"
+            "its journal (dedup-aware merge — re-runnable). With no "
+            "provider arg, autodetects every importable harness whose "
+            "home dir exists and replays each."
         ),
     )
+    # Lazy import so the parser can be built without loading the
+    # backfill module (which pulls in source-format readers).
+    from .backfill import IMPORTABLE_PROVIDERS as _IMPORTABLE_PROVIDERS
     sp.add_argument(
-        "provider", choices=sorted(PROVIDERS),
-        help="harness whose session files to walk",
+        "provider", nargs="?", default=None,
+        choices=sorted(_IMPORTABLE_PROVIDERS),
+        help=(
+            "harness whose session files to walk; omit to autodetect "
+            "every importable harness present on disk"
+        ),
     )
     sp.add_argument(
         "--since", default=None,
@@ -894,6 +979,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--dry-run", action="store_true",
         help="walk + dedup but don't write the journal",
+    )
+    sp.add_argument(
+        "--yes", action="store_true",
+        help=(
+            "skip the autodetect confirmation prompt (no-op for the "
+            "explicit-provider path)"
+        ),
     )
     sp.set_defaults(func=_cmd_import)
 

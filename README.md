@@ -11,6 +11,9 @@
 > 
 > **アップグレードされる方へのプライバシーに関するお知らせ：** `llmoji`のバージョン1.2.0より前の版にはプライバシー上の問題がありました。この問題を軽減するため、アップロード方法を変更いたしました。アップロードを行うには、最新版へのアップグレード（`pip install --upgrade llmoji`）をお願いいたします。
 
+> [!WARNING]
+> **The kaomoji detection has been significantly improved with v2.0.0. Please run `llmoji import` to backfill your logs with any missed kaomoji before uploading.**
+
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
 Llmoji configures your agent to start each message with a kaomoji. It locally saves them, and provides tools to summarize and upload the aggregated meaning per face to contribute to a shared database.
@@ -188,7 +191,7 @@ llmoji parse --provider openhands ~/.openhands/conversations
 | `gemini`    | `MyActivity.json`                                                                         | `gemini_aistudio_export.jsonl`          |
   | `openhands` | `<conversation>/events/event-NNNNN-<id>.json`                                          | `openhands_export.jsonl` |
 
-For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`.
+For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`. Run with no provider to autodetect every importable harness present on disk and replay each in one go: `llmoji import` (or `llmoji import --yes` to skip the confirmation prompt). Re-runs are idempotent — every replayed row is dedup'd against the existing journal, so it's safe to run after any taxonomy improvement to recover newly-recognized kaomoji.
 
 ---
 
