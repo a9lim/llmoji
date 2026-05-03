@@ -1,12 +1,20 @@
 // Mirror of llmoji.taxonomy.KAOMOJI_START_CHARS — the literal Python
 // frozenset, character for character. These are Unicode glyphs, not
 // ASCII. Keep in sync with taxonomy.py.
+//
+// v2.0 broadened the leader set with Greek (Σ ψ Ψ ε), Latin
+// extensions (ƪ ʕ — raised hands and the bear face), and
+// box-drawing diagonals (╱ ╲ — heavy-line wing variants), in
+// addition to the v2.0 round-1 wing/hug/sparkle additions
+// (\, ⊂, ✧).
 const KAOMOJI_START_CHARS = new Set<string>(
-  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒"),
+  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧ΣψεƪʕΨ╱╲"),
 );
 
-const OPEN_BRACKETS = "([（｛";
-const CLOSE_BRACKETS = ")]）｝";
+// Bracket pairs the depth-walker treats as kaomoji boundaries.
+// `ʕ`/`ʔ` recognize the bear face `ʕ•ᴥ•ʔ` as a balanced span.
+const OPEN_BRACKETS = "([（｛ʕ";
+const CLOSE_BRACKETS = ")]）｝ʔ";
 const KAOMOJI_MAX_LEN = 32;
 const LETTER_RUN_RE = /[A-Za-z]{4}/;
 
@@ -20,7 +28,8 @@ function codepoints(s: string): string[] {
 // Port of llmoji.taxonomy.is_kaomoji_candidate. Rules (all must pass):
 //   - length 2..KAOMOJI_MAX_LEN
 //   - first char in KAOMOJI_START_CHARS
-//   - no ASCII backslash (markdown-escape artifact)
+//   - no ASCII backslash AT POSITION >= 1 (markdown-escape artifact);
+//     position 0 is allowed (wing-hand `\(^o^)/` pattern, v2.0)
 //   - no run of 4+ consecutive ASCII letters (prose)
 //   - bracket-balanced across OPEN_BRACKETS / CLOSE_BRACKETS,
 //     regardless of leading char.
@@ -28,7 +37,7 @@ function isKaomojiCandidate(s: string): boolean {
   const chars = codepoints(s);
   if (chars.length < 2 || chars.length > KAOMOJI_MAX_LEN) return false;
   if (!KAOMOJI_START_CHARS.has(chars[0])) return false;
-  if (s.includes("\\")) return false;
+  if (chars.slice(1).includes("\\")) return false;
   if (LETTER_RUN_RE.test(s)) return false;
   let depth = 0;
   for (const c of chars) {

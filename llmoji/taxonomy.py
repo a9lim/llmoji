@@ -34,8 +34,12 @@ import unicodedata
 from dataclasses import dataclass
 
 # Bracket pairs the fallback extractor treats as kaomoji boundaries.
-_OPEN_BRACKETS = "([（｛"
-_CLOSE_BRACKETS = ")]）｝"
+# `ʕ`/`ʔ` (LATIN LETTER PHARYNGEAL VOICED FRICATIVE / GLOTTAL STOP)
+# are the bear-face brackets in `ʕ•ᴥ•ʔ` — adding them to the depth-
+# walk pair lets the bracket-balance branch surface the bear span
+# directly instead of falling through to the whitespace-fallback.
+_OPEN_BRACKETS = "([（｛ʕ"
+_CLOSE_BRACKETS = ")]）｝ʔ"
 
 # Leading-glyph filter for kaomoji-bearing assistant turns. Used by
 # `extract`, by `is_kaomoji_candidate`, and by every shell hook
@@ -43,7 +47,35 @@ _CLOSE_BRACKETS = ")]）｝"
 # pattern via `llmoji.providers.base.render_kaomoji_start_chars_case`).
 # Single source of truth; previous versions duplicated this set in
 # five places, which is the gotcha the v1.0 split resolved.
-KAOMOJI_START_CHARS: frozenset[str] = frozenset("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒")
+#
+# v2.0 additions: ASCII `\` (wing-hand `\(^o^)/`), `⊂` (hugging arms
+# `⊂(...)⊂`), `✧` (sparkle-decorated `✧*｡(...)*｡✧`); plus a comprehensive
+# sweep of non-prose leaders identified while running Claude on
+# emotional prompts:
+#
+#   * Greek `Σ ψ Ψ ε` — `Σ(°△°|||)` shocked-sigma, `ψ(´Д`)ψ` /
+#     `Ψ(´Д`)Ψ` horn-fingers, `ε(◕‿◕)з` kissing-pair.
+#   * Latin extensions `ƪ ʕ` — `ƪ(˘⌣˘)ʃ` raised hands and the
+#     `ʕ•ᴥ•ʔ` bear face. (`ʕ` doubles as a face-bracket — see
+#     `_OPEN_BRACKETS`.)
+#   * Box-drawing diagonals `╱ ╲` — `╲(◕‿◕)╱` celebratory wings,
+#     the heavier-line cousins of `\(^o^)/`.
+#
+# Deliberately NOT added (despite being real kaomoji leaders):
+# ASCII letters `o O q b d m p t` — these collide with very common
+# 2-3 letter prose words ("ok", "of", "my", "to", "be", ...) that
+# the validator's `is_kaomoji_candidate` would let through. The
+# Greek/Latin-extension/box-drawing additions above don't have that
+# problem because they almost never start a non-kaomoji English word.
+# `「『【〈《` (Japanese corner brackets) — also real kaomoji
+# wrappers (`「(゜～゜)」`) but rarer in coding-agent corpora and
+# bring depth-walk complications without much corpus benefit.
+KAOMOJI_START_CHARS: frozenset[str] = frozenset(
+    "([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧"  # v1.0 set + early v2.0 wing/hug/sparkle
+    "Σψεƪʕ"                       # Greek + Latin extension (kaomoji bodies/arms)
+    "Ψ"                            # capital psi (matching ψ horn-arm)
+    "╱╲"                           # box-drawing diagonals (alt slashes)
+)
 
 
 # Maximum length of a real kaomoji we expect to encounter. Real
@@ -71,9 +103,11 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     Rules (all must pass):
       - length 2..`max_len`
       - first char ∈ `KAOMOJI_START_CHARS`
-      - no ASCII backslash (markdown-escape artifact, e.g.
+      - no ASCII backslash *except* at position 0 — backslash at
+        position 0 is the wing-hand pattern (``\\(^o^)/``), backslash
+        anywhere else is a markdown-escape artifact (e.g.
         ``(\\*´∀｀\\*)`` came from a model emitting a literal ``\\*``
-        that it treated as Markdown escape)
+        that it treated as Markdown escape).
       - no run of 4+ consecutive ASCII letters (prose)
 
     Bracket balance is *not* enforced. Real corpus output is
@@ -82,12 +116,17 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     check over-rejected valid entries. The length cap, the
     4-letter-run rule, and the backslash filter together carry the
     prose-rejection role.
+
+    v2.0 (was: ``"\\\\" in s``): backslash filter relaxed to allow a
+    leading wing. v1 rejected ``\\(^o^)/`` along with the markdown
+    artifacts; v2 accepts the former and still rejects the latter
+    (markdown escape produces ``\\X`` at position >= 1, never 0).
     """
     if not (2 <= len(s) <= max_len):
         return False
     if s[0] not in KAOMOJI_START_CHARS:
         return False
-    if "\\" in s:
+    if "\\" in s[1:]:
         return False
     if _LETTER_RUN_RE.search(s):
         return False
@@ -271,9 +310,60 @@ def extract(text: str) -> KaomojiMatch:
 #      arm modifier (alongside ``っ``, ``c``, ``ς``, ``ﻭ``).
 #      ``(*•̀‿•́*)`` collapses to ``(•̀‿•́)``.
 
-# Arm/hand modifiers that appear OUTSIDE the closing paren:
-#   (๑˃ᴗ˂)ﻭ  (っ╥﹏╥)っ
-_ARM_OUTSIDE = "ﻭっ"
+# Arm/hand/decoration modifiers that appear OUTSIDE the closing paren.
+# v2.0 strips the full set of paired-arm and pose-arm patterns to the
+# bare face. Each char below is the trail half of one of these
+# patterns:
+#   ﻭ            (๑˃ᴗ˂)ﻭ           cheering (Arabic waw)
+#   っ            (っ╥﹏╥)っ          reaching tsu
+#   /            (´∀`)/             wing-hand right
+#   ⊂            (˘ω˘)⊂             hugging arm right (matched ⊂...⊂)
+#   ⊃            ⊂(◕‿◕)⊃           hugging arm right (matched ⊂...⊃)
+#   ✧            ✧(ˊᗜˋ)✧            sparkle right
+#   ۶            ٩(◕‿◕)۶            cheering Arabic-Indic six
+#   ᕗ            ᕕ(ᐛ)ᕗ              running Canadian syllabics hoi
+#   ७            ໒(◕‿◕)७            cradling Devanagari seven
+#   ψ Ψ          ψ(`Д´)ψ            horn-fingers right (lower/upper psi)
+#   з            ε(◕‿◕)з            kiss-close (Cyrillic ze)
+#   ʃ            ƪ(˘⌣˘)ʃ            raised-hand right (Latin esh)
+#   ╱            ╲(◕‿◕)╱            heavy-line wing right
+#   ノ ﾉ          ヽ(´ー`)ノ          raised-hand right (katakana no /
+#                                    halfwidth)
+#   ╯ ╮ ╭        ╰(´∀`)╯ ╭(´∀`)╮   box-drawing pose-arm closes
+#   ┌ ┐ ┘ └      ┐(´д`)┌            box-drawing shrug closes (with
+#                                    inverted-pattern siblings)
+#   ¯            ¯\_(ツ)_/¯          shrug macron right
+#   _            ¯\_(ツ)_/¯          shrug underscore right
+# Box-drawing chars appear in BOTH lead and trail because the
+# pose can be mirrored (``╮(´д`)╭`` is the inverted shrug); same
+# for ``¯`` and ``_`` in the shrug pattern. The regex anchors mean
+# this only fires at the very start (before ``(``) or very end
+# (after ``)``), so eye/mouth glyphs like ``_`` in ``(◕_◕)`` and
+# ``╯`` in the rage-cheek of ``(╯°□°)╯`` stay untouched.
+_ARM_OUTSIDE = "ﻭっ/⊂⊃✧۶ᕗ७ψΨзʃ╱ノﾉ╯╮╭┌┐┘└¯_"
+# Arm/hand/decoration modifiers that appear OUTSIDE the opening paren.
+# Mirror set to ``_ARM_OUTSIDE`` for the lead halves of the same
+# paired-arm patterns (plus ``Σ`` which is single-arm — shocked
+# sigma has no paired close):
+#   \           \(^o^)/             wing-hand left
+#   ⊂           ⊂(face)⊂            hugging arm left
+#   ✧           ✧(face)✧            sparkle left
+#   Σ           Σ(°△°|||)           shocked sigma (single-arm)
+#   ψ Ψ         ψ(`Д´)ψ             horn-fingers left
+#   ε           ε(◕‿◕)з             kiss-open
+#   ƪ           ƪ(˘⌣˘)ʃ             raised-hand left
+#   ╲           ╲(◕‿◕)╱             heavy-line wing left
+#   ٩           ٩(◕‿◕)۶             cheering left
+#   ᕕ           ᕕ(ᐛ)ᕗ               running left
+#   ໒           ໒(◕‿◕)७             cradling left
+#   ヽ ヾ        ヽ(´ー`)ノ           raised-hand left (v2.0 BREAKS
+#                                    v1 — was pinned as preserved
+#                                    pose by rule O test, now collapses)
+#   ╰ ╭ ╮ ┐ ┌   ╰(´∀`)╯  ┐(´д`)┌    box-drawing pose leaders
+#   ¯ \ _       ¯\_(ツ)_/¯           shrug components
+# Distinct from inside-leading modifiers (``っ``/``*``) which sit
+# BETWEEN ``(`` and face content (``(っ╥﹏╥)``, ``(*•̀‿•́*)``).
+_ARM_OUTSIDE_LEAD = "\\⊂✧ΣψΨεƪ╲٩ᕕ໒ヽヾ╰╭╮┐┌¯_"
 # Arm/hand modifiers that appear just INSIDE the closing paren:
 #   (っ˘▽˘ς)  (っ´ω`c)  (*•̀‿•́*)
 _ARM_INSIDE_TRAIL = "ςc*"
@@ -281,7 +371,8 @@ _ARM_INSIDE_TRAIL = "ςc*"
 #   (っ╥﹏╥)  (*•̀‿•́*)
 _ARM_INSIDE_LEAD = "っ*"
 
-_TRAIL_OUTSIDE_RE = re.compile(rf"[{_ARM_OUTSIDE}]+$")
+_TRAIL_OUTSIDE_RE = re.compile(rf"[{re.escape(_ARM_OUTSIDE)}]+$")
+_LEAD_OUTSIDE_RE = re.compile(rf"^[{re.escape(_ARM_OUTSIDE_LEAD)}]+(?=\()")
 _TRAIL_INSIDE_RE = re.compile(rf"[{re.escape(_ARM_INSIDE_TRAIL)}]+\)$")
 _LEAD_INSIDE_RE = re.compile(rf"^\([{re.escape(_ARM_INSIDE_LEAD)}]+")
 
@@ -464,8 +555,11 @@ def canonicalize_kaomoji(s: str) -> str:
         s = "(" + s[1:-1].replace(" ", "") + ")"
     for src, dst in _INTERNAL_SUBS:
         s = s.replace(src, dst)
-    # Strip outside-paren trailing arm chars first so trailing-inside
-    # detection sees the closing paren.
+    # Strip outside-paren leading and trailing arm chars first so the
+    # inside-paren detection sees the open/close parens unobscured.
+    # v2.0: ``_LEAD_OUTSIDE_RE`` collapses wing-hand ``\(^o^)/`` and
+    # hugging-arm ``⊂(face)⊂`` patterns to the bare face.
+    s = _LEAD_OUTSIDE_RE.sub("", s)
     s = _TRAIL_OUTSIDE_RE.sub("", s)
     s = _LEAD_INSIDE_RE.sub("(", s)
     s = _TRAIL_INSIDE_RE.sub(")", s)

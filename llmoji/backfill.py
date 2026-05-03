@@ -604,6 +604,15 @@ _PROVIDER_SOURCE_GLOBS: dict[str, tuple[type, str, str]] = {
     "hermes":      (HermesProvider, "sessions", "session_*.json"),
 }
 
+# Public-ish view of which providers ``import_provider`` can replay
+# from native session files. The TS-plugin providers (opencode,
+# openclaw) aren't here — their hosts don't persist a transcript-on-
+# disk shape we can replay, so live-hook capture is the only path
+# for those. CLI uses this to (a) tighten ``llmoji import`` 's
+# ``choices=`` to providers we can actually serve, and (b) drive the
+# no-arg autodetect path.
+IMPORTABLE_PROVIDERS: tuple[str, ...] = tuple(_PROVIDER_SOURCE_GLOBS)
+
 
 def _iter_rows_for_provider(name: str) -> Iterator[ScrapeRow]:
     """Walk the canonical source path for ``name`` and yield every

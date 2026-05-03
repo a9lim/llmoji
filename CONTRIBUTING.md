@@ -15,10 +15,12 @@ The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or networ
 ## Running tests
 
 ```bash
-pytest tests/                          # everything
-pytest tests/test_canonicalize.py -v   # rule-by-rule taxonomy regression
-pytest tests/test_public_surface.py -v # cross-corpus invariant contract
-pytest -m "not slow"                   # skip the bash + jq parity gate
+pytest tests/                            # everything
+pytest tests/test_canonicalize.py -v     # rule-by-rule taxonomy regression
+pytest tests/test_public_surface.py -v   # cross-corpus invariant contract
+pytest tests/test_install_autodetect.py  # install + uninstall no-arg dispatch
+pytest tests/test_import.py              # import dedup + autodetect
+pytest -m "not slow"                     # skip the bash + jq parity gate
 ```
 
 The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. The bash + jq parity tests in `tests/test_pipeline_parity.py` are marked `slow` because they fork subprocess for every case. Skip them with `-m "not slow"` while iterating on something unrelated; CI keeps running the full suite. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
@@ -87,7 +89,8 @@ Please strip the leading kaomoji from `assistant_text` on parse, the same way th
 ## PRs
 
 - Please don't bump the version in your PR unless the change is intended to ship as a release. The PyPI publish workflow is triggered by a version update.
-- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `HookInstaller`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset's and need an edit on the dataset card too.
+- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `HookInstaller`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset and need an edit on the dataset card too. The taxonomy is currently locked at the 2.0.0 sweep (broader `KAOMOJI_START_CHARS` plus the paired-arm/wing-hand/raised-hands/box-drawing-pose strip set); adding a leader char or arm modifier is itself a cross-corpus change and needs a major version bump.
+- If you're porting the validator to another language for an unsupported harness, the canonical TS port at [`llmoji/_plugins/_kaomoji_taxonomy.ts.partial`](llmoji/_plugins/_kaomoji_taxonomy.ts.partial) is the reference shape. The Python module `llmoji.taxonomy` is the actual single source of truth — bash hooks render the leading-glyph case from `KAOMOJI_START_CHARS` at install time, and the TS partial gets spliced into both shipped TS plugins by `render_plugin_template`. A `test_plugin_taxonomy_block_matches` test asserts the splice is byte-identical, so a stale hand-edit on either side fails CI.
 - The hermes provider in particular wants real-traffic validation. If you run hermes and are willing to share what `extra.*` keys actually arrive on `post_llm_call` and whether `subagent_stop` correlation filters cleanly, please open an issue.
 
 ## Questions

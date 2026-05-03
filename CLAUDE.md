@@ -26,7 +26,11 @@ refuses to clobber" gotcha for the data-corruption story that
 forced the parsing-only design).
 Everything else — embedding, eriskii axis projection, clustering,
 figures — is research-side and lives in `llmoji-study`, which
-`pip install llmoji>=1.1,<2` and reads our public surface.
+`pip install llmoji>=2,<3` and reads our public surface. (v1
+corpus pin was `>=1.1,<2`; the 2.0 sweep broadens
+`KAOMOJI_START_CHARS` and the arm-strip set so the canonical-form
+output for many existing kaomoji shifts — see "Cross-corpus
+invariant surface" below.)
 
 ## Pipeline
 
@@ -146,11 +150,24 @@ The HF dataset's aggregation rules pin against everything below.
 Bumping any of these is a cross-corpus change — flag in the PR body
 and update the HF dataset card to match.
 
-- **`llmoji.taxonomy`**: `KAOMOJI_START_CHARS`, rules A–P in
-  `canonicalize_kaomoji`, `is_kaomoji_candidate` validator
-  contract, `extract` / `KaomojiMatch` (span-only — no affect
+- **`llmoji.taxonomy`**: `KAOMOJI_START_CHARS` (broadened in 2.0
+  with Greek `Σ ψ Ψ ε`, Latin extension `ƪ ʕ`, and box-drawing
+  diagonals `╱ ╲`); rules A–P in `canonicalize_kaomoji` plus the
+  2.0 paired-arm strip sweep (`_ARM_OUTSIDE` /
+  `_ARM_OUTSIDE_LEAD` cover wing-hand `\(...)/`, hugging arms
+  `⊂(...)⊃`, sparkle `✧(...)✧`, shocked sigma `Σ(...)`,
+  horn-fingers `ψ(...)ψ`, kissing `ε(...)з`, raised hands
+  `ƪ(...)ʃ`, paired-arm leaders `٩(...)۶` / `ᕕ(...)ᕗ` /
+  `໒(...)७`, raised-hands katakana `ヽ(...)ノ`, box-drawing
+  pose pairs `╰(...)╯` / `┐(...)┌`, and the iconic
+  `¯\_(ツ)_/¯` shrug); `is_kaomoji_candidate` validator
+  contract (backslash allowed at position 0 only — wing-hand
+  pattern); `extract` / `KaomojiMatch` (span-only — no affect
   labels; gemma-tuned label dicts moved to research-side
-  `llmoji_study.taxonomy_labels`).
+  `llmoji_study.taxonomy_labels`). Bear face `ʕ•ᴥ•ʔ` is a
+  special case: `ʕ`/`ʔ` go in `_OPEN_BRACKETS`/`_CLOSE_BRACKETS`
+  for depth-walk recognition but stay OUT of arm-strip — the
+  whole bear is the kaomoji, no inner `(...)` to fall back to.
 - **`llmoji.synth_prompts`**: `DESCRIBE_PROMPT_WITH_USER`,
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
@@ -197,6 +214,11 @@ llmoji install [--yes]         no-arg autodetect: install for every
                                OK — one corrupt config doesn't kill
                                the rest of the batch.
 llmoji uninstall <provider>    inverse; idempotent (journal preserved)
+llmoji uninstall [--yes]       no-arg autodetect: uninstall from every
+                               harness whose home dir exists under
+                               $HOME. Same UX skeleton as install's
+                               no-arg path (detect → prompt → run →
+                               partial-success).
 llmoji status                  installed providers, journal sizes,
                                paths, + cheap health checks (stale-
                                hook detection, settings parseability)
@@ -223,6 +245,17 @@ llmoji import <provider>       replay native session/transcript files
                                without writing. Internal module is
                                llmoji.backfill (parity-tested);
                                import is the user-facing verb.
+llmoji import [--yes]          no-arg autodetect: replay every
+                               importable harness present on disk
+                               (claude_code, codex, hermes — TS
+                               plugin providers don't expose a
+                               replayable transcript shape, so they
+                               aren't in IMPORTABLE_PROVIDERS).
+                               --since / --dry-run propagate to
+                               every per-provider run in the batch.
+                               Recommended after every taxonomy
+                               bump to recover newly-recognized
+                               kaomoji from existing transcripts.
 llmoji analyze [--notes …]     scrape + canonicalize + synthesize
 [--backend …] [--model …]      → ~/.llmoji/bundle/. backend defaults
 [--base-url …]                 to anthropic; openai uses Responses

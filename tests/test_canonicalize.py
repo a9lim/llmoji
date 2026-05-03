@@ -44,6 +44,35 @@ from llmoji.taxonomy import (
         # Bracket-span fallback for an unknown paren form (real
         # kaomoji-shape — used to be label=0/"other" in the legacy API).
         ("(｡o_O｡) strange",              "(｡o_O｡)"),
+        # v2.0: wing-hand pattern. Backslash at position 0 + closing
+        # ``)/`` is the celebratory wing form. Surfaces via the
+        # whitespace-fallback branch (no internal spaces).
+        ("\\(^o^)/ awesome!",             "\\(^o^)/"),
+        ("\\(≧▽≦)/ YESSS",                "\\(≧▽≦)/"),
+        # v2.0: sparkle-decorated. Leading ``✧`` + trailing
+        # decoration; whitespace-fallback grabs the whole token.
+        ("✧*｡(ˊᗜˋ*)*｡✧ wow",              "✧*｡(ˊᗜˋ*)*｡✧"),
+        # v2.0 sweep: bear face. ``ʕ``/``ʔ`` are paired brackets
+        # in the depth-walker (added to _OPEN/_CLOSE_BRACKETS).
+        ("ʕ•ᴥ•ʔ hey",                     "ʕ•ᴥ•ʔ"),
+        # v2.0 sweep: shocked sigma. Single-arm leader ``Σ`` —
+        # whitespace-fallback grabs the whole span.
+        ("Σ(°△°|||) shock!",              "Σ(°△°|||)"),
+        # v2.0 sweep: horn-fingers (lowercase + capital psi pairs).
+        ("ψ(`Д´)ψ angry",                 "ψ(`Д´)ψ"),
+        ("Ψ(`Д´)Ψ furious",               "Ψ(`Д´)Ψ"),
+        # v2.0 sweep: kissing pair (ε + з).
+        ("ε(◕‿◕)з kiss",                  "ε(◕‿◕)з"),
+        # v2.0 sweep: raised hands (ƪ + ʃ).
+        ("ƪ(˘⌣˘)ʃ yay",                   "ƪ(˘⌣˘)ʃ"),
+        # v2.0 sweep: heavy-line wing-hand variant.
+        ("╲(◕‿◕)╱ celebrate",             "╲(◕‿◕)╱"),
+        # v2.0 sweep: hug-pair with mirrored close ⊃.
+        ("⊂(◕‿◕)⊃ hug",                   "⊂(◕‿◕)⊃"),
+        # v2.0 sweep: cheering pair ٩…۶.
+        ("٩(◕‿◕)۶ woot",                  "٩(◕‿◕)۶"),
+        # v2.0 sweep: cradling pair ໒…७.
+        ("໒(◕‿◕)७ aww",                   "໒(◕‿◕)७"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -125,9 +154,11 @@ def test_extract_unbalanced_bracket_fallback(
         ("(っ╥﹏╥)っ",          "(╥﹏╥)",            "F"),
         # Rule G: combining stroke overlays
         ("(๑˃̵‿˂̵)",          "(๑˃‿˂)",           "G"),
-        # Rule H + B-speculative: curly quotes + fullwidth tilde
-        ("┐(‘～`;)┌",         "┐('~`;)┌",         "H"),
-        ("┐('～`;)┌",         "┐('~`;)┌",         "H"),
+        # Rule H + B-speculative: curly quotes + fullwidth tilde.
+        # v2.0 also strips the ``┐``/``┌`` box-drawing shrug arms
+        # (round-3 sweep — was preserved in v1; bumping collapses).
+        ("┐(‘～`;)┌",         "('~`;)",            "H"),
+        ("┐('～`;)┌",         "('~`;)",            "H"),
         # Rule I: bullet → middle-dot
         ("(´•ω•`)",           "(´・ω・`)",         "I"),
         # Rule J: bracket-corner-circle → halfwidth ideographic full stop
@@ -140,13 +171,72 @@ def test_extract_unbalanced_bracket_fallback(
         ("(´-ω-`)",           "(´-ω-`)",          "K-preserve"),
         # Rule L: asterisk-arm folds
         ("(*•̀‿•́*)",         "(・̀‿・́)",          "L"),
+        # v2.0 — Rule M (outside-leading wing/hug/sparkle): strip ``\``,
+        # ``⊂``, ``✧`` greedy at start before ``(``.
+        ("\\(^o^)/",          "(^o^)",             "M-wing"),
+        ("\\(≧▽≦)/",          "(≧▽≦)",             "M-wing"),
+        ("⊂(˘ω˘)⊂",          "(˘ω˘)",             "M-hug"),
+        ("✧(ˊᗜˋ)✧",          "(ˊᗜˋ)",             "M-sparkle"),
+        # v2.0 — outside-trailing wing-right and hugging-arm-right:
+        # ``/`` after ``)`` and ``⊂`` after ``)`` join existing
+        # ``ﻭっ`` outside-trail set.
+        ("(´∀`)/",            "(´∀`)",             "M-wing-right-only"),
+        ("(˘ω˘)⊂",            "(˘ω˘)",             "M-hug-right-only"),
+        # v2.0 sweep — outside-trailing mirror-close hugging arm.
+        ("⊂(◕‿◕)⊃",          "(◕‿◕)",             "M-hug-pair"),
+        # v2.0 sweep — bear face. Whole bear preserved (no inner
+        # paren to fall back to); `•` folds to `・` via rule I.
+        ("ʕ•ᴥ•ʔ",             "ʕ・ᴥ・ʔ",            "bear"),
+        # v2.0 sweep — shocked sigma. Single-arm leader stripped.
+        ("Σ(°△°|||)",         "(°△°|||)",          "M-sigma"),
+        # v2.0 sweep — horn-fingers (Cyrillic Д→д via rule D).
+        ("ψ(`Д´)ψ",           "(`д´)",             "M-psi"),
+        ("Ψ(`Д´)Ψ",           "(`д´)",             "M-Psi"),
+        # v2.0 sweep — kissing pair (ε + з).
+        ("ε(◕‿◕)з",          "(◕‿◕)",             "M-kiss"),
+        # v2.0 sweep — raised hands (⌣→‿ via smile-mouth synonym).
+        ("ƪ(˘⌣˘)ʃ",          "(˘‿˘)",             "M-raised"),
+        # v2.0 sweep — heavy-line wings.
+        ("╲(◕‿◕)╱",          "(◕‿◕)",             "M-slashes"),
+        # v2.0 sweep — paired arms of v1 leaders. Cheering, running,
+        # cradling — finally canonicalize symmetrically.
+        ("٩(◕‿◕)۶",          "(◕‿◕)",             "M-cheer"),
+        ("ᕕ(ᐛ)ᕗ",            "(ᐛ)",                "M-running"),
+        ("໒(◕‿◕)७",          "(◕‿◕)",             "M-cradle"),
+        # v2.0 round 3 — box-drawing pose pairs collapse to face.
+        ("╰(´∀｀)╯",           "(´∀`)",             "M-arms-up"),
+        ("╭(´∀｀)╮",           "(´∀`)",             "M-curl"),
+        ("┐(´д｀)┌",           "(´д`)",             "M-shrug"),
+        # Inverted shrug pattern (╮ as lead, ╭ as trail). v2.0
+        # symmetric strip handles both orientations.
+        ("╮(´д｀)╭",           "(´д`)",             "M-shrug-inv"),
+        # Inverted box-drawing shrug with `┌` lead, `┐` trail.
+        ("┌(´д｀)┐",           "(´д`)",             "M-shrug-inv-box"),
+        # v2.0 round 3 — the iconic shrug. ¯ \ _ strip on the lead,
+        # _ / ¯ on the trail, leaving the bare ``(ツ)`` face.
+        ("¯\\_(ツ)_/¯",         "(ツ)",               "M-shrug-tsu"),
+        # Table-flip: the ``╯`` AT THE END is the rage-arm and
+        # strips, but the ``╯`` INSIDE is the rage-cheek and stays.
+        # Anchored regex is what makes this clean.
+        ("(╯°□°)╯",            "(╯°□°)",            "M-rage-arm"),
+        # Preservation: ``_`` inside the face is not stripped (the
+        # outside-arm regex is anchored at start/end and only fires
+        # before ``(`` or after ``)``).
+        ("(◕_◕)",              "(◕_◕)",             "M-preserve-mouth"),
         # Rules M / N: smile-mouth equivalence class → ‿
         ("(◔◡◔)",             "(◕‿◕)",            "M"),
         ("(ᵔ◡ᵔ)",             "(ᵔ‿ᵔ)",            "N"),
         ("(´｡・ᵕ・｡`)",       "(´｡・‿・｡`)",       "N"),
-        # Rule O: fullwidth grave → ASCII grave
-        ("ヽ(´ー｀)ノ",         "ヽ(´ー`)ノ",        "O"),
-        ("ヽ(´ー`)ノ",         "ヽ(´ー`)ノ",        "O"),
+        # Rule O: fullwidth grave → ASCII grave. v2.0 also strips
+        # the ``ヽ``/``ノ`` raised-hand arms (was preserved in v1 —
+        # the rule O test pinned the pose; bumping to v2.0 collapses
+        # it for symmetry with the rest of the paired-arm sweep).
+        ("ヽ(´ー｀)ノ",         "(´ー`)",            "O"),
+        ("ヽ(´ー`)ノ",         "(´ー`)",            "O"),
+        # Halfwidth katakana ﾉ also strips.
+        ("ヽ(´ー`)ﾉ",          "(´ー`)",            "O"),
+        # Voiced iteration mark ヾ strips (left raised-hand variant).
+        ("ヾ(◕‿◕)ノ",          "(◕‿◕)",            "O"),
         # B extension: ideographic full stop folds to halfwidth too
         ("(´。・ᵕ・。`)",      "(´｡・‿・｡`)",       "B-ext"),
         # Directional-fill eye class → ◕
@@ -201,7 +291,13 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
     [
         ("(｡◕‿◕｡)",          True),
         ("hi",                False),
-        # Markdown-escape backslash artifact.
+        # v2.0: backslash at position 0 is the wing-hand pattern,
+        # accepted. Backslash at position >= 1 is markdown-escape
+        # artifact, still rejected (e.g. ``(\\*´∀｀\\*)``).
+        ("\\(^o^)/",          True),
+        ("\\(≧▽≦)/",          True),
+        # Markdown-escape backslash artifact (still rejected — `\`
+        # appears at position >= 1).
         ("(\\*´∀｀\\*)",       False),
         # 4+-letter run inside parens — prose, not a kaomoji.
         ("(Backgrounddebug)", False),
@@ -211,6 +307,20 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         ("(unclosed",         False),
         # Oversize span — not a real kaomoji.
         ("(" + "a" * 100 + ")", False),
+        # v2.0 sweep — bear face accepted (ʕ in start_chars).
+        ("ʕ•ᴥ•ʔ",              True),
+        # v2.0 sweep — shocked sigma accepted.
+        ("Σ(°△°|||)",          True),
+        # v2.0 sweep — horn-fingers accepted.
+        ("ψ(`Д´)ψ",            True),
+        # v2.0 sweep — raised hands accepted.
+        ("ƪ(˘⌣˘)ʃ",           True),
+        # v2.0 sweep — heavy-line wing accepted.
+        ("╲(◕‿◕)╱",           True),
+        # ASCII letter `m` is NOT a leader — bowing apology
+        # ``m(_ _)m`` rejected at the validator (prose-risk
+        # exclusion; see KAOMOJI_START_CHARS rationale).
+        ("m(_ _)m",            False),
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
@@ -219,6 +329,13 @@ def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
 
 def test_kaomoji_start_chars_includes_common_leaders() -> None:
     """Smoke-check that the leading-glyph set covers the canonical
-    bracket leaders. The full set is the v1.0 lock."""
+    bracket leaders + the v2.0 sweep additions. The full set is the
+    v2.0 lock."""
     for c in "([（｛":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 1 — wing/hug/sparkle:
+    for c in "\\⊂✧":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 2 — Greek + Latin extension + box-drawing diagonals:
+    for c in "ΣψΨεƪʕ╱╲":
         assert c in KAOMOJI_START_CHARS, c

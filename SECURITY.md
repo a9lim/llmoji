@@ -17,6 +17,12 @@ Only the latest minor version on PyPI receives security and privacy fixes. If yo
 
 Versions of llmoji before 1.2.0 would have leaked your HuggingFace username on submission. 1.2.0 patches this. Please upgrade (`pip install --upgrade llmoji`).
 
+## Detection notice for upgraders (2.0.0)
+
+Not a security or privacy issue, but a recovery one. v2.0.0 broadens kaomoji detection significantly — the leading-glyph set picks up wing-hand `\(^o^)/`, hugging arms `⊂(...)⊃`, sparkle `✧(...)✧`, shocked sigma `Σ(°△°|||)`, kissing `ε(◕‿◕)з`, raised hands `ƪ(˘⌣˘)ʃ`, the bear face `ʕ•ᴥ•ʔ`, paired-arm leaders like `٩(...)۶` / `ᕕ(...)ᕗ` / `໒(...)७`, the iconic shrug `¯\_(ツ)_/¯`, and box-drawing pose pairs. Pre-2.0 live hooks rejected most of these at the start-character filter; if you've been running an older version, your journal is missing them.
+
+Run `llmoji install --yes && llmoji import --yes` after upgrading. The reinstall re-renders the bash case-pattern with the new leading-glyph set. The import walks every detected harness's native transcripts (Claude Code rollouts, Codex sessions, Hermes sessions) and dedup-merges any newly-recognized rows back into the journals. Re-runs are idempotent.
+
 ## Privacy model
 
 llmoji is a privacy-sensitive tool. The package ships aggregates from your machine to a shared corpus so privacy is important here.
