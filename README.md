@@ -28,6 +28,8 @@ There are three main commands:
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; email: tarball)
 
+`install`, `uninstall`, and `import` all also accept a single explicit `<provider>` arg. Run with no arg to autodetect every harness present on disk and apply to each.
+
 `analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs your HuggingFace token plus an upload password posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji); please see [SECURITY.md](SECURITY.md) for the threat model. The email path tarballs the bundle and has you attach it manually.
 
 ---
@@ -171,7 +173,7 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 | `opencode` | `~/.config/opencode/plugins/llmoji.ts`       | (none)          | Auto-loaded by opencode; file presence is the registration.                                      |
 | `openclaw` | `~/.openclaw/plugins/llmoji-kaomoji/`        | JSON            | `install` also flips `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess` in `config.json`. |
 
-`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files) and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
+`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files) and the settings entry; `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
 
 ---
 
@@ -191,7 +193,7 @@ llmoji parse --provider openhands ~/.openhands/conversations
 | `claude.ai` | `conversations.json`                                                                      | `claude_ai_export.jsonl`                |
 | `chatgpt`   | `conversations.json`                                                                      | `chatgpt_export.jsonl`                  |
 | `gemini`    | `MyActivity.json`                                                                         | `gemini_aistudio_export.jsonl`          |
-  | `openhands` | `<conversation>/events/event-NNNNN-<id>.json`                                          | `openhands_export.jsonl` |
+| `openhands` | `<conversation>/events/event-NNNNN-<id>.json`                                             | `openhands_export.jsonl`                |
 
 For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`. Run with no provider to autodetect every importable harness present on disk and replay each in one go: `llmoji import` (or `llmoji import --yes` to skip the confirmation prompt). Re-runs are idempotent — every replayed row is dedup'd against the existing journal, so it's safe to run after any taxonomy improvement to recover newly-recognized kaomoji.
 
