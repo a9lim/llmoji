@@ -59,9 +59,9 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 - **`--backend openai`**: calls the OpenAI Responses API with your `$OPENAI_API_KEY`. Your journal text goes to OpenAI for paraphrasing.
 - **`--backend local`**: calls a local OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp's HTTP server, etc.) at the `--base-url` you pass. Your journal text stays on whatever machine the endpoint runs on; nothing is sent to a third party.
 
-`llmoji upload --target hf` reads your HuggingFace token from `$HF_TOKEN` or `~/.cache/huggingface/token` once for an `HfApi.whoami()` proof-of-life check, then discards it. Your token never authenticates the upload itself, never gets logged, and never gets written to disk. The actual push uses a shared submission credential, so your personal HF account never appears on the dataset's commit history or branch list.
+`llmoji upload --target hf` reads your HuggingFace token from `$HF_TOKEN` or `~/.cache/huggingface/token` once for an `HfApi.whoami()` proof-of-life check, then discards it. Your token is never used besides this. The push uses a shared submission credential, so your personal HF account never appears on the dataset's commit history or branch list.
 
-The submission credential is gated behind an upload password. Llmoji reads the password from `$LLMOJI_UPLOAD_PASSWORD` or prompts you interactively (hidden input, `getpass`-style); the current password is posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji) and on Twitter at [@_a9lim](https://twitter.com/_a9lim).
+The submission credential is gated behind an upload password. Llmoji reads the password from `$LLMOJI_UPLOAD_PASSWORD` or prompts you interactively; the current password is posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji).
 
 `llmoji upload --target email` builds a `mailto:` URI with the bundle path printed in the body and asks you to attach the tarball manually.
 
