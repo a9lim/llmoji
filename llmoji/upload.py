@@ -451,6 +451,19 @@ def upload_hf(
     # (necessary for retries inside upload_folder) but the local
     # binding doesn't linger past the next line.
     del shared_token
+    # Create the submission branch first. ``upload_folder(revision=...)``
+    # requires the branch to already exist when called via the Python
+    # API; the ``hf upload`` CLI wraps an auto-create step but the
+    # huggingface_hub library function does not, and a missing branch
+    # surfaces as ``RevisionNotFoundError`` from the preupload step.
+    # ``exist_ok=True`` makes re-runs against a partially-created
+    # branch idempotent (e.g. a previous upload failed mid-commit).
+    api.create_branch(
+        repo_id=repo,
+        repo_type="dataset",
+        branch=branch_name,
+        exist_ok=True,
+    )
     commit_info = api.upload_folder(
         folder_path=str(bundle_dir),
         path_in_repo=target_prefix,
