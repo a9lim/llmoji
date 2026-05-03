@@ -7,7 +7,9 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/llmoji/)
 
 > [!WARNING]
-> **Privacy notice for upgraders.** Versions of llmoji before 1.2.0 would have leaked your HuggingFace username on submission. 1.2.0 patches this. Please upgrade (`pip install --upgrade llmoji`).
+> **Privacy notice for upgraders.** Versions of `llmoji` before 1.2.0 had a privacy issue; I have changed the upload method to mitigate it. Please upgrade (`pip install --upgrade llmoji`) to upload.
+> 
+> **アップグレードされる方へのプライバシーに関するお知らせ：** `llmoji`のバージョン1.2.0より前の版にはプライバシー上の問題がありました。この問題を軽減するため、アップロード方法を変更いたしました。アップロードを行うには、最新版へのアップグレード（`pip install --upgrade llmoji`）をお願いいたします。
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
@@ -21,7 +23,7 @@ There are three main commands:
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; email: tarball)
 
-`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs your HuggingFace token (read once for a `whoami` proof-of-life check, then discarded) plus an upload password posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji) and on Twitter at [@_a9lim](https://twitter.com/_a9lim); please see [SECURITY.md](SECURITY.md) for the threat model. The email path tarballs the bundle and has you attach it manually.
+`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs your HuggingFace token (read once for a `whoami` proof-of-life check, then discarded) plus an upload password posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji); please see [SECURITY.md](SECURITY.md) for the threat model. The email path tarballs the bundle and has you attach it manually.
 
 ---
 
