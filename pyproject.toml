@@ -132,6 +132,8 @@ include = [
     "llmoji/scrape.py",
     "llmoji/providers/__init__.py",
     "llmoji/providers/base.py",
+    "llmoji/providers/opencode.py",
+    "llmoji/providers/openclaw.py",
     "llmoji/upload.py",
 ]
 exclude = ["**/__pycache__"]

@@ -47,7 +47,7 @@ The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datase
 pip install llmoji
 llmoji install                  # autodetect: install for every detected harness
 # or, target a single harness explicitly:
-llmoji install claude_code      # or: codex, hermes
+llmoji install claude_code      # or: codex, hermes, opencode, openclaw
 ```
 
 From now on, your agent will use kaomoji at the start of each message. 
@@ -149,50 +149,63 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ## Providers
 
-`llmoji install <provider>` writes the hook script and registers it with the harness's settings file, idempotently.
+`llmoji install <provider>` writes the hook (or plugin file) and registers it with the harness's config, idempotently. Two installer flavors:
 
-| Provider      | Hook events                                       | Settings format | Notes                                                  |
-|---------------|---------------------------------------------------|-----------------|--------------------------------------------------------|
-| `claude_code` | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
-| `codex`       | Stop, UserPromptSubmit                            | JSON            | Stable, in daily use.                                  |
-| `hermes`      | post_llm_call, pre_llm_call                       | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
+**Bash hook providers** — render a shell script under the harness's hooks dir and register it via the harness's settings file.
 
-`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
+| Provider      | Hook events                 | Settings format | Notes                                                  |
+|---------------|-----------------------------|-----------------|--------------------------------------------------------|
+| `claude_code` | Stop, UserPromptSubmit      | JSON            | Stable, in daily use.                                  |
+| `codex`       | Stop, UserPromptSubmit      | JSON            | Stable, in daily use.                                  |
+| `hermes`      | post_llm_call, pre_llm_call | YAML            | Subagent traffic is not currently filtered (no child id on the upstream payload). |
+
+**TS plugin providers** — render a TypeScript plugin (one or more files) into the harness's plugins directory. The plugin handles the per-turn nudge inline rather than via a separate bash file. Promoted to first-class in 1.3.
+
+| Provider   | Plugin location                              | Settings format | Notes                                                                                            |
+|------------|----------------------------------------------|-----------------|--------------------------------------------------------------------------------------------------|
+| `opencode` | `~/.config/opencode/plugins/llmoji.ts`       | (none)          | Auto-loaded by opencode; file presence is the registration.                                      |
+| `openclaw` | `~/.openclaw/plugins/llmoji-kaomoji/`        | JSON            | `install` also flips `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess` in `config.json`. |
+
+`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files) and the settings entry. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
 
 ---
 
 ## Static dumps
 
-To pull kaomoji out of a Claude.ai or ChatGPT data export:
+To pull kaomoji out of a static export:
 
 ```bash
 llmoji parse --provider claude.ai ~/Downloads/data-...-batch-0000
-llmoji parse --provider chatgpt ~/Downloads/chatgpt-export
+llmoji parse --provider chatgpt   ~/Downloads/chatgpt-export
+llmoji parse --provider gemini    ~/Downloads/aistudio-exports
+llmoji parse --provider openhands ~/.openhands/conversations
 ```
 
-Both exports happen to ship a file named `conversations.json`, with different schemas under the same filename; the parsers handle each. Rows land at `~/.llmoji/journals/claude_ai_export.jsonl` or `~/.llmoji/journals/chatgpt_export.jsonl`, and `llmoji analyze` picks them up alongside the live provider journals. The ChatGPT reader walks the message tree from `current_node` along the active branch only, so abandoned regenerations stay out of the corpus.
+| Source      | Shape walked                                                                              | Output journal                          |
+|-------------|-------------------------------------------------------------------------------------------|-----------------------------------------|
+| `claude.ai` | `conversations.json` (linear `chat_messages[]` per conversation)                          | `claude_ai_export.jsonl`                |
+| `chatgpt`   | `conversations.json` (tree of `mapping[]` nodes; walks the active branch from `current_node`) | `chatgpt_export.jsonl`              |
+| `gemini`    | Auto-dispatches per file: **AI Studio** exports (one JSON per conversation, `chunkedPrompt.chunks[]` shape) and **Google Takeout** `MyActivity.json` (flat list with `header`/`time`/`subtitles`/`safeHtmlItem`). Skips `isThought: true` AI Studio chunks; filters MyActivity entries on `"Gemini" in header`; HTML-strips Takeout responses before kaomoji extraction. | `gemini_aistudio_export.jsonl` |
+| `openhands` | Per-event JSON files at `<conversation>/events/event-NNNNN-<id>.json`. Filters to `MessageEvent` with `source: "agent"`. Per-event model attribution isn't on the wire — rows land with empty model and bucket under the `unknown` slug. | `openhands_export.jsonl` |
 
-For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`, `~/.hermes/sessions/session_*.json`) can be replayed into the journals via the `llmoji.backfill` module.
+The Claude.ai and ChatGPT exports both happen to ship a file named `conversations.json` with different schemas under the same filename; the parsers handle each. Rows land at `~/.llmoji/journals/<source>.jsonl`, and `llmoji analyze` picks them up alongside the live provider journals.
+
+For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts (`~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`, `~/.hermes/sessions/session_*.json`) can be replayed into the journals via `llmoji import <provider>`.
 
 ---
 
 ## Custom harness
 
-For harnesses we don't ship a first-class adapter for (notably OpenClaw and opencode):
+For harnesses we don't ship a first-class adapter for:
 
 - Append one row per kaomoji-bearing assistant turn to `~/.llmoji/journals/<harness>.jsonl`.
 - Use the canonical six-field schema: `{ts, model, cwd, kaomoji, user_text, assistant_text}`.
 - Strip the leading kaomoji from `assistant_text` on the way in (the prefix lives in the `kaomoji` field).
 - Validate the prefix the same way the package does: `llmoji.taxonomy.is_kaomoji_candidate(prefix)`.
 
-`llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically. Worked examples:
+`llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically.
 
-- [`examples/openclaw_plugin/`](examples/openclaw_plugin/) — OpenClaw plugin (`definePluginEntry` + `api.on("llm_output", …)` + `api.on("before_prompt_build", …)`, with subagent filtering via `subagent_spawned`/`subagent_ended`). Install via `openclaw plugins install <path-to-this-dir>`, then flip `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess` to `true` in `~/.openclaw/config.json` so the conversation hooks (`llm_input`, `llm_output`) are routed to the plugin.
-- [`examples/opencode_plugin.ts`](examples/opencode_plugin.ts) — opencode plugin (TS/JS plugins auto-loaded from `~/.config/opencode/plugins/`; uses the `event` and `experimental.chat.system.transform` hooks).
-
-Both harnesses' plugin contracts are TypeScript-only with no shell-hook escape hatch, so first-class llmoji support would have to ship as a vendored plugin tree rather than the rendered-bash pattern the other providers use; the worked examples cover the same ground until then.
-
-The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) read from it at install time. If you're porting the validator to another language for a harness like OpenClaw or opencode, please mirror the rules in `is_kaomoji_candidate` faithfully. The two TS examples above are byte-faithful ports as of llmoji v1.1.x. Bumping any of the rules is a cross-corpus invariant change on the package side and your port needs to follow.
+The Python module `llmoji.taxonomy` is the single source of truth for the validator and the leading-glyph set; rendered bash hooks (under `llmoji._hooks/`) and rendered TS plugins (under `llmoji._plugins/`) read from it at install time. If you're porting the validator to another language for an unsupported harness, please mirror the rules in `is_kaomoji_candidate` faithfully — the canonical TS port lives at [`llmoji/_plugins/_kaomoji_taxonomy.ts.partial`](llmoji/_plugins/_kaomoji_taxonomy.ts.partial). Bumping any of the rules is a cross-corpus invariant change on the package side and your port needs to follow.
 
 ---
 

@@ -45,9 +45,9 @@ deciding to ship.
 
 ### HookInstaller abstraction
 
-`llmoji.providers.HookInstaller` is the base class, one subclass
-per first-class harness. JSON-settings providers
-(`ClaudeCodeProvider`, `CodexProvider`) inherit from
+`llmoji.providers.HookInstaller` is the base class for **bash-hook**
+providers, one subclass per first-class harness. JSON-settings
+providers (`ClaudeCodeProvider`, `CodexProvider`) inherit from
 `JsonSettingsHookInstaller` (also in `base.py`), which supplies the
 default `_register` / `_unregister` / `_check_registrations`
 against any `settings.json`-shaped file. YAML-settings providers
@@ -55,6 +55,22 @@ against any `settings.json`-shaped file. YAML-settings providers
 1.1.x — the abstraction is about installing hooks, not about being
 a generic "provider"; the `providers/` directory name stays because
 concrete subclasses correspond to user-facing harness providers.
+
+`PluginInstaller` (added in 1.3) is a sibling base for **TS-plugin**
+providers — opencode and openclaw, harnesses whose plugin SDKs are
+TS-only with no shell-hook escape hatch. It subclasses
+`HookInstaller` for type-compatibility (PROVIDERS dict and
+`ProviderStatus` stay one-shape) but overrides
+install/uninstall/render to write rendered TypeScript plus optional
+JSON-config flag flips rather than bash. `OpencodeProvider`'s
+plugin auto-loads from `~/.config/opencode/plugins/llmoji.ts` (file
+presence = registered). `OpenclawProvider` writes the bundle at
+`~/.openclaw/plugins/llmoji-kaomoji/` and edits
+`~/.openclaw/config.json` to set
+`plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess = true`.
+Pre-1.3 these two harnesses lived under `examples/` as worked
+generic-JSONL contracts; the promotion is a strict superset (the
+generic-JSONL contract still works for unsupported harnesses).
 
 Each provider declares: `hooks_dir`, `settings_path`, `journal_path`,
 `main_event`, `skip_action` (`continue` for claude_code/codex —
@@ -150,7 +166,12 @@ and update the HF dataset card to match.
   bundles + journals, so they're dropped in 1.1.x.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
-- **`llmoji.providers.HookInstaller`** interface.
+- **`llmoji.providers.HookInstaller`** interface +
+  **`llmoji.providers.PluginInstaller`** sibling base (1.3 added —
+  opencode + openclaw).
+- **The five first-class providers**: `claude_code`, `codex`,
+  `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
+  `providers_seen` in shipped bundles names these directly.
 - **Bundle schema**:
   - `manifest.json` keys: `llmoji_version`, `synthesis_model_id`,
     `synthesis_backend`, `submitter_id`, `generated_at`,
@@ -184,9 +205,14 @@ llmoji status --stats          adds journal walk: kaomoji frequency
                                per-source-model) + row schema
                                validation in one pass
 llmoji status --json           machine-readable JSON output for CI
-llmoji parse --provider <n> P  ingest a static export dump (claude.ai
-                               or chatgpt conversations.json) into
-                               ~/.llmoji/journals/
+llmoji parse --provider <n> P  ingest a static export dump into
+                               ~/.llmoji/journals/. Supported
+                               sources: claude.ai, chatgpt (both
+                               via conversations.json), gemini
+                               (Google AI Studio chunkedPrompt JSON,
+                               one file per conversation), openhands
+                               (per-event JSON files at
+                               <conv>/events/event-*.json)
 llmoji import <provider>       replay native session/transcript files
 [--since <ISO>] [--dry-run]    into the live journal — dedup-aware
                                merge against (ts, model,
@@ -279,6 +305,36 @@ llmoji/
                                # filename, different schema (tree of
                                # nodes; walks mapping[current_node]
                                # up via parent)
+      gemini_export.py         # Two formats, auto-dispatched per file:
+                               # (a) AI Studio chunkedPrompt JSON (one
+                               # file per conversation; chunks[] with
+                               # role user/model and text; skips
+                               # isThought:true private CoT). Model
+                               # from runSettings.model with models/
+                               # prefix stripped.
+                               # (b) Google Takeout MyActivity.json
+                               # (flat list of activity entries; we
+                               # filter on "Gemini" in entry.header
+                               # to scope to the consumer Gemini chat
+                               # product). Response is HTML-encoded
+                               # in safeHtmlItem[].html — _html_to_text
+                               # uses html.parser.HTMLParser plus
+                               # html.unescape to recover plain text
+                               # before kaomoji_lead_strip. user_text
+                               # from subtitles[].value (plain). No
+                               # per-entry model id — Pro/Flash/etc.
+                               # routing is opaque, rows land with
+                               # model=None (slugs to 'unknown').
+                               # On-disk order is reverse-chronological;
+                               # we reverse to chronological on emit.
+      openhands_export.py      # OpenHands per-event JSON files at
+                               # <conv>/events/event-NNNNN-<id>.json.
+                               # Filters to MessageEvent kind +
+                               # source==agent. Per-event model attr
+                               # not on the wire — rows land with
+                               # empty model and bucket under
+                               # 'unknown' slug; read base_state.json
+                               # for richer attribution as a follow-up
     backfill.py                # one-shot transcript→journal replays
                                # for claude_code + codex + hermes;
                                # parity-tested against live hooks.
@@ -288,10 +344,13 @@ llmoji/
                                # canonical 6-field on-disk shape.
     providers/
       base.py                  # HookInstaller + JsonSettingsHookInstaller +
-                               # ProviderStatus + SettingsCorruptError
-                               # + render helpers + JSON batch
-                               # register/unregister/is_registered
-                               # (one read-modify-write per install)
+                               # PluginInstaller + ProviderStatus +
+                               # SettingsCorruptError + render helpers
+                               # + JSON batch register/unregister/
+                               # is_registered (one read-modify-write
+                               # per install) + render_plugin_template
+                               # (BEGIN/END marker splice for the
+                               # canonical taxonomy partial)
       claude_code.py           # ~/.claude/settings.json; shares the
                                # nudge template with codex
       codex.py                 # ~/.codex/hooks.json; codex_hooks
@@ -305,6 +364,31 @@ llmoji/
                                # file (never yaml.dump). Dedup is
                                # structural (entry's command field
                                # equals our hook path).
+      opencode.py              # ~/.config/opencode/plugins/llmoji.ts;
+                               # auto-loaded by opencode (file
+                               # presence == registered, no settings
+                               # edit). Plugin handles the per-turn
+                               # nudge inline via
+                               # experimental.chat.system.transform.
+      openclaw.py              # ~/.openclaw/plugins/llmoji-kaomoji/
+                               # bundle (index.ts + plugin.json);
+                               # install also flips
+                               # plugins.entries.llmoji-kaomoji.hooks
+                               # .allowConversationAccess = true in
+                               # ~/.openclaw/config.json. Subagent
+                               # filtering is honest here (TS plugin
+                               # tracks subagent_spawned/_ended).
+    _plugins/
+      _kaomoji_taxonomy.ts.partial  # canonical TS port of the kaomoji
+                                    # validator + leadingBracketSpan
+                                    # + NUDGE; spliced into both TS
+                                    # plugin templates at install time
+                                    # via render_plugin_template
+      opencode.ts.tmpl              # opencode plugin (single .ts file)
+      openclaw_index.ts.tmpl        # openclaw bundle's index.ts
+      openclaw_plugin.json.tmpl     # openclaw bundle's plugin.json
+                                    # (id, name, version stamped at
+                                    # render time)
     _hooks/
       claude_code.sh.tmpl
       codex.sh.tmpl
@@ -854,18 +938,14 @@ mirrors this.
 Motivated users on harnesses we don't ship a first-class adapter for
 can write directly to `~/.llmoji/journals/<name>.jsonl` against the
 canonical 6-field schema. `llmoji analyze` picks them up
-automatically alongside managed providers' journals. Two worked
-examples ship in the repo:
-
-- `examples/opencode_plugin.ts` — generic-JSONL-append contract for
-  opencode (TS-only plugin host). One row per kaomoji-bearing
-  assistant turn, written to `~/.llmoji/journals/opencode.jsonl`.
-- `examples/openclaw_plugin/` — a real `definePluginEntry`-based
-  OpenClaw plugin (`index.ts` + `openclaw.plugin.json`); demonstrates
-  the same generic-JSONL contract on a different host.
-
-A first-class TS-plugin adapter for either harness is a post-1.0
-concern — bash-rendered hooks are the v1.0 first-class shape.
+automatically alongside managed providers' journals. The opencode
+and openclaw TS plugins (under `llmoji._plugins/`) are reference
+implementations of this contract on a TS-plugin host — they're
+first-class as of 1.3 (rendered + installed by `llmoji install
+<name>`), but the rendered TS still walks the same six-field write
+path the generic contract specifies. Porting to a third TS-plugin
+host means copy-paste-adapt one of those two templates and ship a
+new `PluginInstaller` subclass.
 
 ### HF dataset card is a separate hand-maintained surface
 
@@ -903,13 +983,20 @@ Two coupling points:
   work lands on `dev`; merge to main via PR.
 - `~/.llmoji` is the on-disk root for everything the package
   manages; tests can override via `$LLMOJI_HOME`.
-- Hook templates are bash, syntactically validated by `bash -n` in
-  the test suite (`test_hook_templates_render_to_valid_bash_substitutions`)
-  so a template-edit regression fails CI rather than silently inside
-  a user's harness post-install. Don't introduce non-bash hook
-  formats; if a harness needs one, that's a post-1.0 first-class
-  adapter, and the generic-JSONL-append contract is the path until
-  then.
+- Bash hook templates under `llmoji._hooks/` are syntactically
+  validated by `bash -n` in the test suite
+  (`test_hook_templates_render_to_valid_bash_substitutions`) so a
+  template-edit regression fails CI rather than silently inside a
+  user's harness post-install. TS plugin templates under
+  `llmoji._plugins/` aren't bash-validated (no equivalent stdlib
+  parser); the rendered output is asserted to contain expected
+  taxonomy / version stamps via `test_provider_interface` +
+  `test_plugin_taxonomy_block_matches`, and TS-side syntax errors
+  surface at the host harness's plugin-load time. If a future
+  harness needs a third installer flavor (Lua, JS-without-TS, etc.),
+  the pattern is "new sibling base under `providers/base.py` plus
+  templates under a new `_<flavor>/` package data dir" — same as
+  the bash-vs-plugin split that landed in 1.3.
 - Stage-A/B synth calls run on a small thread pool (default 1,
   `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Both
   Anthropic and OpenAI SDKs use thread-safe httpx clients. Cache

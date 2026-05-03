@@ -35,7 +35,9 @@ from .providers import PROVIDERS, HookInstaller, ProviderStatus, get_provider
 from .scrape import ScrapeRow
 from .sources.chatgpt_export import iter_chatgpt_export
 from .sources.claude_export import iter_claude_export
+from .sources.gemini_export import iter_gemini_export
 from .sources.journal import iter_journal
+from .sources.openhands_export import iter_openhands_export
 from .synth import cache_size
 from .taxonomy import canonicalize_kaomoji
 
@@ -480,11 +482,27 @@ def _parse_chatgpt(args: argparse.Namespace) -> int:
     )
 
 
+def _parse_gemini(args: argparse.Namespace) -> int:
+    return _write_journal_rows(
+        iter_gemini_export([Path(p) for p in args.paths]),
+        "gemini_aistudio_export.jsonl",
+    )
+
+
+def _parse_openhands(args: argparse.Namespace) -> int:
+    return _write_journal_rows(
+        iter_openhands_export([Path(p) for p in args.paths]),
+        "openhands_export.jsonl",
+    )
+
+
 # Registry of static-dump parsers. Adding a new format = add an
 # entry. The CLI dispatches off ``--provider`` against this dict.
 _PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "claude.ai": _parse_claude_ai,
     "chatgpt": _parse_chatgpt,
+    "gemini": _parse_gemini,
+    "openhands": _parse_openhands,
 }
 
 

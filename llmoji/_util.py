@@ -36,9 +36,22 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def package_version() -> str:
-    """Resolve the installed package version, with a fallback for
-    development checkouts where ``importlib.metadata`` may not see the
-    package yet."""
+    """Resolve the package version.
+
+    Prefers the live ``llmoji.__version__`` string (single source of
+    truth in ``llmoji/__init__.py``) over ``importlib.metadata``: an
+    editable install's metadata only updates on re-``pip install -e .``,
+    so a dev who bumps ``__version__`` and renders a hook template
+    immediately would otherwise stamp the stale metadata version.
+    Falls back to metadata, then to a final ``0.0.0+dev`` sentinel
+    for stripped-down environments where neither resolves.
+    """
+    try:
+        from . import __version__
+        if __version__:
+            return __version__
+    except Exception:
+        pass
     try:
         from importlib.metadata import version
         return version("llmoji")

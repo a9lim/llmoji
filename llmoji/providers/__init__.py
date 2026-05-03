@@ -1,55 +1,81 @@
 """Hook-installer abstraction for the user-facing harness providers.
 
-A *provider* is one coding harness whose stop-event hook contract is
-"run a script with the event payload on stdin and a stdout JSON
-response gates the loop." Each first-class provider in v1.0
-(``claude_code``, ``codex``, ``hermes``) ships a bash hook template
-under :mod:`llmoji._hooks` plus a concrete subclass of
-:class:`HookInstaller` that knows where the harness keeps its hooks
-directory and settings file.
+A *provider* is one coding harness whose per-turn data-capture
+contract llmoji can install into. Two installer flavors live under
+this package:
 
-The class was named ``Provider`` in 1.1.0; 1.1.x renames it to
-``HookInstaller`` because the abstraction is about installing hooks,
-not about being a generic "provider". The ``providers/`` directory
-name stays — concrete subclasses are still
-``ClaudeCodeProvider`` / ``CodexProvider`` / ``HermesProvider``.
+  - **bash hook** (claude_code, codex, hermes) — the traditional
+    shape. Each provider ships a bash template under
+    :mod:`llmoji._hooks`, gets rendered + written to the harness's
+    hooks directory, and is registered via the harness's settings
+    file (JSON for claude_code/codex, YAML for hermes). See
+    :class:`HookInstaller` and :class:`JsonSettingsHookInstaller`.
+  - **TS plugin** (opencode, openclaw, since 1.3) — the harness has
+    no shell-hook escape hatch but does support TypeScript plugins.
+    Each provider ships one or more ``.ts.tmpl`` / ``.json.tmpl``
+    templates under :mod:`llmoji._plugins`, gets rendered + written
+    to the harness's plugins directory, and (for openclaw) flips
+    a JSON config flag to grant conversation-hook access. See
+    :class:`PluginInstaller`.
+
+Both flavors implement the same :class:`HookInstaller` interface so
+the CLI walks every provider via the same install / uninstall /
+status calls. :class:`PluginInstaller` is a subclass of
+:class:`HookInstaller` for type-compatibility — it overrides the
+bash-specific machinery while keeping :class:`ProviderStatus` and
+the PROVIDERS-dict shape unchanged.
+
+The class was named ``Provider`` in 1.1.0; 1.1.x renamed it to
+``HookInstaller`` because the abstraction is about installing
+per-turn capture, not about being a generic "provider". The
+``providers/`` directory name stays — concrete subclasses are
+still ``ClaudeCodeProvider`` / ``CodexProvider`` / ``HermesProvider``
+/ ``OpencodeProvider`` / ``OpenclawProvider``.
 
 Three things drive the abstraction:
 
-  1. Where to write the hook script (``hooks_dir``).
-  2. How to register it. JSON-settings providers (Claude Code, Codex)
-     get the default :meth:`HookInstaller._register` /
+  1. Where to write the hook script / plugin file
+     (``hooks_dir`` for bash; ``plugin_dir`` for plugin).
+  2. How to register it. JSON-settings bash providers (claude_code,
+     codex) get the default :meth:`HookInstaller._register` /
      :meth:`HookInstaller._unregister` /
-     :meth:`HookInstaller._check_registrations` from the base class
-     — they only need to specify ``main_event``. YAML-settings
-     providers (Hermes) override the three ``_register``-family
-     methods.
+     :meth:`HookInstaller._check_registrations` against a
+     ``hooks``-keyed settings shape. YAML bash providers (hermes)
+     override with surgical YAML edits. Plugin providers either
+     auto-register on file presence (opencode) or flip a JSON config
+     flag (openclaw).
   3. Where the journal lives (``journal_path``) — a published
-     uniform-schema JSONL the live hook appends to and which
-     ``llmoji analyze`` reads.
+     uniform-schema JSONL the live hook / plugin appends to and
+     which ``llmoji analyze`` reads. Bash providers write under
+     ``~/.<harness>/kaomoji-journal.jsonl``; plugin providers write
+     under ``~/.llmoji/journals/<name>.jsonl`` (the same generic-JSONL
+     contract motivated users on unsupported harnesses can use).
 
-Generic-JSONL-append users (motivated OpenClaw owners and similar)
-bypass this abstraction entirely: they handcraft a TS handler that
-writes the canonical 6-field schema to
-``~/.llmoji/journals/<name>.jsonl`` and ``llmoji analyze`` picks it
-up via the same :func:`llmoji.sources.journal.iter_journal`
-iterator. No first-class provider required for them in v1.0.
+Cross-corpus invariant note: 1.3 promotes opencode + openclaw to
+first-class. The ``providers_seen`` list in shipped bundles now
+includes ``opencode`` / ``openclaw`` rows; flag this on the dataset
+card.
 """
 
 from __future__ import annotations
 
-from .base import HookInstaller, ProviderStatus
+from .base import HookInstaller, PluginInstaller, ProviderStatus
 from .claude_code import ClaudeCodeProvider
 from .codex import CodexProvider
 from .hermes import HermesProvider
+from .opencode import OpencodeProvider
+from .openclaw import OpenclawProvider
 
 # Registry order is the user-facing default order for ``llmoji status``
-# and similar listings. Claude Code first because it's the most
-# common, hermes last because it's the newest and least battle-tested.
+# and similar listings. Bash providers (the original three) come
+# first in install-popularity order; plugin providers follow because
+# they're newer and the host harnesses are less common in the corpus.
 PROVIDERS: dict[str, type[HookInstaller]] = {
     "claude_code": ClaudeCodeProvider,
     "codex": CodexProvider,
     "hermes": HermesProvider,
+    "opencode": OpencodeProvider,
+    "openclaw": OpenclawProvider,
 }
 
 
@@ -65,10 +91,13 @@ def get_provider(name: str) -> HookInstaller:
 
 __all__ = [
     "HookInstaller",
+    "PluginInstaller",
     "ProviderStatus",
     "ClaudeCodeProvider",
     "CodexProvider",
     "HermesProvider",
+    "OpencodeProvider",
+    "OpenclawProvider",
     "PROVIDERS",
     "get_provider",
 ]
