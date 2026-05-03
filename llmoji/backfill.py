@@ -35,12 +35,14 @@ same second. Sub-second-grade dedup is out of scope.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from ._util import scrape_row_to_journal_line
+from ._util import atomic_write_text, scrape_row_to_journal_line
 from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
 from .scrape import ScrapeRow
 from .sources._common import walk_parents_for_user_text
@@ -510,3 +512,198 @@ def backfill_hermes(sessions_root: Path, journal: Path) -> int:
     for path in paths:
         rows.extend(_replay_hermes_session(path))
     return _flush_rows(rows, journal)
+
+
+# ---------------------------------------------------------------------------
+# `llmoji import` — dedup-aware merge into the live journal
+# ---------------------------------------------------------------------------
+#
+# The ``backfill_*`` functions above truncate the journal: they're a
+# pre-install one-shot intended to be run before the live hook starts
+# logging, so a re-run is fine to overwrite.
+#
+# ``import_provider`` is the user-facing equivalent that's safe to run
+# AFTER install: it walks the same source files, then dedups against
+# whatever's already in the journal (live-hook rows + any prior
+# imports) and APPENDS only novel rows. Atomic via temp-write +
+# os.replace so a SIGINT mid-write leaves the journal with either
+# the old content or the merged content, never half.
+#
+# Dedup key: hash of (ts, model, assistant_text). ``ts`` is set per
+# event in claude_code/codex sources and per session in hermes (whose
+# session JSON only persists session-level timestamps); collisions
+# inside one session for hermes are intentional — same key, same
+# row, dedup folds them.
+
+
+@dataclass
+class ImportResult:
+    """One ``import_provider`` invocation's tally.
+
+    ``rows_seen`` is everything the source files contained (after
+    ``--since`` filtering). ``rows_novel`` is what made it past the
+    dedup check and got appended. ``rows_seen - rows_novel`` is the
+    dedup hit count — typically every row on a re-import.
+    """
+
+    rows_seen: int
+    rows_novel: int
+
+
+def _dedup_key_for_journal_row(
+    ts: str, model: str, assistant_text: str,
+) -> str:
+    """Hash key for journal-row dedup. Length-prefixed framing so a
+    NUL inside any field can't collapse field boundaries (mirrors
+    :func:`llmoji.synth.cache_key`'s framing rule).
+    """
+    h = hashlib.sha256()
+    for part in (ts, model, assistant_text):
+        encoded = part.encode("utf-8")
+        h.update(str(len(encoded)).encode("ascii"))
+        h.update(b":")
+        h.update(encoded)
+    return h.hexdigest()[:16]
+
+
+def _journal_dedup_keys(journal_path: Path) -> set[str]:
+    """Read existing journal rows and build the dedup-key set.
+    Tolerates malformed lines (skips silently — analyze re-walks the
+    journal anyway and surfaces malformed rows there)."""
+    keys: set[str] = set()
+    if not journal_path.exists():
+        return keys
+    with journal_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            keys.add(_dedup_key_for_journal_row(
+                str(row.get("ts") or ""),
+                str(row.get("model") or ""),
+                str(row.get("assistant_text") or ""),
+            ))
+    return keys
+
+
+# Source-path resolvers for each provider. Single source of truth for
+# "where on disk do this provider's session/transcript files live?"
+# — the existing ``backfill_*`` callers pass the root in, but the CLI
+# ``import`` path resolves via the provider class, so the convention
+# pins here.
+_PROVIDER_SOURCE_GLOBS: dict[str, tuple[type, str, str]] = {
+    # (provider_class, root_subpath_under_settings_parent, glob_pattern)
+    "claude_code": (ClaudeCodeProvider, "projects", "**/*.jsonl"),
+    "codex":       (CodexProvider, "sessions", "**/rollout-*.jsonl"),
+    "hermes":      (HermesProvider, "sessions", "session_*.json"),
+}
+
+
+def _iter_rows_for_provider(name: str) -> Iterator[ScrapeRow]:
+    """Walk the canonical source path for ``name`` and yield every
+    :class:`ScrapeRow` the corresponding ``backfill_*`` function would
+    produce. Same iteration order: ``sorted(rglob/glob)``. Skips
+    cleanly when the source root doesn't exist (a provider that's
+    been installed but has no session files yet).
+    """
+    if name not in _PROVIDER_SOURCE_GLOBS:
+        raise ValueError(
+            f"unknown provider {name!r}; "
+            f"known: {sorted(_PROVIDER_SOURCE_GLOBS)}"
+        )
+    cls, subpath, pattern = _PROVIDER_SOURCE_GLOBS[name]
+    provider = cls()
+    root = provider.settings_path.parent / subpath
+    if not root.exists():
+        return
+    paths = sorted(root.glob(pattern))
+    if name == "claude_code":
+        for path in paths:
+            yield from _replay_claude_transcript(path)
+    elif name == "codex":
+        for path in paths:
+            yield from _replay_codex_rollout(path)
+    elif name == "hermes":
+        for path in paths:
+            yield from _replay_hermes_session(path)
+
+
+def _journal_for(name: str) -> Path:
+    """Resolve the journal path for ``name`` via the provider class
+    — single source of truth, mirrors what the live hook writes to."""
+    if name not in _PROVIDER_SOURCE_GLOBS:
+        raise ValueError(
+            f"unknown provider {name!r}; "
+            f"known: {sorted(_PROVIDER_SOURCE_GLOBS)}"
+        )
+    cls, _, _ = _PROVIDER_SOURCE_GLOBS[name]
+    return cls().journal_path
+
+
+def import_provider(
+    name: str,
+    *,
+    since: str | None = None,
+    dry_run: bool = False,
+) -> ImportResult:
+    """Replay one provider's session/transcript files into its journal,
+    deduplicating against the existing journal so re-runs are
+    idempotent.
+
+    ``since``: ISO-8601 timestamp string; rows with ``ts < since`` are
+    skipped. Comparison is lexicographic on the raw timestamp strings,
+    which is correct for ISO-8601-with-Z (the only format the sources
+    emit).
+
+    ``dry_run``: walk + dedup but don't write the journal. Returned
+    ``ImportResult`` carries the same counts the real run would, so
+    a script can preview before committing.
+
+    Stop the harness before importing — concurrent live-hook writes
+    during the temp-file dance could be lost in the rename. A file
+    lock isn't worth the complexity for a stop-the-world recovery
+    operation.
+    """
+    journal_path = _journal_for(name)
+    existing_keys = _journal_dedup_keys(journal_path)
+
+    rows_seen = 0
+    novel: list[ScrapeRow] = []
+    for r in _iter_rows_for_provider(name):
+        if since is not None and r.timestamp < since:
+            continue
+        rows_seen += 1
+        key = _dedup_key_for_journal_row(
+            r.timestamp, r.model or "", r.assistant_text or "",
+        )
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        novel.append(r)
+
+    if dry_run or not novel:
+        return ImportResult(rows_seen=rows_seen, rows_novel=len(novel))
+
+    # Atomic merge: read existing text (if any), append novel rows
+    # sorted by timestamp, write the whole concatenation via
+    # tmp+rename.
+    existing_text = (
+        journal_path.read_text() if journal_path.exists() else ""
+    )
+    if existing_text and not existing_text.endswith("\n"):
+        existing_text += "\n"
+    new_lines = []
+    for r in sorted(novel, key=lambda r: r.timestamp):
+        new_lines.append(
+            json.dumps(scrape_row_to_journal_line(r), ensure_ascii=False)
+        )
+    new_text = existing_text + "\n".join(new_lines) + "\n"
+    atomic_write_text(journal_path, new_text)
+
+    return ImportResult(rows_seen=rows_seen, rows_novel=len(novel))

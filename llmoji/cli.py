@@ -638,6 +638,47 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# import — replay native session/transcript files into the journal
+# ---------------------------------------------------------------------------
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    """``llmoji import <provider>`` — dedup-aware merge of historical
+    session/transcript files into the live journal. Internal module
+    is :mod:`llmoji.backfill`; ``import`` is the user-facing verb
+    because "replay session files into the journal" is the dominant
+    mental model and ``backfill`` collides namewise with what users
+    might expect to be "redo the analyze pass."
+    """
+    from .backfill import import_provider
+
+    try:
+        result = import_provider(
+            args.provider,
+            since=args.since,
+            dry_run=args.dry_run,
+        )
+    except ValueError as e:
+        print(f"import failed: {e}", file=sys.stderr)
+        return 2
+
+    label = "would append" if args.dry_run else "appended"
+    skipped = result.rows_seen - result.rows_novel
+    print(
+        f"{args.provider}: saw {result.rows_seen} row(s); {label} "
+        f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
+    )
+    if args.dry_run:
+        print("(dry run — journal not modified)")
+    elif result.rows_novel:
+        print(
+            f"journal: {get_provider(args.provider).journal_path}\n"
+            f"run `llmoji analyze` to fold them into the next bundle."
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # upload
 # ---------------------------------------------------------------------------
 
@@ -813,6 +854,30 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     sp.set_defaults(func=_cmd_analyze)
+
+    sp = sub.add_parser(
+        "import",
+        help=(
+            "replay a provider's native session/transcript files into "
+            "its journal (dedup-aware merge — re-runnable)"
+        ),
+    )
+    sp.add_argument(
+        "provider", choices=sorted(PROVIDERS),
+        help="harness whose session files to walk",
+    )
+    sp.add_argument(
+        "--since", default=None,
+        help=(
+            "ISO-8601 timestamp; skip rows with ts < SINCE "
+            "(e.g. 2026-01-01T00:00:00Z)"
+        ),
+    )
+    sp.add_argument(
+        "--dry-run", action="store_true",
+        help="walk + dedup but don't write the journal",
+    )
+    sp.set_defaults(func=_cmd_import)
 
     sp = sub.add_parser("upload", help="ship the bundle to a target")
     sp.add_argument("--target", required=True, choices=["hf", "email"])

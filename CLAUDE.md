@@ -187,6 +187,16 @@ llmoji status --json           machine-readable JSON output for CI
 llmoji parse --provider <n> P  ingest a static export dump (claude.ai
                                or chatgpt conversations.json) into
                                ~/.llmoji/journals/
+llmoji import <provider>       replay native session/transcript files
+[--since <ISO>] [--dry-run]    into the live journal — dedup-aware
+                               merge against (ts, model,
+                               assistant_text), atomic via
+                               temp+rename. Stop the harness first.
+                               --since drops rows older than the
+                               cutoff. --dry-run reports counts
+                               without writing. Internal module is
+                               llmoji.backfill (parity-tested);
+                               import is the user-facing verb.
 llmoji analyze [--notes …]     scrape + canonicalize + synthesize
 [--backend …] [--model …]      → ~/.llmoji/bundle/. backend defaults
 [--base-url …]                 to anthropic; openai uses Responses
