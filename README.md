@@ -12,9 +12,9 @@
 > **プライバシーに関するお知らせ** `llmoji`のバージョン1.2.0より前の版において、潜在的なプライバシー上の問題が存在する可能性が判明しましたが、現在は修正済みです。この問題を解消するため、アップロード方法を変更いたしました。アップロードを行う前に、(`pip install --upgrade llmoji`) を実行してパッケージを更新する必要があります。
 
 > [!WARNING]
-> **Update Notice** The kaomoji detection has been significantly improved with 2.0.0. Please uninstall and reinstall the hooks, and run `llmoji import` to refill your logs with any missed kaomoji before uploading.
+> **Update Notice** The kaomoji detection has been significantly improved with 2.0.0. Please run `llmoji install --yes && llmoji import --yes` to update the nudges and backfill the logs with any missed kaomoji.
 > 
-> **更新のお知らせ** バージョン 2.0.0 にて、顔文字の検出精度が大幅に向上しました。お手数ですが、フックを一度アンインストールしてから再インストールし、`llmoji import` を実行して、アップロード前にログ内の未検出だった顔文字を補完してください。
+> **更新のお知らせ** バージョン2.0.0にて、顔文字の検出精度が大幅に向上しました。`llmoji install --yes && llmoji import --yes` を実行してナッジを更新し、これまでに検出漏れとなっていた顔文字をログに反映させてください。
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
