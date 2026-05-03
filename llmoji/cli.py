@@ -129,10 +129,87 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_uninstall(args: argparse.Namespace) -> int:
-    p = get_provider(args.provider)
-    p.uninstall()
+def _uninstall_one(name: str) -> tuple[bool, str | None]:
+    """Uninstall a single provider by name. Returns
+    ``(succeeded, error_message)``. Mirrors ``_install_one``'s
+    contract so the autodetect path can keep going on per-provider
+    failure (e.g. corrupt settings on one provider shouldn't block
+    cleanup of others).
+    """
+    p = get_provider(name)
+    try:
+        p.uninstall()
+    except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
+        return False, f"{type(e).__name__}: {e}"
     print(f"uninstalled {p.name}. journal at {p.journal_path} preserved.")
+    return True, None
+
+
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    # Explicit provider: legacy single-target path.
+    if args.provider is not None:
+        ok, err = _uninstall_one(args.provider)
+        if not ok:
+            print(
+                f"uninstall failed for {args.provider}: {err}",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    # Autodetect path: mirror ``llmoji install``. Enumerate every
+    # registered provider whose harness home dir exists on disk and
+    # uninstall each. ``HookInstaller.uninstall`` is idempotent — a
+    # provider that was never installed (no settings entries, no hook
+    # files on disk) is a clean no-op, so we don't need a separate
+    # "is actually installed" filter; matching install's filter
+    # surface keeps the two commands' UX uniform.
+    detected = [
+        name for name in PROVIDERS if get_provider(name).is_present()
+    ]
+    if not detected:
+        print(
+            "no harnesses detected (looked for "
+            + ", ".join(
+                f"{name} ({get_provider(name).settings_path.parent})"
+                for name in PROVIDERS
+            )
+            + "). pass an explicit provider name (e.g. "
+            "`llmoji uninstall claude_code`) if your harness home dir "
+            "lives somewhere unusual.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print("detected harnesses:")
+    for name in detected:
+        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+    if not args.yes:
+        try:
+            ans = input(
+                f"uninstall llmoji hooks from {len(detected)} harness(es)? "
+                f"[y/N] "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    print()
+
+    # Partial success: one corrupt config doesn't kill the rest.
+    failures: list[tuple[str, str]] = []
+    for name in detected:
+        ok, err = _uninstall_one(name)
+        if not ok:
+            failures.append((name, err or ""))
+        print()
+    if failures:
+        print(f"{len(failures)} of {len(detected)} provider(s) failed:",
+              file=sys.stderr)
+        for name, err in failures:
+            print(f"  - {name}: {err}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -854,8 +931,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=_cmd_install)
 
-    sp = sub.add_parser("uninstall", help="remove a provider's hook")
-    sp.add_argument("provider", choices=sorted(PROVIDERS))
+    sp = sub.add_parser(
+        "uninstall",
+        help=(
+            "remove a provider's hook (idempotent; preserves journal). "
+            "With no provider arg, autodetects every harness present on "
+            "disk and uninstalls from each."
+        ),
+    )
+    sp.add_argument(
+        "provider", nargs="?", default=None, choices=sorted(PROVIDERS),
+        help=(
+            "harness to uninstall from; omit to autodetect every "
+            "harness present on disk"
+        ),
+    )
+    sp.add_argument(
+        "--yes", action="store_true",
+        help=(
+            "skip the autodetect confirmation prompt (no-op for the "
+            "explicit-provider path)"
+        ),
+    )
     sp.set_defaults(func=_cmd_uninstall)
 
     sp = sub.add_parser(
