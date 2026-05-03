@@ -752,8 +752,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="llmoji",
         description=(
-            "llmoji command-line entry point. State lives under "
-            "$LLMOJI_HOME (default ~/.llmoji); the only ship-able "
+            "Llmoji entrypoint. Look in "
+            "$LLMOJI_HOME (default ~/.llmoji) for state; the only shippable "
             "artifact is the bundle directory between `analyze` and "
             "`upload`."
         ),
