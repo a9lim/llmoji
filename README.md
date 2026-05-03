@@ -7,12 +7,14 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/llmoji/)
 
 > [!WARNING]
-> **Privacy notice for upgraders.** Versions of `llmoji` before 1.2.0 had a privacy issue; I have changed the upload method to mitigate it. Please upgrade (`pip install --upgrade llmoji`) to upload.
+> **Privacy notice** Versions of `llmoji` before 1.2.0 had a potential privacy issue that I managed to catch; I have changed the upload method to mitigate it. You will need to (`pip install --upgrade llmoji`) before you can upload.
 > 
-> **アップグレードされる方へのプライバシーに関するお知らせ：** `llmoji`のバージョン1.2.0より前の版にはプライバシー上の問題がありました。この問題を軽減するため、アップロード方法を変更いたしました。アップロードを行うには、最新版へのアップグレード（`pip install --upgrade llmoji`）をお願いいたします。
+> **プライバシーに関するお知らせ** `llmoji`のバージョン1.2.0より前の版において、潜在的なプライバシー上の問題が存在する可能性が判明しましたが、現在は修正済みです。この問題を解消するため、アップロード方法を変更いたしました。アップロードを行う前に、(`pip install --upgrade llmoji`) を実行してパッケージを更新する必要があります。
 
 > [!WARNING]
-> **The kaomoji detection has been significantly improved with v2.0.0. Please run `llmoji import` to backfill your logs with any missed kaomoji before uploading.**
+> **The kaomoji detection has been significantly improved with 2.0.0. Please run `llmoji import` to backfill your logs with any missed kaomoji before uploading.**
+> 
+> **バージョン2.0.0にて、顔文字の検出精度が大幅に向上しました。アップロードを行う前に、`llmoji import`を実行してログを更新し、これまで検出されずに漏れていた顔文字を補完してください。**
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
