@@ -4,30 +4,58 @@ Both targets are opt-in and require explicit ``--target`` selection;
 no implicit default.
 
 HF target:
-    Uses ``huggingface_hub.HfApi.upload_folder`` with
-    ``create_pr=True`` to open a dataset PR containing the bundle's
-    loose files in a contributor-named, timestamped subfolder of a
-    public dataset (``a9lim/llmoji`` by default). The final repo
-    layout (once the PR is merged) is
-    ``contributors/<hash>/bundle-<ts>/{manifest.json,<slug>.jsonl,...}``
-    — one ``<source-model-slug>.jsonl`` per model the journal saw.
-    PR-based instead of direct commit because the dataset is
-    owned by ``a9lim`` and there is no contributor-write team:
-    direct ``upload_folder`` calls from non-owners 403 at the Hub.
-    PRs let any authenticated HF user submit; the maintainer
-    reviews the diff (the allowlist + manifest are visible inline)
-    and merges. Loose files (rather than a tarball) so the HF
-    dataset viewer can auto-load every per-source-model ``*.jsonl``
-    directly via a ``data_files: contributors/**/*.jsonl`` configs
-    entry on the dataset card. ``upload_folder`` does a single
-    atomic commit (on the PR branch) so partial uploads can't land.
-    The submitter's identifier is a 32-hex-char salted hash of (a
+    The submission flow has three secrets in play:
+
+      1. The user's HF token, used only for a ``whoami()``
+         proof-of-life check; discarded immediately, never used to
+         push the bundle.
+      2. An upload password, posted by the maintainer on the
+         dataset card and on Twitter; the user types it (or sets
+         ``$LLMOJI_UPLOAD_PASSWORD``) when running ``upload``.
+      3. The shared submission HF token, encrypted under the
+         upload password and shipped with the package as an
+         opaque base64 blob in :mod:`llmoji._shared_token`.
+
+    The user's password decrypts the shared token, the shared
+    token authenticates the actual ``upload_folder`` call. The
+    user's HF account never appears on the dataset's commit
+    history or PR list.
+
+    Pre-1.2.0 used the user's HF token directly with
+    ``create_pr=True``, which put the user's HF username on every
+    submission PR and contradicted the privacy claim that
+    submissions can't be traced to a specific user; 1.2.0 patches
+    that. The password layer is a paper-thin barrier (anyone
+    determined can find the password) — see ``SECURITY.md``.
+
+    On the dataset side, Discussions and Pull Requests are
+    DISABLED on ``a9lim/llmoji`` (HF setting). This is the
+    enforcement mechanism that breaks pre-1.2.0 clients: an old
+    client trying ``create_pr=True`` with the user's token gets a
+    clear API error from HF, the user upgrades, the new client
+    succeeds via the shared credential. New clients push to a
+    per-submission branch ``submission-<contributor>-<ts>`` via
+    ``upload_folder(revision=branch_name, create_pr=False)``; the
+    maintainer reviews the branch by diff and merges to ``main``
+    by hand.
+
+    The bundle layout on disk (and on the merged ``main``) is
+    ``contributors/<hash>/bundle-<ts>/{manifest.json,<slug>.jsonl,
+    ...}`` — one ``<source-model-slug>.jsonl`` per model the
+    journal saw. Loose files rather than a tarball so the HF
+    dataset viewer can auto-load every per-source-model
+    ``*.jsonl`` via a ``data_files: contributors/**/*.jsonl``
+    configs entry on the dataset card. ``upload_folder`` does a
+    single atomic commit on the submission branch so partial
+    uploads can't land.
+
+    The submitter identifier is a 32-hex-char salted hash of (a
     per-machine random token + the package version), persisted at
-    ``~/.llmoji/.salt`` (a flat 64-hex-char file; pre-1.1.x had it
+    ``~/.llmoji/.salt`` (flat 64-hex-char file; pre-1.1.x had it
     wrapped in a JSON envelope at ``state.json``). We do NOT
     collect HF usernames or any account-bound identifier; the
-    salted hash is just enough to dedup repeat submissions from the
-    same machine.
+    salted hash is just enough to dedup repeat submissions from
+    the same machine.
 
 Email target:
     Build a ``mailto:`` URI with the bundle path printed in the
@@ -40,6 +68,7 @@ Email target:
 
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 import tarfile
@@ -232,16 +261,117 @@ def _confirm(message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class HFAuthError(RuntimeError):
+    """Raised when the proof-of-life check on the user's HF token
+    fails, or when the upload password is missing or wrong, or
+    when the shared-token blob is the unrelased placeholder. The
+    CLI surfaces the message verbatim so the user can fix their
+    auth and retry.
+    """
+
+
+# Env var the user can set to skip the interactive password prompt
+# in scripted use (CI, batch scripts, recurring uploads).
+UPLOAD_PASSWORD_ENV = "LLMOJI_UPLOAD_PASSWORD"
+
+
+def _read_upload_password(prompt: bool = True) -> str | None:
+    """Resolve the upload password from (in order) the env var
+    :data:`UPLOAD_PASSWORD_ENV`, then an interactive ``getpass``
+    prompt if ``prompt`` is True. Returns ``None`` when no
+    password is found and prompting is disabled (used by
+    test/dry-run paths).
+    """
+    env = os.environ.get(UPLOAD_PASSWORD_ENV)
+    if env:
+        return env.strip()
+    if not prompt:
+        return None
+    import getpass
+    print(
+        "to submit, please enter the upload password "
+        "(posted on the dataset card at "
+        "https://huggingface.co/datasets/a9lim/llmoji "
+        "and on Twitter at https://twitter.com/_a9lim)."
+    )
+    try:
+        pw = getpass.getpass("upload password: ")
+    except EOFError:
+        return None
+    return pw.strip() or None
+
+
+def _read_user_hf_token() -> str | None:
+    """Read the user's HF token from the canonical locations
+    (``$HF_TOKEN`` env var, then ``~/.cache/huggingface/token``).
+    Returns ``None`` if nothing is configured. Used ONLY for the
+    proof-of-life ``whoami()`` call; never persisted, never sent
+    to the upload itself.
+    """
+    try:
+        from huggingface_hub import get_token
+    except ImportError:  # pragma: no cover — huggingface_hub is a hard dep
+        return None
+    token = get_token()
+    if token is None:
+        return None
+    return token
+
+
+def _proof_of_life(user_token: str) -> str:
+    """Call ``HfApi.whoami()`` with the user's token. Returns the
+    HF username on success (used only for the friendly print
+    message; not stored, not bundled). Raises :class:`HFAuthError`
+    on rejection. The token itself is discarded by the caller
+    immediately after this returns.
+    """
+    from huggingface_hub import HfApi
+    try:
+        info = HfApi(token=user_token).whoami()
+    except Exception as e:  # noqa: BLE001 — surfaced verbatim
+        raise HFAuthError(
+            f"HF proof-of-life check failed: {e}. Please verify "
+            f"your HF token (run `hf auth whoami` to test) and try "
+            f"again."
+        ) from e
+    name = info.get("name") if isinstance(info, dict) else None
+    return str(name) if name else "(unknown)"
+
+
 def upload_hf(
     bundle_dir: Path,
     *,
     repo: str = DEFAULT_HF_REPO,
     confirm: bool = True,
+    password: str | None = None,
 ) -> dict[str, Any]:
-    """Open a dataset PR containing the bundle's loose files under
-    ``contributors/<hash>/bundle-<ts>/`` in the chosen HF dataset
-    repo. Returns the submission metadata dict (including
-    ``pr_url`` so the user can link to it / track merge status).
+    """Push the bundle to a per-submission branch on the chosen HF
+    dataset repo, going through the shared submission credential so
+    the user's HF account stays off the dataset.
+
+    Two-step flow:
+
+    1. **Proof of life.** Read the user's HF token from
+       ``$HF_TOKEN`` / ``~/.cache/huggingface/token`` and call
+       ``HfApi(token=user_token).whoami()``. If the token is
+       missing or rejected, raise :class:`HFAuthError` with a
+       friendly remediation message. The user's token is
+       discarded immediately after this call; it is never used to
+       authenticate the upload itself, never logged, never written
+       to disk.
+    2. **Submission.** Push the bundle to a per-submission branch
+       ``submission-<contributor>-<ts>`` via
+       ``HfApi(token=SHARED_HF_TOKEN).upload_folder(
+       revision=branch_name, create_pr=False)``. The shared
+       credential lives in :mod:`llmoji._shared_token` and is a
+       fine-grained HF token scoped to write on the target
+       dataset only. The maintainer reviews the branch by diff
+       and merges to ``main`` by hand.
+
+    Discussions and Pull Requests are DISABLED on
+    ``a9lim/llmoji`` (HF dataset setting), so pre-1.2.0 clients
+    that called ``create_pr=True`` fail with a clear API error
+    instead of silently leaking the user's HF username on a PR.
 
     Pre-flight: refuse to upload if anything outside the flat
     allowlist (top-level ``manifest.json`` plus per-source-model
@@ -250,37 +380,77 @@ def upload_hf(
     ``upload_folder``'s ``allow_patterns`` is a second line of
     defense against the same class of bug.
 
-    PR-based (``create_pr=True``) rather than direct commit: the
-    dataset is owned by ``a9lim`` and has no contributor-write team,
-    so a direct ``upload_folder`` 403s for anyone who isn't the
-    owner. PRs let any authenticated HF user submit; the maintainer
-    reviews the diff (the allowlist + manifest land inline) and
-    merges. The submitter's HF token still needs `write` scope —
-    that's what authenticates the PR author — but the user does NOT
-    need write access on the target repo.
-
     The dataset card's ``data_files: contributors/**/*.jsonl`` glob
     surfaces every per-source-model data file across contributors
-    into the dataset viewer's single train split (after the PR
-    merges).
+    into the dataset viewer's single train split (after the
+    maintainer merges the submission branch into ``main``).
     """
+    from ._shared_token import decrypt_with_password
+
     files = _check_or_raise(bundle_dir, "upload")
     contributor = submitter_id()
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target_prefix = f"contributors/{contributor}/bundle-{ts}"
+    branch_name = f"submission-{contributor[:12]}-{ts}"
 
-    print(f"target: HF dataset {repo} → {target_prefix}/ (as PR)")
+    # Proof-of-life: confirm the user has a real HF account before
+    # we push anything. Their token is discarded right after.
+    user_token = _read_user_hf_token()
+    if user_token is None:
+        raise HFAuthError(
+            "No HF token found. llmoji uses your HF account as a "
+            "proof-of-life check (one whoami call, discarded "
+            "immediately, never used to push the bundle). Please "
+            "run `hf auth login` and try again."
+        )
+    user_name = _proof_of_life(user_token)
+    # Discard the user token before doing anything else. The actual
+    # upload uses the shared submission credential below.
+    del user_token
+
+    print(f"target: HF dataset {repo} → branch {branch_name}/")
+    print(
+        f"proof of life: authenticated as HF user {user_name!r} "
+        f"(token discarded; not used for the upload)"
+    )
     for f in files:
         print(
             f"  {f.relative_to(bundle_dir).as_posix()} "
             f"({f.stat().st_size} bytes)"
         )
-    if confirm and not _confirm("open a PR with this bundle?"):
+    if confirm and not _confirm("submit this bundle?"):
         print("aborted.")
         return {"submitted": False}
 
+    # Resolve the upload password (explicit kwarg → env var →
+    # interactive prompt) and decrypt the shared submission token.
+    if password is None:
+        password = _read_upload_password(prompt=True)
+    if not password:
+        raise HFAuthError(
+            "no upload password provided. The current password "
+            "is posted on the dataset card at "
+            "https://huggingface.co/datasets/a9lim/llmoji and on "
+            f"Twitter at https://twitter.com/_a9lim, or set "
+            f"${UPLOAD_PASSWORD_ENV} for scripted use."
+        )
+    try:
+        shared_token = decrypt_with_password(password)
+    except ValueError as e:
+        raise HFAuthError(str(e)) from e
+    finally:
+        # Discard the user-supplied password from the local frame.
+        # Python won't zero the underlying string memory but the
+        # name is gone from the upload scope after this block.
+        del password
+
     from huggingface_hub import HfApi
-    api = HfApi()
+    api = HfApi(token=shared_token)
+    # Discard the decrypted token from this scope after handing it
+    # to the API client. The HfApi instance keeps its own copy
+    # (necessary for retries inside upload_folder) but the local
+    # binding doesn't linger past the next line.
+    del shared_token
     commit_info = api.upload_folder(
         folder_path=str(bundle_dir),
         path_in_repo=target_prefix,
@@ -291,9 +461,15 @@ def upload_hf(
             f"Submitted by contributor `{contributor}` via "
             f"`llmoji upload --target hf` (llmoji "
             f"{package_version()}). Bundle path in repo: "
-            f"`{target_prefix}/`."
+            f"`{target_prefix}/`. Maintainer: review this branch "
+            f"and merge to `main` if approved."
         ),
-        create_pr=True,
+        # Per-submission branch; PRs are disabled on this dataset
+        # (HF setting) so old clients that hit `create_pr=True`
+        # error out cleanly instead of leaking the user's HF
+        # username on a PR.
+        revision=branch_name,
+        create_pr=False,
         # Top-level manifest + every per-source-model
         # ``<slug>.jsonl`` at the bundle root. The structural
         # allowlist check above is the primary defense; this is
@@ -303,28 +479,34 @@ def upload_hf(
             f"*{BUNDLE_DATA_SUFFIX}",
         ],
     )
-    # ``upload_folder`` returns a ``CommitInfo``; with
-    # ``create_pr=True`` the ``pr_url`` attribute is set. Older
-    # huggingface_hub releases returned a bare URL string from
-    # ``upload_folder`` — defensively fall through to ``str()`` if
-    # the structured attrs aren't available.
-    pr_url = getattr(commit_info, "pr_url", None)
-    if pr_url is None and not isinstance(commit_info, str):
-        pr_url = getattr(commit_info, "commit_url", None)
-    if pr_url is None:
-        pr_url = str(commit_info)
-    print(f"submitted to {repo} as {target_prefix}/ — PR: {pr_url}")
-    print(
-        "the maintainer will review and merge; nothing lands on the "
-        "main branch until then."
+    # ``upload_folder`` returns a ``CommitInfo`` whose
+    # ``commit_url`` attribute points at the submission branch's
+    # commit. Older huggingface_hub releases returned a bare URL
+    # string from ``upload_folder`` — defensively fall through to
+    # ``str()`` if the structured attrs aren't available.
+    commit_url = getattr(commit_info, "commit_url", None)
+    if commit_url is None and not isinstance(commit_info, str):
+        commit_url = getattr(commit_info, "pr_url", None)
+    if commit_url is None:
+        commit_url = str(commit_info)
+    branch_url = (
+        f"https://huggingface.co/datasets/{repo}/tree/{branch_name}"
     )
+    print(
+        f"submitted to {repo} as branch {branch_name}; the "
+        f"maintainer will review and merge."
+    )
+    print(f"  branch: {branch_url}")
+    print(f"  commit: {commit_url}")
     return {
         "submitted": True,
         "repo": repo,
         "path_in_repo": target_prefix,
+        "branch": branch_name,
+        "branch_url": branch_url,
+        "commit_url": commit_url,
         "contributor": contributor,
         "files": [f.relative_to(bundle_dir).as_posix() for f in files],
-        "pr_url": pr_url,
     }
 
 
