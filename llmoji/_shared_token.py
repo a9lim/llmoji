@@ -71,11 +71,13 @@ import secrets
 ITERATIONS = 200_000
 
 # Encrypted blob; replace at every release with the output of
-# ``encrypt_for_release(real_token, password)``. The placeholder
-# below decrypts to a placeholder string under any password and is
-# detected by :data:`PLACEHOLDER_BLOB_PREFIX` so a wheel that
-# forgot the rotation step bails loudly.
-ENCRYPTED_TOKEN_B64: str = "PLACEHOLDER_BLOB"
+# ``encrypt_for_release(real_token, password)``. A wheel that ships
+# with the placeholder string is detected by
+# :data:`PLACEHOLDER_BLOB_PREFIX` and bails loudly at decrypt time.
+ENCRYPTED_TOKEN_B64: str = (
+    "YttXqY2EWF9EHdyHWFOqrWtA6tekNKDzScfJYhnsLqxNsjqsVwwZmBsJV4K1m3m7"
+    "31vfaTkRDiWePIMLyHR3pUMsvpa9hZye8zM9aQIJRLlcHmJaiw=="
+)
 
 # Marker prefix so the runtime can tell "this is a release that
 # forgot to rotate the token" from "this is a real encrypted

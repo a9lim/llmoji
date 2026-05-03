@@ -701,16 +701,22 @@ PR; this is the enforcement mechanism that forces the upgrade.
 
 One-time setup on the HF side:
 
-1. Create the `llmoji-submissions` HF account (or pick another
-   submission identity).
-2. Add `llmoji-submissions` as a collaborator on `a9lim/llmoji`
-   with write access.
-3. Disable Discussions and Pull Requests on `a9lim/llmoji`
+1. Disable Discussions and Pull Requests on `a9lim/llmoji`
    (Settings → "Disabling Discussions / Pull Requests" toggle).
    This breaks pre-1.2.0 clients cleanly.
-4. Generate a fine-grained HuggingFace token on the
-   `llmoji-submissions` account scoped to write on
-   `a9lim/llmoji` only.
+2. Generate a fine-grained HuggingFace token on a9's own account
+   scoped to write on `a9lim/llmoji` only (no user permissions,
+   no other repos). The token name doesn't matter; "llmoji-
+   submission" is the convention. No expiry — rotation cadence
+   is "per release," not time-based, and an expiry would break
+   wheels at random.
+
+A separate `llmoji-submissions` account isn't needed. With fine-
+grained scoping, the blast radius of a leaked credential is the
+same either way (write on this one dataset, nothing else); using
+a9's own account just removes one account to manage and makes
+submission branches authored by `a9lim` directly, which is more
+transparent than an opaque submission identity.
 
 Per-release / per-rotation:
 
@@ -731,9 +737,9 @@ Then:
 3. Post `password` on the dataset card (top of the README in the
    HF dataset web UI) and on Twitter at
    [@_a9lim](https://twitter.com/_a9lim).
-4. If rotating because of a compromise: delete the previous
-   `llmoji-submissions` token from HF settings to invalidate any
-   in-flight stolen-token uses.
+4. If rotating because of a compromise: revoke the previous
+   fine-grained token from a9's HF settings page to invalidate
+   any in-flight stolen-token uses, then generate a new one.
 
 Maintainer review of submission branches:
 
