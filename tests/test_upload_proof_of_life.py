@@ -162,6 +162,7 @@ def test_upload_hf_uses_user_token_for_whoami_only(
 
     hfapi_init_tokens: list[str | None] = []
     whoami_called_on: list[Any] = []
+    create_branch_call_kwargs: list[dict[str, Any]] = []
     upload_call_kwargs: list[dict[str, Any]] = []
 
     class _FakeApi:
@@ -172,6 +173,11 @@ def test_upload_hf_uses_user_token_for_whoami_only(
         def whoami(self) -> dict[str, str]:
             whoami_called_on.append(self._token)
             return {"name": "fake-user"}
+
+        def create_branch(self, **kwargs: Any) -> None:
+            create_branch_call_kwargs.append(
+                {**kwargs, "_api_token": self._token},
+            )
 
         def upload_folder(self, **kwargs: Any) -> Any:
             upload_call_kwargs.append({**kwargs, "_api_token": self._token})
@@ -188,6 +194,19 @@ def test_upload_hf_uses_user_token_for_whoami_only(
 
     # whoami uses the user's token, exactly once.
     assert whoami_called_on == [USER_TOKEN]
+    # create_branch must run before upload_folder, with the shared
+    # token, on the submission branch we're about to push to. The
+    # Python-API ``upload_folder(revision=...)`` does not auto-create
+    # the branch (unlike the ``hf upload`` CLI) so this call is
+    # load-bearing — without it, preupload_lfs_files raises
+    # RevisionNotFoundError.
+    assert len(create_branch_call_kwargs) == 1
+    create_kwargs = create_branch_call_kwargs[0]
+    assert create_kwargs["_api_token"] == SHARED
+    assert create_kwargs["repo_id"] == "a9lim/llmoji"
+    assert create_kwargs["repo_type"] == "dataset"
+    assert create_kwargs["branch"].startswith("submission-")
+    assert create_kwargs["exist_ok"] is True
     # upload_folder uses the decrypted shared token.
     assert len(upload_call_kwargs) == 1
     upload_kwargs = upload_call_kwargs[0]
@@ -201,9 +220,9 @@ def test_upload_hf_uses_user_token_for_whoami_only(
         f"{hfapi_init_tokens!r}"
     )
 
-    # Push went to a per-submission branch, not main, not a PR.
+    # Branch and upload target the same submission branch.
     assert upload_kwargs["create_pr"] is False
-    assert upload_kwargs["revision"].startswith("submission-")
+    assert upload_kwargs["revision"] == create_kwargs["branch"]
     assert result["submitted"] is True
     assert result["branch"].startswith("submission-")
 
@@ -235,6 +254,9 @@ def test_upload_hf_password_from_env(
 
         def whoami(self) -> dict[str, str]:
             return {"name": "fake-user"}
+
+        def create_branch(self, **_kwargs: Any) -> None:
+            return None
 
         def upload_folder(self, **_kwargs: Any) -> Any:
             captured_token.append(self._token)
