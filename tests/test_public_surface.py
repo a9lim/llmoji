@@ -183,25 +183,43 @@ def test_scrape_row_schema():
 
 def test_provider_interface():
     from llmoji.providers import PROVIDERS, get_provider
-    from llmoji.providers.base import HookInstaller
+    from llmoji.providers.base import HookInstaller, PluginInstaller
 
-    # All three first-class providers register.
-    assert set(PROVIDERS) == {"claude_code", "codex", "hermes"}
+    # All five first-class providers register: three bash-hook + two
+    # TS-plugin (1.3 promoted opencode + openclaw from generic-JSONL
+    # examples).
+    assert set(PROVIDERS) == {
+        "claude_code", "codex", "hermes", "opencode", "openclaw",
+    }
     for name in PROVIDERS:
         p = get_provider(name)
         assert isinstance(p, HookInstaller)
-        # All five required attributes are non-empty.
         assert p.name == name
-        assert p.hooks_dir
-        assert p.settings_path
         assert p.journal_path
-        assert p.hook_template
-        # Render a hook and check no placeholders leaked through.
         rendered = p.render_hook()
-        assert "$JOURNAL_PATH" not in rendered
-        assert "$KAOMOJI_START_CASE" not in rendered
-        assert "$INJECTED_PREFIXES_FILTER" not in rendered
-        assert "$LLMOJI_VERSION" not in rendered
+        if isinstance(p, PluginInstaller):
+            # Plugin providers render TS — no bash placeholders to
+            # check, and the bash-side attrs (hook_template, hooks_dir,
+            # settings_path) are unused. Verify the version stamp got
+            # substituted and the canonical taxonomy block landed
+            # inside the BEGIN/END markers.
+            assert "__LLMOJI_VERSION__" not in rendered
+            assert "// BEGIN SHARED TAXONOMY" in rendered
+            assert "// END SHARED TAXONOMY" in rendered
+            # The taxonomy block carries the validator constants —
+            # spot-check that the splice happened (not just the markers
+            # rendering with an empty body).
+            assert "KAOMOJI_START_CHARS" in rendered
+            assert "isKaomojiCandidate" in rendered
+        else:
+            # Bash-hook providers — the historical shape.
+            assert p.hooks_dir
+            assert p.settings_path
+            assert p.hook_template
+            assert "$JOURNAL_PATH" not in rendered
+            assert "$KAOMOJI_START_CASE" not in rendered
+            assert "$INJECTED_PREFIXES_FILTER" not in rendered
+            assert "$LLMOJI_VERSION" not in rendered
 
 
 def test_bundle_schema():
@@ -955,55 +973,197 @@ def test_hermes_install_refuses_non_mapping_hooks_value():
             assert p.settings_path.read_text() == seed
 
 
-def test_examples_taxonomy_partial_matches():
-    """The two TS plugin examples (opencode_plugin.ts and
-    openclaw_plugin/index.ts) re-implement the kaomoji validator and
-    leading-bracket-span extractor in TypeScript because the taxonomy
-    is part of the v1.0 frozen public surface and TS-plugin hosts
-    can't import Python.
+def test_plugin_install_uninstall_roundtrip():
+    """Plugin providers (opencode, openclaw) install + uninstall
+    cleanly without touching the journal. Idempotent re-install is a
+    no-op (same contract as the bash providers).
 
-    The shared block is canonical at
-    ``examples/_kaomoji_taxonomy.ts.partial``. Both plugin files must
-    include the partial verbatim between
-    ``// BEGIN SHARED TAXONOMY`` / ``// END SHARED TAXONOMY`` markers
-    so a change to KAOMOJI_START_CHARS / NUDGE / either function can't
-    silently land in only one of the two TS ports. The plugins
-    themselves are still self-contained — the partial is a
-    drift-prevention asset, not a runtime import.
+    For openclaw, install also flips
+    ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess``
+    in ``~/.openclaw/config.json``; uninstall drops the entry. The
+    test runs against a redirected ``settings_path`` / ``plugin_dir``
+    / ``journal_path`` so it doesn't touch the user's real harness
+    config.
     """
     from pathlib import Path
+    import tempfile
 
-    repo = Path(__file__).resolve().parent.parent
-    partial = (
-        repo / "examples" / "_kaomoji_taxonomy.ts.partial"
+    from llmoji.providers import OpenclawProvider, OpencodeProvider
+
+    # ---- opencode: file presence == registered, no settings edit ----
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = OpencodeProvider()
+        p.plugin_dir = td / "opencode" / "plugins"
+        p.journal_path = td / "journals" / "opencode.jsonl"
+
+        p.install()
+        plugin_file = p.plugin_dir / "llmoji.ts"
+        assert plugin_file.exists()
+        # Rendered TS contains the version stamp + the spliced taxonomy.
+        rendered = plugin_file.read_text()
+        assert "__LLMOJI_VERSION__" not in rendered
+        assert "isKaomojiCandidate" in rendered
+
+        s = p.status()
+        assert s.installed
+        assert s.main_installed
+        assert s.main_hook_current
+        # No nudge file lives on disk for plugin providers.
+        assert s.nudge_hook_path is None
+        assert not s.nudge_installed
+
+        # Idempotent re-install — same content, same path.
+        before = plugin_file.read_text()
+        p.install()
+        assert plugin_file.read_text() == before
+
+        p.uninstall()
+        assert not plugin_file.exists()
+        assert not p.status().installed
+
+    # ---- openclaw: bundle install + config flag flip ----
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = OpenclawProvider()
+        # OpenClaw stores ``plugins/<id>/`` under its home, so
+        # plugin_dir's parent.parent is the openclaw home.
+        p.plugin_dir = td / "openclaw" / "plugins" / "llmoji-kaomoji"
+        p.settings_path = td / "openclaw" / "config.json"
+        p.journal_path = td / "journals" / "openclaw.jsonl"
+        p.settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+        p.install()
+        index_ts = p.plugin_dir / "index.ts"
+        plugin_json = p.plugin_dir / "openclaw.plugin.json"
+        assert index_ts.exists()
+        assert plugin_json.exists()
+        # plugin.json carries the version stamp.
+        manifest = json.loads(plugin_json.read_text())
+        assert manifest["id"] == "llmoji-kaomoji"
+        assert manifest["version"]  # not literal __LLMOJI_VERSION__
+        assert "__LLMOJI_VERSION__" not in plugin_json.read_text()
+
+        # Conversation-access flag flipped.
+        cfg = json.loads(p.settings_path.read_text())
+        flag = (
+            cfg.get("plugins", {})
+            .get("entries", {})
+            .get("llmoji-kaomoji", {})
+            .get("hooks", {})
+            .get("allowConversationAccess")
+        )
+        assert flag is True
+
+        s = p.status()
+        assert s.installed
+        assert s.main_installed
+        assert s.settings_parse_error is None
+
+        # Idempotent install — file content + config flag stay byte-stable.
+        before_idx = index_ts.read_text()
+        before_cfg = p.settings_path.read_text()
+        p.install()
+        assert index_ts.read_text() == before_idx
+        assert p.settings_path.read_text() == before_cfg
+
+        p.uninstall()
+        assert not index_ts.exists()
+        assert not plugin_json.exists()
+        # Entry dropped from the config.
+        cfg_after = json.loads(p.settings_path.read_text())
+        assert "llmoji-kaomoji" not in cfg_after.get(
+            "plugins", {}
+        ).get("entries", {})
+
+
+def test_openclaw_refuses_corrupt_config():
+    """OpenclawProvider.install must refuse to mutate a corrupt
+    ``~/.openclaw/config.json``. Same contract as the bash JSON
+    providers — silent overwrite of a hand-broken config is the
+    regression we never want to ship.
+    """
+    from pathlib import Path
+    import tempfile
+
+    from llmoji.providers import OpenclawProvider
+    from llmoji.providers.base import SettingsCorruptError
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        p = OpenclawProvider()
+        p.plugin_dir = td / "openclaw" / "plugins" / "llmoji-kaomoji"
+        p.settings_path = td / "openclaw" / "config.json"
+        p.journal_path = td / "journals" / "openclaw.jsonl"
+        p.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        p.settings_path.write_text("{ not json")
+        try:
+            p.install()
+        except SettingsCorruptError:
+            pass
+        else:
+            raise AssertionError("openclaw didn't refuse corrupt config")
+        # Corrupt file preserved.
+        assert p.settings_path.read_text() == "{ not json"
+
+
+def test_plugin_taxonomy_block_matches():
+    """The two TS-plugin providers (opencode, openclaw) re-implement
+    the kaomoji validator and leading-bracket-span extractor in
+    TypeScript because the taxonomy is part of the v1.0 frozen public
+    surface and TS-plugin hosts can't import Python.
+
+    The shared block is canonical at
+    ``llmoji/_plugins/_kaomoji_taxonomy.ts.partial`` and is spliced
+    into each plugin's ``// BEGIN SHARED TAXONOMY`` /
+    ``// END SHARED TAXONOMY`` markers at install render time
+    (:func:`llmoji.providers.base.render_plugin_template`). This test
+    asserts the rendered output round-trips bit-identically against
+    the partial so a stale hand-edit in either template is caught at
+    CI rather than landing as a quietly-divergent TS port.
+
+    Pre-1.3 the partial lived under ``examples/`` and the test
+    compared two hand-curated plugin files; the move to renderable
+    templates means the validation is now "rendered output contains
+    the partial verbatim" rather than "two example files agree".
+    """
+    import importlib.resources
+
+    from llmoji.providers import OpenclawProvider, OpencodeProvider
+
+    partial = importlib.resources.files("llmoji._plugins").joinpath(
+        "_kaomoji_taxonomy.ts.partial"
     ).read_text()
 
     BEGIN = "// BEGIN SHARED TAXONOMY"
     END = "// END SHARED TAXONOMY"
 
-    plugin_paths = (
-        repo / "examples" / "opencode_plugin.ts",
-        repo / "examples" / "openclaw_plugin" / "index.ts",
+    # opencode (single .ts file) + openclaw (multiple files; only the
+    # index.ts carries the taxonomy block — the .plugin.json doesn't).
+    opencode = OpencodeProvider()
+    openclaw = OpenclawProvider()
+    rendered_opencode = opencode.render_plugin_file("opencode.ts.tmpl")
+    rendered_openclaw_idx = openclaw.render_plugin_file(
+        "openclaw_index.ts.tmpl"
     )
-    for path in plugin_paths:
-        text = path.read_text()
-        assert BEGIN in text, f"{path} missing BEGIN SHARED TAXONOMY marker"
-        assert END in text, f"{path} missing END SHARED TAXONOMY marker"
-        # Slice from the line after BEGIN's newline up to (but not
-        # including) the END marker line. The partial is pure content
-        # — no markers — so the comparison is exact on the body.
+
+    for label, text in (
+        ("opencode", rendered_opencode),
+        ("openclaw index.ts", rendered_openclaw_idx),
+    ):
+        assert BEGIN in text, f"{label} missing BEGIN SHARED TAXONOMY marker"
+        assert END in text, f"{label} missing END SHARED TAXONOMY marker"
         start_idx = text.index(BEGIN)
         body_start = text.index("\n", start_idx) + 1
         end_idx = text.index(END)
         block = text[body_start:end_idx]
         # Trim a single trailing newline on each side so we tolerate
-        # the conventional "block ends with a newline" shape without
-        # demanding it.
+        # the conventional "block ends with a newline" shape.
         assert block.rstrip("\n") == partial.rstrip("\n"), (
-            f"{path} taxonomy block drifted from canonical "
-            f"examples/_kaomoji_taxonomy.ts.partial — re-paste the "
-            f"partial verbatim between the BEGIN/END SHARED TAXONOMY "
-            f"markers"
+            f"{label} taxonomy block drifted from canonical "
+            f"llmoji/_plugins/_kaomoji_taxonomy.ts.partial — the splice "
+            f"is automatic at render time, so a mismatch here means "
+            f"the BEGIN/END markers in the template were edited"
         )
 
 

@@ -1,0 +1,142 @@
+// llmoji v__LLMOJI_VERSION__ — managed file. Do not edit by hand;
+// re-run ``llmoji install opencode`` to regenerate.
+//
+// First-class llmoji adapter for opencode (https://opencode.ai).
+// opencode's plugin system is TypeScript/JavaScript only — it
+// auto-loads ``.ts`` / ``.js`` files from
+// ``~/.config/opencode/plugins/`` (global) or ``.opencode/plugins/``
+// (project). There's no shell-hook escape hatch, so this provider
+// ships a TS plugin rather than the rendered-bash pattern that
+// claude_code / codex / hermes use.
+//
+// Hooks the plugin registers (against the Hooks interface in
+// ``packages/plugin/src/index.ts`` of the opencode repo):
+//
+//   1. ``experimental.chat.system.transform`` — appends the kaomoji
+//      reminder to the system-prompt array on every model
+//      invocation. Fires per turn, equivalent to the
+//      UserPromptSubmit nudge in claude_code / codex.
+//   2. ``event`` — fires for every Event (``message.updated``,
+//      ``message.part.updated``, ``session.idle``, …). We gate on
+//      completed assistant messages, dedupe by message id, query
+//      the message's parts via the SDK, and emit one journal row
+//      per kaomoji-led assistant message. This matches the
+//      "one row per kaomoji-led model message" contract the live
+//      shell hooks honor for claude_code / codex / hermes.
+//
+// What this plugin owes the cross-corpus contract (``CLAUDE.md``):
+//   1. One JSONL row per kaomoji-bearing assistant message (NOT
+//      per turn — a tool-heavy turn easily writes 5–10 messages).
+//   2. Schema: ``{ts, model, cwd, kaomoji, user_text, assistant_text}``.
+//   3. Strip the leading kaomoji from ``assistant_text`` on the way
+//      in. The prefix lives separately in the row's ``kaomoji`` field.
+//   4. Validate the prefix against ``llmoji.taxonomy``'s validator.
+//      Anything that fails the validator gets dropped on read by
+//      ``llmoji.sources.journal.iter_journal`` — write-time validation
+//      saves you from a silently-thrown-out journal.
+//   5. Resolve ``user_text`` once per turn — every row from one turn
+//      carries the same originating prompt. We cache it on
+//      ``chat.message`` and read it back on each assistant
+//      ``message.updated``.
+
+import type { Plugin, PluginInput } from "@opencode-ai/plugin";
+import type { AssistantMessage, Part, TextPart } from "@opencode-ai/sdk";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// BEGIN SHARED TAXONOMY — keep in sync with llmoji/_plugins/_kaomoji_taxonomy.ts.partial
+// END SHARED TAXONOMY
+
+// Per-session cache of the most recent user-message text. Stamped
+// on ``chat.message``, read back on each assistant ``message.updated``
+// so every row from one turn carries the same originating prompt.
+const userTextBySession = new Map<string, string>();
+
+// Dedupe set: ``event`` for ``message.updated`` may fire more than once
+// per assistant message as state transitions (streaming → completed
+// → finish reason set). We only want to emit one row per message.
+const journaledMessages = new Set<string>();
+
+const opencodeLlmoji: Plugin = async ({ client }: PluginInput) => ({
+  // Nudge — appended to the system prompt array every model call.
+  // opencode concatenates the array, so push-as-suffix puts our
+  // reminder near the end of the prompt where it has the strongest
+  // recency effect. NOT idempotent across plugin reloads in the
+  // same session; opencode rebuilds the system prompt per call.
+  "experimental.chat.system.transform": async (_input, output) => {
+    output.system.push(NUDGE);
+  },
+
+  // Cache user text per session. UserMessage parts are a Part[] —
+  // pull text-typed parts only and concat. Synthetic / injected
+  // parts have ``synthetic: true``; we drop those so the cached
+  // user_text reflects what the user actually typed.
+  "chat.message": async ({ sessionID }, { parts }) => {
+    const text = parts
+      .filter((p): p is TextPart => p.type === "text" && !p.synthetic)
+      .map((p) => p.text)
+      .join("");
+    userTextBySession.set(sessionID, text);
+  },
+
+  // Journal logger. Listens for every event; gates to completed
+  // assistant messages, dedupes by id, walks parts via the SDK to
+  // recover the first text block.
+  event: async ({ event }) => {
+    if (event.type !== "message.updated") return;
+    const info = event.properties.info;
+    if (info.role !== "assistant") return;
+    const assistant = info as AssistantMessage;
+    if (!assistant.time?.completed) return;
+    if (journaledMessages.has(assistant.id)) return;
+    journaledMessages.add(assistant.id);
+
+    // SDK round-trip: EventMessageUpdated only carries the message
+    // info, not its parts. ``client.session.messages`` returns the
+    // full ``{info, parts}[]`` for the session. Find the matching id
+    // and pull its first text part.
+    let messages: { info: { id: string }; parts: Part[] }[] = [];
+    try {
+      const res = await client.session.messages({
+        path: { id: assistant.sessionID },
+      });
+      messages = (res as { data?: typeof messages }).data ?? [];
+    } catch {
+      // SDK unavailable / session gone — skip rather than crash
+      // the agent loop. The journal is best-effort.
+      return;
+    }
+    const entry = messages.find((m) => m.info.id === assistant.id);
+    if (!entry) return;
+
+    const firstText = entry.parts.find(
+      (p): p is TextPart => p.type === "text" && !p.synthetic,
+    );
+    if (!firstText?.text) return;
+
+    const kaomoji = leadingBracketSpan(firstText.text);
+    if (!kaomoji) return;
+
+    // Equivalent of the live hooks' jq pipeline:
+    //   sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")
+    let body = firstText.text.replace(/^\s+/, "");
+    if (body.startsWith(kaomoji)) body = body.slice(kaomoji.length);
+    body = body.replace(/^\s+/, "");
+
+    const row = {
+      ts: new Date().toISOString(),
+      model: `${assistant.providerID}/${assistant.modelID}`,
+      cwd: assistant.path?.cwd ?? "",
+      kaomoji,
+      user_text: userTextBySession.get(assistant.sessionID) ?? "",
+      assistant_text: body,
+    };
+
+    const dir = join(homedir(), ".llmoji", "journals");
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(join(dir, "opencode.jsonl"), JSON.stringify(row) + "\n");
+  },
+});
+
+export default opencodeLlmoji;

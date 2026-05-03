@@ -1,0 +1,125 @@
+// llmoji v__LLMOJI_VERSION__ — managed file. Do not edit by hand;
+// re-run ``llmoji install openclaw`` to regenerate.
+//
+// First-class llmoji adapter for OpenClaw (https://openclaw.ai).
+// OpenClaw exposes a plugin SDK with ``definePluginEntry`` +
+// ``api.on(hookName, handler)``; this file is a real plugin
+// installed at ``~/.openclaw/plugins/llmoji-kaomoji/``. After install,
+// ``llmoji install openclaw`` also flips
+// ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess`` to
+// ``true`` in ``~/.openclaw/config.json`` — ``llm_input`` and
+// ``llm_output`` are conversation hooks gated behind that
+// per-plugin opt-in for non-bundled plugins.
+//
+// Hooks the plugin registers (verified against
+// ``openclaw/openclaw@main:src/plugins/hook-types.ts`` as of writing):
+//
+//   1. ``before_prompt_build`` — returns ``{appendSystemContext: NUDGE}``
+//      to append the kaomoji reminder to the agent system prompt
+//      every turn. Equivalent of UserPromptSubmit's
+//      ``additionalContext`` on claude_code / codex. Uses
+//      ``appendSystemContext`` rather than ``prependContext`` so the
+//      reminder stays prompt-cacheable across turns.
+//   2. ``llm_input`` — caches ``event.prompt`` keyed by ``runId``. Fires
+//      before ``llm_output`` for the same run, so the prompt is
+//      always cached by the time we need it for ``user_text``.
+//   3. ``llm_output`` — fires per provider response with
+//      ``assistantTexts: string[]``. Iterate, kaomoji-validate each,
+//      emit one journal row per kaomoji-led message.
+//   4. ``subagent_spawned`` / ``subagent_ended`` — track which runIds
+//      belong to subagents, drop their ``llm_output`` rows from the
+//      journal. Cleaner sidechain story than the other harnesses
+//      ship today (claude_code uses isSidechain, hermes has no
+//      viable filter at all).
+
+import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+// BEGIN SHARED TAXONOMY — keep in sync with llmoji/_plugins/_kaomoji_taxonomy.ts.partial
+// END SHARED TAXONOMY
+
+// Per-runId user_text cache. ``llm_input`` fires before ``llm_output``
+// for the same run, so by the time we journal a row the prompt is
+// already cached. Pruned in the matching ``llm_output`` handler so
+// the map doesn't grow unbounded over a long session.
+const userTextByRun = new Map<string, string>();
+
+// Subagent run-ids — populated on ``subagent_spawned``, cleared on
+// ``subagent_ended``. Drop any ``llm_output`` rows whose runId is in
+// this set so child-agent turns don't pollute the journal.
+const subagentRunIds = new Set<string>();
+
+export default definePluginEntry({
+  id: "llmoji-kaomoji",
+  name: "llmoji kaomoji journal",
+  description:
+    "Captures kaomoji-led assistant messages to ~/.llmoji/journals/openclaw.jsonl",
+  register(api: OpenClawPluginApi) {
+    // Nudge — appended to the system prompt every turn. We use
+    // ``appendSystemContext`` (not ``prependContext``) so the reminder
+    // stays prompt-cache-friendly: providers can cache the system
+    // prefix across turns and only the user message changes
+    // turn-to-turn.
+    api.on("before_prompt_build", async () => ({
+      appendSystemContext: NUDGE,
+    }));
+
+    // Cache user_text per run for later pairing with llm_output.
+    api.on("llm_input", async (event) => {
+      userTextByRun.set(event.runId, event.prompt);
+    });
+
+    // Subagent tracking. ``ctx.runId`` is the agent run; we remember
+    // child run-ids and drop their outputs.
+    api.on("subagent_spawned", async (_event, ctx) => {
+      if (ctx.runId) subagentRunIds.add(ctx.runId);
+    });
+    api.on("subagent_ended", async (_event, ctx) => {
+      if (ctx.runId) subagentRunIds.delete(ctx.runId);
+    });
+
+    // Journal logger. Walk every assistantText, validate the leading
+    // kaomoji, write one row per match.
+    api.on("llm_output", async (event, ctx) => {
+      if (subagentRunIds.has(event.runId)) return;
+      const userText = userTextByRun.get(event.runId) ?? "";
+      // Drop the cache entry now that we've consumed it. New runs
+      // get a fresh entry from the next ``llm_input``.
+      userTextByRun.delete(event.runId);
+
+      const cwd = ctx.workspaceDir ?? "";
+      // Prefer ``resolvedRef`` (carries the provider prefix, e.g.
+      // ``openai-codex/gpt-5.4`` vs ``codex/gpt-5.4``) and fall back to
+      // ``${provider}/${model}`` if OpenClaw didn't resolve a ref for
+      // this call.
+      const model = event.resolvedRef ?? `${event.provider}/${event.model}`;
+
+      const dir = join(homedir(), ".llmoji", "journals");
+      mkdirSync(dir, { recursive: true });
+      const journalPath = join(dir, "openclaw.jsonl");
+
+      for (const text of event.assistantTexts) {
+        const kaomoji = leadingBracketSpan(text);
+        if (!kaomoji) continue;
+
+        // Equivalent of the live hooks' jq pipeline:
+        //   sub("^\\s+";"") | ltrimstr($kaomoji) | sub("^\\s+";"")
+        let body = text.replace(/^\s+/, "");
+        if (body.startsWith(kaomoji)) body = body.slice(kaomoji.length);
+        body = body.replace(/^\s+/, "");
+
+        const row = {
+          ts: new Date().toISOString(),
+          model,
+          cwd,
+          kaomoji,
+          user_text: userText,
+          assistant_text: body,
+        };
+        appendFileSync(journalPath, JSON.stringify(row) + "\n");
+      }
+    });
+  },
+});

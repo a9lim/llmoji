@@ -109,6 +109,52 @@ def _read_partial(name: str) -> str:
     return importlib.resources.files("llmoji._hooks").joinpath(name).read_text()
 
 
+def _read_plugin_data(name: str) -> str:
+    """Load a TS plugin template / partial from ``llmoji._plugins/``.
+
+    Mirrors :func:`_read_partial` but for the plugin-style providers
+    (opencode / openclaw) — the rendered output is TypeScript that
+    the host harness loads at runtime, not bash.
+    """
+    return importlib.resources.files("llmoji._plugins").joinpath(name).read_text()
+
+
+def render_plugin_template(template_name: str) -> str:
+    """Render a TS plugin template by splicing the canonical taxonomy
+    partial between ``// BEGIN SHARED TAXONOMY`` / ``// END SHARED
+    TAXONOMY`` markers and substituting ``__LLMOJI_VERSION__``.
+
+    The marker-fence approach (instead of ``string.Template``) is
+    deliberate: TS template-literal syntax (``${expr}``) collides
+    with Python's ``${name}`` placeholder syntax, so a Template-style
+    render would mangle every ``${...}`` interpolation in the plugin
+    body. Marker splicing sidesteps the collision and keeps the
+    plugin source readable in any TS-aware editor.
+
+    The partial is read fresh each call — the cost is one filesystem
+    read per render, paid at install time only. Single source of
+    truth for the taxonomy block lives in
+    ``llmoji/_plugins/_kaomoji_taxonomy.ts.partial``; the test suite
+    asserts the rendered output round-trips bit-identically against
+    that file so a stale hand-edit in either template is caught at
+    CI rather than landing as a quietly-divergent TS port.
+    """
+    template_text = _read_plugin_data(template_name)
+    partial = _read_plugin_data("_kaomoji_taxonomy.ts.partial")
+    BEGIN = "// BEGIN SHARED TAXONOMY"
+    END = "// END SHARED TAXONOMY"
+    if BEGIN not in template_text or END not in template_text:
+        # Templates without markers (e.g. the openclaw plugin.json)
+        # only need version substitution.
+        return template_text.replace("__LLMOJI_VERSION__", package_version())
+    start = template_text.index(BEGIN)
+    body_start = template_text.index("\n", start) + 1
+    end_idx = template_text.index(END)
+    body = partial if partial.endswith("\n") else partial + "\n"
+    spliced = template_text[:body_start] + body + template_text[end_idx:]
+    return spliced.replace("__LLMOJI_VERSION__", package_version())
+
+
 class HookInstaller:
     """Base class — one subclass per first-class harness.
 
@@ -590,6 +636,214 @@ class JsonSettingsHookInstaller(HookInstaller):
         "Please begin your message with a kaomoji that best represents "
         "how you feel."
     )
+
+
+class PluginInstaller(HookInstaller):
+    """Plugin-style provider — renders a TypeScript plugin (one or more
+    files) into the harness's plugins directory rather than rendering a
+    bash hook.
+
+    Pre-1.3 these were generic-JSONL examples under ``examples/``; 1.3
+    promotes the two TS-plugin harnesses (opencode, openclaw) to
+    first-class so ``llmoji install <name>`` writes the rendered plugin
+    automatically. The plugin code itself handles per-turn nudge
+    injection via the host harness's system-prompt extension hook —
+    no separate bash nudge file lands on disk.
+
+    Subclasses populate :attr:`plugin_files` (a list of
+    ``(template_name, dest_filename)`` tuples) and :attr:`plugin_dir`
+    (where on disk the rendered files land). Both opencode and
+    openclaw write their journal rows to the generic-JSONL path
+    ``~/.llmoji/journals/<name>.jsonl`` directly from the TS plugin —
+    no live shell hook in the loop, no settings.json ``hooks`` entry.
+
+    OpenClaw additionally edits ``~/.openclaw/config.json`` to flip
+    the per-plugin ``allowConversationAccess`` flag; that override
+    lives in :class:`OpenclawProvider` rather than here because the
+    settings-edit shape is openclaw-specific.
+
+    The :class:`HookInstaller` interface stays the contract — the CLI
+    walks every installed provider via the same ``install`` /
+    ``uninstall`` / ``status`` calls regardless of installer kind.
+    Bash-specific attrs (``hook_template`` / ``hook_filename`` /
+    ``main_event`` / ``skip_action`` / ``system_injected_prefixes``)
+    are unused for plugin providers but preserved by the class
+    hierarchy so :class:`ProviderStatus` consumers don't need a kind
+    discriminator.
+    """
+
+    # Bash-side attrs are unused — render_hook is overridden, the
+    # main hook never lands on disk as bash.
+    hook_template: str = ""
+    hook_filename: str = ""
+    main_event: str = "plugin"  # informational; never registered as a bash event
+    skip_action: str = ""
+    system_injected_prefixes: list[str] = []  # type: ignore[assignment]
+
+    # Nudge is baked into the plugin code itself, not a separate
+    # bash file. has_nudge stays False so the base class's nudge
+    # writing / registration is skipped cleanly.
+    nudge_hook_template: str = ""
+    nudge_hook_filename: str = ""
+    nudge_event: str = ""
+    nudge_message: str = (
+        "Please begin your message with a kaomoji that best represents "
+        "how you feel."
+    )
+
+    # --- plugin-specific surface (subclass populates) ---
+    #
+    # ``plugin_files`` is the list of (template_name, dest_filename)
+    # pairs the install writes. The first entry is the canonical
+    # "main artifact" — its dest path is reused as ``hook_path`` so
+    # ``ProviderStatus.hook_path`` continues to point at something
+    # meaningful for the CLI's status print. Single-file plugins
+    # (opencode) put one entry; multi-file bundles (openclaw) list
+    # every file the host expects.
+
+    plugin_files: list[tuple[str, str]] = []  # type: ignore[assignment]
+    plugin_dir: Path = Path()
+
+    @property
+    def hook_path(self) -> Path:
+        """Reuse :attr:`HookInstaller.hook_path` as the path to the
+        plugin's primary file. Pre-empties to ``plugin_dir`` itself
+        when no files are configured (defensive — should never happen
+        on a properly-declared subclass)."""
+        if not self.plugin_files:
+            return self.plugin_dir
+        _, dest = self.plugin_files[0]
+        return self.plugin_dir / dest
+
+    @property
+    def nudge_hook_path(self) -> Path | None:
+        return None
+
+    @property
+    def has_nudge(self) -> bool:
+        # The plugin file itself injects the nudge via the harness's
+        # per-turn system-prompt extension hook (opencode's
+        # ``experimental.chat.system.transform``, openclaw's
+        # ``before_prompt_build``). No separate nudge file lives on
+        # disk to install or check.
+        return False
+
+    def is_present(self) -> bool:
+        """Plugin providers detect via the parent harness's home dir.
+
+        For opencode that's ``~/.config/opencode/`` (the dir that holds
+        ``plugins/``); for openclaw it's ``~/.openclaw/``. Subclasses
+        that need a different signal can override.
+
+        Reusing :attr:`plugin_dir`'s parent here means a never-installed
+        opencode user (no ``~/.config/opencode``) won't get autodetected
+        by ``llmoji install`` (no-arg). That matches the bash providers'
+        ``settings_path.parent.exists()`` rule.
+        """
+        return self.plugin_dir.parent.exists()
+
+    # --- rendering ---
+
+    def render_hook(self) -> str:
+        """Render the primary plugin file (the one at :attr:`hook_path`).
+
+        :class:`HookInstaller.status` calls this to detect a stale
+        on-disk file (``main_hook_current``); reusing the same name
+        keeps the staleness check uniform across installer kinds.
+        """
+        if not self.plugin_files:
+            return ""
+        template_name, _ = self.plugin_files[0]
+        return render_plugin_template(template_name)
+
+    def render_plugin_file(self, template_name: str) -> str:
+        """Render any plugin file by template name. Used by multi-file
+        bundles (openclaw's index.ts + plugin.json)."""
+        return render_plugin_template(template_name)
+
+    def render_nudge_hook(self) -> str:  # pragma: no cover — has_nudge False
+        raise RuntimeError(
+            f"{self.name} bakes its nudge into the plugin file"
+        )
+
+    # --- install / uninstall lifecycle ---
+
+    def install(self) -> None:
+        """Idempotent: write every plugin file, register if the host
+        needs an explicit toggle, ensure the journal directory exists.
+
+        File writes are simple ``write_text`` with mode 0o644 — these
+        are TS / JSON files the host harness loads, not executables.
+        """
+        self.plugin_dir.mkdir(parents=True, exist_ok=True)
+        self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+        for template_name, dest_filename in self.plugin_files:
+            dest = self.plugin_dir / dest_filename
+            dest.write_text(self.render_plugin_file(template_name))
+        self._register()
+
+    def uninstall(self) -> None:
+        """Idempotent: deregister, remove every plugin file. Leaves
+        the journal in place (mirrors :meth:`HookInstaller.uninstall`)
+        and removes the plugin directory itself when empty so a
+        subsequent install starts clean."""
+        self._unregister()
+        for _, dest_filename in self.plugin_files:
+            dest = self.plugin_dir / dest_filename
+            if dest.exists():
+                dest.unlink()
+        # Best-effort cleanup of an emptied plugin dir. Non-empty
+        # rmdir raises OSError, which we swallow — the user may have
+        # other unrelated files there.
+        try:
+            self.plugin_dir.rmdir()
+        except OSError:
+            pass
+
+    # --- status helpers ---
+
+    def _register(self) -> None:
+        """No-op default — file presence IS registration for harnesses
+        that auto-load plugin files (opencode). Subclasses with an
+        explicit registration step (openclaw's config flag) override.
+        """
+        return None
+
+    def _unregister(self) -> None:
+        return None
+
+    def _check_registrations(self) -> tuple[bool, bool]:
+        """Plugin-style status check: every declared plugin file
+        present on disk = registered. Subclasses with an additional
+        registration check (openclaw's config flag) AND-fold their
+        own check into the first slot of the returned tuple.
+        """
+        all_present = bool(self.plugin_files) and all(
+            (self.plugin_dir / dest).exists()
+            for _, dest in self.plugin_files
+        )
+        return all_present, False
+
+    def _is_main_hook_current(self) -> bool:
+        """Plugin staleness: every declared file's on-disk content
+        matches what :meth:`render_plugin_file` produces right now.
+        False on any read error or any mismatch — surfaces as
+        ``main_hook_current=False`` in status, prompting a re-run.
+        """
+        try:
+            for template_name, dest_filename in self.plugin_files:
+                dest = self.plugin_dir / dest_filename
+                if dest.read_text() != self.render_plugin_file(template_name):
+                    return False
+            return True
+        except OSError:
+            return False
+
+    def _check_settings_health(self) -> str | None:
+        """No managed settings file by default. Subclasses that touch
+        a JSON config (openclaw) override to re-add a parseability
+        check."""
+        return None
 
 
 class SettingsCorruptError(RuntimeError):

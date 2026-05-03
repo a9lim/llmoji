@@ -34,7 +34,11 @@ ruff check . --fix      # auto-fix what's fixable
 
 ## Adding a new provider
 
-A first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs (renamed from `Provider` in 1.1.x — same role, more honest name). The three things that matter are:
+llmoji ships two kinds of installers.
+
+### Bash hook providers
+
+For harnesses that expose shell hooks (Claude Code, Codex, Hermes), a first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs. Please keep the following in mind:
 
 1. Where the harness keeps its hooks dir and settings file.
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
@@ -49,7 +53,30 @@ Please include in the PR:
 - Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage.
 - A short note on the harness's docs version and where the kaomoji lands in the stop payload.
 
-The journal schema does not change for a new provider.
+### TS plugin providers
+
+For harnesses with a TypeScript-only plugin SDK (opencode, openclaw), a first-class provider is one or more TS templates under `llmoji/_plugins/` plus one `PluginInstaller` subclass under `llmoji/providers/`. Both shipped TS providers are reasonable starting points to copy from. Each template needs the following:
+
+1. A `// BEGIN SHARED TAXONOMY` / `// END SHARED TAXONOMY` marker pair somewhere in the file. The body between them is left empty in the template. `render_plugin_template` splices in the canonical TS port from `_kaomoji_taxonomy.ts.partial` at install time. Don't paste the validator inline.
+2. A `__LLMOJI_VERSION__` token wherever you want the package version stamped.
+3. The actual harness-side hook registration: a per-turn nudge injection and a per-message journal write (one row per kaomoji-led assistant message, written to `~/.llmoji/journals/<harness>.jsonl` against the canonical schema).
+
+The `PluginInstaller` subclass needs:
+
+- `plugin_dir` — where on disk the rendered files land (typically inside `~/.<harness>/plugins/` or similar).
+- `plugin_files` — list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
+- `journal_path` — `~/.llmoji/journals/<harness>.jsonl` by convention.
+- `is_present` — by default returns `plugin_dir.parent.exists()`; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the parent-dir check matches the bash providers).
+- `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults.
+
+Please include in the PR:
+
+- The TS template(s) under `llmoji/_plugins/<provider>*.ts.tmpl` (and `.json.tmpl` if the harness needs a manifest).
+- The `PluginInstaller` subclass under `llmoji/providers/<provider>.py`.
+- An entry in `llmoji.providers.PROVIDERS` and the `__all__` re-export.
+- A round-trip install/uninstall test in `test_public_surface.py` (the existing `test_plugin_install_uninstall_roundtrip` is a template).
+
+The journal schema does not change for a new provider, of either flavor.
 
 ## Adding a static-dump source
 

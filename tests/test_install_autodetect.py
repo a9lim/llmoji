@@ -85,7 +85,13 @@ def test_install_no_args_with_yes_installs_all_detected(
     from llmoji import cli
     from llmoji.providers import PROVIDERS, HookInstaller
 
+    # Patch every concrete provider class as well as the base —
+    # subclasses with their own ``is_present`` override (OpenclawProvider)
+    # bypass a base-class-only patch.
     monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    from llmoji.providers import PROVIDERS as _ALL
+    for _cls in _ALL.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
 
     installed: list[str] = []
 
@@ -113,7 +119,13 @@ def test_install_no_args_partial_failure_returns_1(
     from llmoji import cli
     from llmoji.providers import HookInstaller
 
+    # Patch every concrete provider class as well as the base —
+    # subclasses with their own ``is_present`` override (OpenclawProvider)
+    # bypass a base-class-only patch.
     monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    from llmoji.providers import PROVIDERS as _ALL
+    for _cls in _ALL.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
 
     def fake_install_one(name: str) -> tuple[bool, str | None]:
         if name == "codex":
@@ -141,7 +153,13 @@ def test_install_no_args_prompt_n_aborts(
     from llmoji import cli
     from llmoji.providers import HookInstaller
 
+    # Patch every concrete provider class as well as the base —
+    # subclasses with their own ``is_present`` override (OpenclawProvider)
+    # bypass a base-class-only patch.
     monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    from llmoji.providers import PROVIDERS as _ALL
+    for _cls in _ALL.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
 
     installed: list[str] = []
 
