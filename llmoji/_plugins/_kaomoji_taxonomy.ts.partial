@@ -2,19 +2,31 @@
 // frozenset, character for character. These are Unicode glyphs, not
 // ASCII. Keep in sync with taxonomy.py.
 //
-// v2.0 broadened the leader set with Greek (Σ ψ Ψ ε), Latin
-// extensions (ƪ ʕ — raised hands and the bear face), and
-// box-drawing diagonals (╱ ╲ — heavy-line wing variants), in
-// addition to the v2.0 round-1 wing/hug/sparkle additions
-// (\, ⊂, ✧).
+// v2.0 broadened the leader set across four sweep rounds:
+//   Round 1 — wing/hug/sparkle (\, ⊂, ✧).
+//   Round 2 — Greek (Σ ψ Ψ ε), Latin extensions (ƪ ʕ — raised hands
+//     and the bear face), box-drawing diagonals (╱ ╲).
+//   Round 3 — pose pairs and shrug components landed in the
+//     arm-strip sets (Python-side _ARM_OUTSIDE / _ARM_OUTSIDE_LEAD)
+//     rather than the leader set, since the leaders involved (╰ ╭ ╮
+//     ┐ ┌ ¯ ＼) were already in v1.
+//   Round 4 — Japanese corner brackets (「『【〈《), box-drawing
+//     standing-pose corners (└ ┘), music notes (♪ ♫ ♬), hearts
+//     (♥ ♡ ❤), stars (★ ☆), and the alternate bear-bracket open
+//     ʢ (paired with ʡ).
 const KAOMOJI_START_CHARS = new Set<string>(
-  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧ΣψεƪʕΨ╱╲"),
+  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧ΣψεƪʕΨ╱╲「『【〈《└┘♪♫♬♥♡❤★☆ʢ"),
 );
 
 // Bracket pairs the depth-walker treats as kaomoji boundaries.
-// `ʕ`/`ʔ` recognize the bear face `ʕ•ᴥ•ʔ` as a balanced span.
-const OPEN_BRACKETS = "([（｛ʕ";
-const CLOSE_BRACKETS = ")]）｝ʔ";
+// `ʕ`/`ʔ` recognize the bear face `ʕ•ᴥ•ʔ` as a balanced span;
+// `ʢ`/`ʡ` recognize the alternate-bear variants `ʢ◉ᴥ◉ʡ`. The
+// Japanese corner-bracket pairs `「『【〈《` / `」』】〉》` let
+// corner-wrapped faces (`「(゜～゜)」`, `『(◕‿◕)』`) surface
+// directly via the depth walker instead of falling through to the
+// whitespace fallback.
+const OPEN_BRACKETS = "([（｛ʕʢ「『【〈《";
+const CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》";
 const KAOMOJI_MAX_LEN = 32;
 const LETTER_RUN_RE = /[A-Za-z]{4}/;
 

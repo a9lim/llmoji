@@ -38,8 +38,18 @@ from dataclasses import dataclass
 # are the bear-face brackets in `ʕ•ᴥ•ʔ` — adding them to the depth-
 # walk pair lets the bracket-balance branch surface the bear span
 # directly instead of falling through to the whitespace-fallback.
-_OPEN_BRACKETS = "([（｛ʕ"
-_CLOSE_BRACKETS = ")]）｝ʔ"
+# `ʢ`/`ʡ` (LATIN LETTER GLOTTAL STOP WITH STROKE / REVERSED) are the
+# alternate bear-bracket pair in `ʢ◉ᴥ◉ʡ` variants — same self-
+# contained-face rationale.
+# `「『【〈《` / `」』】〉》` are Japanese corner-bracket wrappers
+# (`「(゜～゜)」`, `『(◕‿◕)』`, `【(◕‿◕)】`); added to the depth
+# walker so the leading wrapper finds its matching close instead of
+# the whitespace-fallback eating the whole span. Pre-2.0-round-4
+# kaomoji wrapped this way wouldn't even surface as candidates
+# because `「`/`『`/`【`/`〈`/`《` weren't in `KAOMOJI_START_CHARS`;
+# the round-4 sweep adds them.
+_OPEN_BRACKETS = "([（｛ʕʢ「『【〈《"
+_CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》"
 
 # Leading-glyph filter for kaomoji-bearing assistant turns. Used by
 # `extract`, by `is_kaomoji_candidate`, and by every shell hook
@@ -48,33 +58,81 @@ _CLOSE_BRACKETS = ")]）｝ʔ"
 # Single source of truth; previous versions duplicated this set in
 # five places, which is the gotcha the v1.0 split resolved.
 #
-# v2.0 additions: ASCII `\` (wing-hand `\(^o^)/`), `⊂` (hugging arms
-# `⊂(...)⊂`), `✧` (sparkle-decorated `✧*｡(...)*｡✧`); plus a comprehensive
-# sweep of non-prose leaders identified while running Claude on
-# emotional prompts:
+# v2.0 additions, by sweep round:
 #
-#   * Greek `Σ ψ Ψ ε` — `Σ(°△°|||)` shocked-sigma, `ψ(´Д`)ψ` /
-#     `Ψ(´Д`)Ψ` horn-fingers, `ε(◕‿◕)з` kissing-pair.
-#   * Latin extensions `ƪ ʕ` — `ƪ(˘⌣˘)ʃ` raised hands and the
-#     `ʕ•ᴥ•ʔ` bear face. (`ʕ` doubles as a face-bracket — see
-#     `_OPEN_BRACKETS`.)
-#   * Box-drawing diagonals `╱ ╲` — `╲(◕‿◕)╱` celebratory wings,
-#     the heavier-line cousins of `\(^o^)/`.
+#   Round 1 — wing/hug/sparkle leaders identified during the initial
+#   2.0 broaden: ASCII `\` (wing-hand `\(^o^)/`), `⊂` (hugging arms
+#   `⊂(...)⊂`), `✧` (sparkle-decorated `✧*｡(...)*｡✧`).
+#
+#   Round 2 — non-prose leaders identified while running Claude on
+#   emotional prompts:
+#     * Greek `Σ ψ Ψ ε` — `Σ(°△°|||)` shocked-sigma, `ψ(´Д`)ψ` /
+#       `Ψ(´Д`)Ψ` horn-fingers, `ε(◕‿◕)з` kissing-pair.
+#     * Latin extensions `ƪ ʕ` — `ƪ(˘⌣˘)ʃ` raised hands and the
+#       `ʕ•ᴥ•ʔ` bear face. (`ʕ` doubles as a face-bracket — see
+#       `_OPEN_BRACKETS`.)
+#     * Box-drawing diagonals `╱ ╲` — `╲(◕‿◕)╱` celebratory wings,
+#       the heavier-line cousins of `\(^o^)/`.
+#
+#   Round 3 — pose pairs and shrug components: `╰ ╭` lead /
+#   `╯ ╮` trail (arms-up / curl), `¯` lead+trail and `_` lead+trail
+#   for the iconic `¯\_(ツ)_/¯` shrug. (Those landed via the
+#   `_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD` sets — for the leader set,
+#   `╰ ╭ ╮ ┐ ┌ ¯ ＼` were already in v1.)
+#
+#   Round 4 — broaden to "any plausibly real kaomoji leader":
+#     * Japanese corner brackets `「『【〈《` — `「(゜～゜)」`,
+#       `『(◕‿◕)』`, `【(◕‿◕)】`. Paired with `」』】〉》` in
+#       `_CLOSE_BRACKETS` and `_ARM_OUTSIDE`. Trade-off: a
+#       leading Japanese quoted phrase (`「これは良い」...`) parses
+#       as a balanced kaomoji-shaped span and slips past the
+#       validator (length ≤32, no 4-letter ASCII run, no backslash);
+#       Stage A synth describes those as "Japanese phrase, not a
+#       face" and they cluster as their own canonical thing. Real-
+#       corpus rate in coding-agent traffic is approximately zero.
+#     * Box-drawing standing-pose corners `└ ┘` —
+#       `└(°▽°)┘` arms-up-standing, the upright variant of the
+#       `╰...╯` round-3 pose. (`┘` was already in `_ARM_OUTSIDE`
+#       trail; round 4 promotes `└` to lead and treats `┘` as a
+#       symmetric lead candidate too — `┘(°▽°)└` inverted form.)
+#     * Music notes `♪ ♫ ♬` — `♪(´▽｀)`, `♫(◕‿◕)♫`, happy-
+#       singing register. Distinct glyphs preserved (no fold).
+#     * Hearts `♥ ♡ ❤` — `♥(◕‿◕)♥` love-decorator,
+#       `♡(◠‿◠)♡` softer outline-heart variant, `❤(◕‿◕)❤`
+#       heavy-heart variant. The decorator strip is anchored at the
+#       face boundary, so `(♥‿♥)` (heart-as-eye, inside parens) is
+#       preserved as a distinct face — only the outside-the-parens
+#       hearts strip.
+#     * Stars `★ ☆` — `★(◕‿◕)★` excitement-decorator,
+#       `☆(◕‿◕)☆` outline variant. Same in/out anchoring as
+#       hearts.
+#     * Alternate bear-bracket open `ʢ` — `ʢ◉ᴥ◉ʡ` variants
+#       (paired with `ʡ`). Like `ʕ`/`ʔ`, these are added to
+#       `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` for depth-walk
+#       recognition but stay OUT of arm-strip — the whole bear-
+#       shape is the kaomoji.
 #
 # Deliberately NOT added (despite being real kaomoji leaders):
 # ASCII letters `o O q b d m p t` — these collide with very common
 # 2-3 letter prose words ("ok", "of", "my", "to", "be", ...) that
 # the validator's `is_kaomoji_candidate` would let through. The
-# Greek/Latin-extension/box-drawing additions above don't have that
-# problem because they almost never start a non-kaomoji English word.
-# `「『【〈《` (Japanese corner brackets) — also real kaomoji
-# wrappers (`「(゜～゜)」`) but rarer in coding-agent corpora and
-# bring depth-walk complications without much corpus benefit.
+# additions above don't have that problem because they almost never
+# start a non-kaomoji English word. ASCII `~` and `*` similarly
+# excluded — wavy-mouth `~(˘▽˘~)` and sparkle-bracket `*(◕‿◕)*`
+# are real but `~` is too common in prose tildes and `*` is the
+# Markdown bold/italic delimiter, both of which would generate
+# constant false positives.
 KAOMOJI_START_CHARS: frozenset[str] = frozenset(
-    "([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧"  # v1.0 set + early v2.0 wing/hug/sparkle
-    "Σψεƪʕ"                       # Greek + Latin extension (kaomoji bodies/arms)
-    "Ψ"                            # capital psi (matching ψ horn-arm)
-    "╱╲"                           # box-drawing diagonals (alt slashes)
+    "([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧"  # v1.0 set + 2.0 round-1 wing/hug/sparkle
+    "Σψεƪʕ"                       # round 2: Greek + Latin extension
+    "Ψ"                            # round 2: capital psi (matching ψ horn-arm)
+    "╱╲"                           # round 2: box-drawing diagonals
+    "「『【〈《"                    # round 4: Japanese corner brackets
+    "└┘"                           # round 4: box-drawing standing-pose
+    "♪♫♬"                          # round 4: music notes
+    "♥♡❤"                          # round 4: hearts (filled / outline / heavy)
+    "★☆"                           # round 4: stars (filled / outline)
+    "ʢ"                            # round 4: alternate bear-bracket open
 )
 
 
@@ -334,13 +392,31 @@ def extract(text: str) -> KaomojiMatch:
 #                                    inverted-pattern siblings)
 #   ¯            ¯\_(ツ)_/¯          shrug macron right
 #   _            ¯\_(ツ)_/¯          shrug underscore right
+# Round-4 additions (decorator-arm halves of the round-4 leader
+# additions):
+#   」』】〉》   「(゜～゜)」  etc.    Japanese corner-bracket trail
+#                                    wrappers (paired with
+#                                    `「『【〈《` lead).
+#   ♪ ♫ ♬     ♪(´▽｀)♪              music-note decorator right
+#   ♥ ♡ ❤     ♥(◕‿◕)♥              heart decorator right
+#   ★ ☆       ★(◕‿◕)★              star decorator right
 # Box-drawing chars appear in BOTH lead and trail because the
 # pose can be mirrored (``╮(´д`)╭`` is the inverted shrug); same
 # for ``¯`` and ``_`` in the shrug pattern. The regex anchors mean
 # this only fires at the very start (before ``(``) or very end
-# (after ``)``), so eye/mouth glyphs like ``_`` in ``(◕_◕)`` and
-# ``╯`` in the rage-cheek of ``(╯°□°)╯`` stay untouched.
-_ARM_OUTSIDE = "ﻭっ/⊂⊃✧۶ᕗ७ψΨзʃ╱ノﾉ╯╮╭┌┐┘└¯_"
+# (immediately after ``)``, via the ``(?<=\))`` lookbehind on
+# ``_TRAIL_OUTSIDE_RE``), so eye/mouth glyphs like ``_`` in
+# ``(◕_◕)`` and ``╯`` in the rage-cheek of ``(╯°□°)╯`` stay
+# untouched, AND so corner-bracket-only-wrapped standalone faces
+# like ``「・_・」`` (no inner paren to anchor against) keep their
+# trailing wrapper instead of asymmetric truncation to ``「・_・``.
+_ARM_OUTSIDE = (
+    "ﻭっ/⊂⊃✧۶ᕗ७ψΨзʃ╱ノﾉ╯╮╭┌┐┘└¯_"
+    "」』】〉》"   # round 4: Japanese corner-bracket close wrappers
+    "♪♫♬"        # round 4: music-note decorator right
+    "♥♡❤"        # round 4: heart decorator right
+    "★☆"         # round 4: star decorator right
+)
 # Arm/hand/decoration modifiers that appear OUTSIDE the opening paren.
 # Mirror set to ``_ARM_OUTSIDE`` for the lead halves of the same
 # paired-arm patterns (plus ``Σ`` which is single-arm — shocked
@@ -361,9 +437,30 @@ _ARM_OUTSIDE = "ﻭっ/⊂⊃✧۶ᕗ७ψΨзʃ╱ノﾉ╯╮╭┌┐┘└¯
 #                                    pose by rule O test, now collapses)
 #   ╰ ╭ ╮ ┐ ┌   ╰(´∀`)╯  ┐(´д`)┌    box-drawing pose leaders
 #   ¯ \ _       ¯\_(ツ)_/¯           shrug components
+# Round-4 lead-half additions (mirror of the round-4 _ARM_OUTSIDE
+# additions):
+#   「『【〈《   「(゜～゜)」  etc.    Japanese corner-bracket lead
+#   └ ┘         └(°▽°)┘              box-drawing standing-pose lead
+#                                     (┘...└ inverted form too)
+#   ♪ ♫ ♬     ♪(´▽｀)               music-note decorator left
+#   ♥ ♡ ❤     ♥(◕‿◕)               heart decorator left
+#   ★ ☆       ★(◕‿◕)               star decorator left
 # Distinct from inside-leading modifiers (``っ``/``*``) which sit
 # BETWEEN ``(`` and face content (``(っ╥﹏╥)``, ``(*•̀‿•́*)``).
-_ARM_OUTSIDE_LEAD = "\\⊂✧ΣψΨεƪ╲٩ᕕ໒ヽヾ╰╭╮┐┌¯_"
+# Note: ``ʢ`` (alternate bear-bracket open) is NOT in this set —
+# like ``ʕ``, the bear-shape IS the kaomoji and we preserve the
+# whole span; the ``(?=\()`` lookahead on ``_LEAD_OUTSIDE_RE`` would
+# fail anyway for `ʢ◉ᴥ◉ʡ` (no inner paren), but we keep ``ʢ`` out
+# of the set explicitly to mirror the ``ʕ`` rule even if a future
+# corpus contains paren-wrapped variants like `ʢ(◉ᴥ◉)ʡ`.
+_ARM_OUTSIDE_LEAD = (
+    "\\⊂✧ΣψΨεƪ╲٩ᕕ໒ヽヾ╰╭╮┐┌¯_"
+    "「『【〈《"   # round 4: Japanese corner-bracket lead wrappers
+    "└┘"          # round 4: box-drawing standing-pose lead
+    "♪♫♬"         # round 4: music-note decorator left
+    "♥♡❤"         # round 4: heart decorator left
+    "★☆"          # round 4: star decorator left
+)
 # Arm/hand modifiers that appear just INSIDE the closing paren:
 #   (っ˘▽˘ς)  (っ´ω`c)  (*•̀‿•́*)
 _ARM_INSIDE_TRAIL = "ςc*"
@@ -371,7 +468,17 @@ _ARM_INSIDE_TRAIL = "ςc*"
 #   (っ╥﹏╥)  (*•̀‿•́*)
 _ARM_INSIDE_LEAD = "っ*"
 
-_TRAIL_OUTSIDE_RE = re.compile(rf"[{re.escape(_ARM_OUTSIDE)}]+$")
+# ``(?<=\))`` lookbehind: trail-arm strips only fire when the run
+# they'd consume is immediately preceded by ``)``. Required by the
+# round-4 corner-bracket additions — without it, ``「・_・」``
+# (corner-bracket-only-wrapped face, no inner paren) would have its
+# closing ``」`` stripped to leave ``「・_・``. With the lookbehind,
+# the trail strip only fires when there's a ``)`` to anchor against
+# (i.e. a paren-wrapped face), which matches every existing v1/v2
+# test case (verified: ``(´∀`)/``, ``(˘ω˘)⊂``, ``(っ╥﹏╥)っ``,
+# ``(╯°□°)╯``, ``(ツ)_/¯``, ``╰(´∀`)╯`` etc. all have ``)``
+# immediately before the trail run).
+_TRAIL_OUTSIDE_RE = re.compile(rf"(?<=\))[{re.escape(_ARM_OUTSIDE)}]+$")
 _LEAD_OUTSIDE_RE = re.compile(rf"^[{re.escape(_ARM_OUTSIDE_LEAD)}]+(?=\()")
 _TRAIL_INSIDE_RE = re.compile(rf"[{re.escape(_ARM_INSIDE_TRAIL)}]+\)$")
 _LEAD_INSIDE_RE = re.compile(rf"^\([{re.escape(_ARM_INSIDE_LEAD)}]+")

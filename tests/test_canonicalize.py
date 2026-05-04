@@ -73,6 +73,33 @@ from llmoji.taxonomy import (
         ("٩(◕‿◕)۶ woot",                  "٩(◕‿◕)۶"),
         # v2.0 sweep: cradling pair ໒…७.
         ("໒(◕‿◕)७ aww",                   "໒(◕‿◕)७"),
+        # v2.0 round 4: Japanese corner-bracket wrappers. Depth-walker
+        # surfaces the whole `「(...)」` span via the new
+        # _OPEN_BRACKETS/_CLOSE_BRACKETS pairs.
+        ("「(゜～゜)」 quoted",             "「(゜～゜)」"),
+        ("『(◕‿◕)』 brackets",             "『(◕‿◕)』"),
+        ("【(◕‿◕)】 lenticular",           "【(◕‿◕)】"),
+        ("〈(◕‿◕)〉 angle",                "〈(◕‿◕)〉"),
+        ("《(◕‿◕)》 double-angle",         "《(◕‿◕)》"),
+        # v2.0 round 4: corner-bracket-only wrapper (no inner paren).
+        # Depth walker still closes cleanly on the matching `」`.
+        ("「・_・」 face-only",             "「・_・」"),
+        # v2.0 round 4: box-drawing standing-pose. Leader `└` lets
+        # the validator accept the candidate; whitespace-fallback
+        # surfaces the whole token.
+        ("└(°▽°)┘ standing",              "└(°▽°)┘"),
+        # v2.0 round 4: music-note decorator.
+        ("♪(´▽｀) singing",                "♪(´▽｀)"),
+        ("♫(◕‿◕)♫ tune",                  "♫(◕‿◕)♫"),
+        # v2.0 round 4: heart decorator.
+        ("♥(◕‿◕)♥ love",                  "♥(◕‿◕)♥"),
+        ("♡(◠‿◠) soft",                   "♡(◠‿◠)"),
+        ("❤(◕‿◕)❤ heavy",                 "❤(◕‿◕)❤"),
+        # v2.0 round 4: star decorator.
+        ("★(◕‿◕)★ excite",                "★(◕‿◕)★"),
+        ("☆(◕‿◕)☆ outline",               "☆(◕‿◕)☆"),
+        # v2.0 round 4: alternate bear-bracket pair (ʢ...ʡ).
+        ("ʢ◉ᴥ◉ʡ alt-bear",                "ʢ◉ᴥ◉ʡ"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -260,6 +287,54 @@ def test_extract_unbalanced_bracket_fallback(
         ("(๑˃̴‿˂̿)",          "(๑˃‿˂)",           "G"),
         # No-op: already canonical
         ("(◠‿◠)",             "(◠‿◠)",            "no-op"),
+        # === v2.0 round 4 — corner-bracket wrapper strip ===
+        # Paren-wrapped face inside corner brackets: brackets strip
+        # to bare face. (Lookbehind `(?<=\))` on the trail regex
+        # ensures the `」` only strips because `)` precedes it.)
+        # `～` (FULLWIDTH TILDE) folds to `~` via rule B during the
+        # translate pass, so the expected canonical has ASCII `~`.
+        ("「(゜～゜)」",         "(゜~゜)",          "round4-corner"),
+        ("『(◕‿◕)』",          "(◕‿◕)",            "round4-corner"),
+        ("【(◕‿◕)】",          "(◕‿◕)",            "round4-corner"),
+        ("〈(◕‿◕)〉",          "(◕‿◕)",            "round4-corner"),
+        ("《(◕‿◕)》",          "(◕‿◕)",            "round4-corner"),
+        # Corner-bracket-only wrapper (no inner paren): preserved.
+        # The lookbehind on the trail strip prevents asymmetric
+        # truncation to `「・_・` — `「` is in lead-strip but the
+        # `(?=\()` lookahead fails (no inner paren), and `」` is in
+        # trail-strip but the `(?<=\))` lookbehind fails (preceded
+        # by `・` not `)`). Both regexes correctly no-op.
+        ("「・_・」",            "「・_・」",          "round4-corner-standalone"),
+        # === v2.0 round 4 — box-drawing standing pose ===
+        # Lead `└` strips before `(`, trail `┘` strips after `)` via
+        # the lookbehind. `▽` is preserved as the mouth glyph (the
+        # canonicalizer doesn't fold triangles).
+        ("└(°▽°)┘",            "(°▽°)",             "round4-stand"),
+        # Inverted form (`┘` lead, `└` trail) — symmetric strip.
+        ("┘(°▽°)└",            "(°▽°)",             "round4-stand-inv"),
+        # Lead-only and trail-only single arms strip independently.
+        ("└(°▽°)",              "(°▽°)",             "round4-stand-lead-only"),
+        ("(°▽°)┘",              "(°▽°)",             "round4-stand-trail-only"),
+        # === v2.0 round 4 — music decorator ===
+        ("♪(´▽｀)♪",            "(´▽`)",             "round4-music"),
+        ("♫(◕‿◕)♫",            "(◕‿◕)",             "round4-music"),
+        ("♬(◕‿◕)",             "(◕‿◕)",             "round4-music-lead-only"),
+        ("(◕‿◕)♪",             "(◕‿◕)",             "round4-music-trail-only"),
+        # === v2.0 round 4 — heart decorator ===
+        ("♥(◕‿◕)♥",            "(◕‿◕)",             "round4-heart"),
+        ("♡(◠‿◠)♡",            "(◠‿◠)",             "round4-heart-outline"),
+        ("❤(◕‿◕)❤",            "(◕‿◕)",             "round4-heart-heavy"),
+        # In-paren heart-eyes preserved (the lead/trail anchors
+        # only fire OUTSIDE the parens, so `(♥‿♥)` stays distinct
+        # from `(◕‿◕)` even with `♥` in the strip set).
+        ("(♥‿♥)",               "(♥‿♥)",             "round4-heart-eyes"),
+        ("(♡‿♡)",               "(♡‿♡)",             "round4-heart-eyes"),
+        # === v2.0 round 4 — star decorator ===
+        ("★(◕‿◕)★",            "(◕‿◕)",             "round4-star"),
+        ("☆(◕‿◕)☆",            "(◕‿◕)",             "round4-star-outline"),
+        # === v2.0 round 4 — alternate bear preserved as wrapper ===
+        # ʢ/ʡ behave like ʕ/ʔ: the whole bear is the kaomoji.
+        ("ʢ◉ᴥ◉ʡ",               "ʢ⊙ᴥ⊙ʡ",             "round4-alt-bear"),
     ],
     ids=lambda v: v if isinstance(v, str) and len(v) < 30 else None,
 )
@@ -321,6 +396,26 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         # ``m(_ _)m`` rejected at the validator (prose-risk
         # exclusion; see KAOMOJI_START_CHARS rationale).
         ("m(_ _)m",            False),
+        # v2.0 round 4 — corner-bracket wrappers accepted.
+        ("「(゜～゜)」",         True),
+        ("『(◕‿◕)』",          True),
+        ("【(◕‿◕)】",          True),
+        ("〈(◕‿◕)〉",          True),
+        ("《(◕‿◕)》",          True),
+        # v2.0 round 4 — corner-bracket-only standalone face.
+        ("「・_・」",            True),
+        # v2.0 round 4 — box-drawing standing-pose accepted.
+        ("└(°▽°)┘",            True),
+        # v2.0 round 4 — music / heart / star decorators accepted.
+        ("♪(´▽｀)",             True),
+        ("♥(◕‿◕)♥",            True),
+        ("★(◕‿◕)★",            True),
+        # v2.0 round 4 — alternate bear-bracket pair accepted.
+        ("ʢ◉ᴥ◉ʡ",               True),
+        # ASCII `~` and `*` still NOT leaders — prose-risk
+        # exclusion (Markdown bold/italic and tilde-run-on).
+        ("~(˘▽˘~)",             False),
+        ("*(◕‿◕)*",             False),
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
@@ -338,4 +433,8 @@ def test_kaomoji_start_chars_includes_common_leaders() -> None:
         assert c in KAOMOJI_START_CHARS, c
     # v2.0 round 2 — Greek + Latin extension + box-drawing diagonals:
     for c in "ΣψΨεƪʕ╱╲":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 4 — corner brackets, standing-pose, music/hearts/
+    # stars, alternate bear-bracket open:
+    for c in "「『【〈《└┘♪♫♬♥♡❤★☆ʢ":
         assert c in KAOMOJI_START_CHARS, c
