@@ -2,7 +2,7 @@
 // frozenset, character for character. These are Unicode glyphs, not
 // ASCII. Keep in sync with taxonomy.py.
 //
-// v2.0 broadened the leader set across four sweep rounds:
+// v2.0 broadened the leader set across five sweep rounds:
 //   Round 1 — wing/hug/sparkle (\, ⊂, ✧).
 //   Round 2 — Greek (Σ ψ Ψ ε), Latin extensions (ƪ ʕ — raised hands
 //     and the bear face), box-drawing diagonals (╱ ╲).
@@ -14,8 +14,14 @@
 //     standing-pose corners (└ ┘), music notes (♪ ♫ ♬), hearts
 //     (♥ ♡ ❤), stars (★ ☆), and the alternate bear-bracket open
 //     ʢ (paired with ʡ).
+//   Round 5 — exhaustive sweep for remaining real leaders: flower
+//     decorators (✿ ❀), heart variants (❣ ❥), star variants
+//     (✦ ✩ ✪), quarter note (♩), flex / strong-feel pose lead
+//     arms (ᕦ ᕙ — Canadian Syllabics), tortoise-shell open
+//     bracket (〔, paired with 〕), reference mark (※), Oriya
+//     cradle pose left arm (୧).
 const KAOMOJI_START_CHARS = new Set<string>(
-  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧ΣψεƪʕΨ╱╲「『【〈《└┘♪♫♬♥♡❤★☆ʢ"),
+  Array.from("([（｛ヽヾっ٩ᕕ╰╭╮┐┌＼¯໒\\⊂✧ΣψεƪʕΨ╱╲「『【〈《└┘♪♫♬♥♡❤★☆ʢ✿❀❣❥✦✩✪♩ᕦᕙ〔※୧"),
 );
 
 // Bracket pairs the depth-walker treats as kaomoji boundaries.
@@ -24,9 +30,10 @@ const KAOMOJI_START_CHARS = new Set<string>(
 // Japanese corner-bracket pairs `「『【〈《` / `」』】〉》` let
 // corner-wrapped faces (`「(゜～゜)」`, `『(◕‿◕)』`) surface
 // directly via the depth walker instead of falling through to the
-// whitespace fallback.
-const OPEN_BRACKETS = "([（｛ʕʢ「『【〈《";
-const CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》";
+// whitespace fallback. Round-5 adds the tortoise-shell editorial
+// pair `〔`/`〕` (`〔(◕‿◕)〕`, `〔・_・〕` standalone).
+const OPEN_BRACKETS = "([（｛ʕʢ「『【〈《〔";
+const CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》〕";
 const KAOMOJI_MAX_LEN = 32;
 const LETTER_RUN_RE = /[A-Za-z]{4}/;
 

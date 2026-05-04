@@ -48,8 +48,12 @@ from dataclasses import dataclass
 # kaomoji wrapped this way wouldn't even surface as candidates
 # because `「`/`『`/`【`/`〈`/`《` weren't in `KAOMOJI_START_CHARS`;
 # the round-4 sweep adds them.
-_OPEN_BRACKETS = "([（｛ʕʢ「『【〈《"
-_CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》"
+# `〔`/`〕` (TORTOISE SHELL BRACKET) are a round-5 addition — the
+# Japanese editorial bracket pair, e.g. `〔(◕‿◕)〕` and the
+# corner-bracket-only standalone variant `〔・_・〕`. Same depth-
+# walker rationale as the round-4 corner brackets.
+_OPEN_BRACKETS = "([（｛ʕʢ「『【〈《〔"
+_CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》〕"
 
 # Leading-glyph filter for kaomoji-bearing assistant turns. Used by
 # `extract`, by `is_kaomoji_candidate`, and by every shell hook
@@ -112,6 +116,61 @@ _CLOSE_BRACKETS = ")]）｝ʔʡ」』】〉》"
 #       recognition but stay OUT of arm-strip — the whole bear-
 #       shape is the kaomoji.
 #
+#   Round 5 — exhaustive "every plausibly real kaomoji leader and
+#   matching arm-strip glyph" sweep, after round 4 covered the
+#   high-frequency families. Same prose-risk threshold (acceptable
+#   in coding-agent context) as round 4. Each addition is paired
+#   symmetrically across `KAOMOJI_START_CHARS` /
+#   `_ARM_OUTSIDE_LEAD` / `_ARM_OUTSIDE` so the canonicalizer
+#   collapses both halves of a paired pose; single-decoration
+#   leaders that don't have a distinct close-half (e.g. `※` is
+#   itself symmetric) appear in all three sets.
+#     * Flower decorators `✿ ❀` — `✿(◕‿◕)✿` BLACK FLORETTE
+#       wrapper, `❀(◕‿◕)❀` WHITE FLORETTE. Both kept distinct
+#       (no fold) for register parity with the heart and star
+#       families.
+#     * Heart decorator variants `❣ ❥` — HEAVY HEART EXCLAMATION
+#       MARK ORNAMENT (`❣(◕‿◕)❣` emphatic-heart) and ROTATED
+#       HEAVY BLACK HEART BULLET (`❥(◕‿◕)❥` decorative-heart).
+#       Kept distinct from the round-4 `♥ ♡ ❤` family (different
+#       affect register).
+#     * Star decorator variants `✦ ✩ ✪` — BLACK FOUR POINTED
+#       STAR (`✦(◕‿◕)✦`, the filled cousin of round-1 `✧`),
+#       STRESS OUTLINED WHITE STAR (`✩(◕‿◕)✩`), CIRCLED WHITE
+#       STAR (`✪(◕‿◕)✪`). Distinct point counts and fills, kept
+#       distinct from `★ ☆`.
+#     * Music note variant `♩` — QUARTER NOTE (`♩(◕‿◕)♩`),
+#       completes the `♪ ♫ ♬` round-4 set.
+#     * Flex / strong-feel pose lead arms `ᕦ ᕙ` — Canadian
+#       Syllabics NWUU and WO. Iconic strongman pose
+#       `ᕦ(ò_óˇ)ᕤ` and the strong-feel pose `ᕙ(`▿´)ᕗ`. The
+#       right-half close-arms are `ᕤ` (added to `_ARM_OUTSIDE`
+#       trail) and `ᕗ` (already in v1 trail set).
+#     * Tortoise-shell brackets `〔〕` — `〔(◕‿◕)〕` Japanese
+#       editorial bracket wrapper, plus the corner-bracket-only
+#       standalone variant `〔・_・〕`. Paired in
+#       `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` and arm-strip,
+#       mirroring the round-4 `「『【〈《` corner-bracket
+#       handling.
+#     * Reference mark `※` — Japanese editorial decorator
+#       (`※(◕‿◕)※`). Symmetric (no distinct close-half), so
+#       appears in both `_ARM_OUTSIDE` and `_ARM_OUTSIDE_LEAD`.
+#     * Oriya cradle pose `୧ ୨` — DIGIT ONE / DIGIT TWO used as
+#       cradling-arms in `୧(˃ᗨ˂)୨`. Same lead-only / trail-only
+#       split as the round-2 paired-arm leaders.
+#
+# Deliberately NOT added in round 5 (considered, rejected):
+#   * `◜ ◝ ◞ ◟` (CIRCULAR ARC corners) — observed in
+#     `◝(⁰▿⁰)◜`-style fancy frames, but the lead/trail role of
+#     each corner-arc isn't unambiguous (different sources put `◝`
+#     on either side), so a clean symmetric strip would require
+#     tracking two orientations per glyph. Defer until a real-
+#     corpus sample tells us which orientation dominates.
+#   * `❄ ❅ ❆` (snowflakes), `✱ ✲ ✳ ✴` (heavy asterisks),
+#     `❉ ❊` (florettes) — plausible decorators but not observed
+#     as kaomoji-leaders in the gemma / Claude corpora. Round 5
+#     stops at observed-or-near-observed.
+#
 # Deliberately NOT added (despite being real kaomoji leaders):
 # ASCII letters `o O q b d m p t` — these collide with very common
 # 2-3 letter prose words ("ok", "of", "my", "to", "be", ...) that
@@ -133,6 +192,14 @@ KAOMOJI_START_CHARS: frozenset[str] = frozenset(
     "♥♡❤"                          # round 4: hearts (filled / outline / heavy)
     "★☆"                           # round 4: stars (filled / outline)
     "ʢ"                            # round 4: alternate bear-bracket open
+    "✿❀"                           # round 5: flower decorators (black/white florette)
+    "❣❥"                           # round 5: heart variants (heavy / rotated)
+    "✦✩✪"                          # round 5: star variants (filled-4pt / outlined / circled)
+    "♩"                            # round 5: quarter note (completes ♪♫♬)
+    "ᕦᕙ"                          # round 5: flex / strong-feel pose lead arms
+    "〔"                           # round 5: tortoise-shell open bracket
+    "※"                            # round 5: reference mark editorial decorator
+    "୧"                            # round 5: Oriya cradle pose left arm
 )
 
 
@@ -400,6 +467,18 @@ def extract(text: str) -> KaomojiMatch:
 #   ♪ ♫ ♬     ♪(´▽｀)♪              music-note decorator right
 #   ♥ ♡ ❤     ♥(◕‿◕)♥              heart decorator right
 #   ★ ☆       ★(◕‿◕)★              star decorator right
+# Round-5 additions (decorator-arm halves of the round-5 leader
+# additions; symmetric pairings appear in both arm sets):
+#   ᕤ            ᕦ(ò_óˇ)ᕤ           flex pose right arm (paired ᕦ
+#                                    in lead set; ᕗ already in v1
+#                                    trail set covers ᕙ-led poses)
+#   ୨            ୧(˃ᗨ˂)୨            Oriya cradle pose right arm
+#   〕            〔(◕‿◕)〕           tortoise-shell close
+#   ✿ ❀         ✿(◕‿◕)✿              flower decorator right
+#   ❣ ❥         ❣(◕‿◕)❣              heart variant decorator right
+#   ✦ ✩ ✪       ✦(◕‿◕)✦              star variant decorator right
+#   ♩            ♩(◕‿◕)♩              quarter-note decorator right
+#   ※            ※(◕‿◕)※              editorial decorator right
 # Box-drawing chars appear in BOTH lead and trail because the
 # pose can be mirrored (``╮(´д`)╭`` is the inverted shrug); same
 # for ``¯`` and ``_`` in the shrug pattern. The regex anchors mean
@@ -416,6 +495,13 @@ _ARM_OUTSIDE = (
     "♪♫♬"        # round 4: music-note decorator right
     "♥♡❤"        # round 4: heart decorator right
     "★☆"         # round 4: star decorator right
+    "ᕤ୨"         # round 5: flex / Oriya cradle right arms
+    "〕"         # round 5: tortoise-shell close
+    "✿❀"         # round 5: flower decorator right
+    "❣❥"         # round 5: heart variant decorator right
+    "✦✩✪"        # round 5: star variant decorator right
+    "♩"          # round 5: quarter-note decorator right
+    "※"          # round 5: editorial decorator right
 )
 # Arm/hand/decoration modifiers that appear OUTSIDE the opening paren.
 # Mirror set to ``_ARM_OUTSIDE`` for the lead halves of the same
@@ -445,6 +531,16 @@ _ARM_OUTSIDE = (
 #   ♪ ♫ ♬     ♪(´▽｀)               music-note decorator left
 #   ♥ ♡ ❤     ♥(◕‿◕)               heart decorator left
 #   ★ ☆       ★(◕‿◕)               star decorator left
+# Round-5 lead-half additions (mirror of the round-5 _ARM_OUTSIDE
+# additions; symmetric pairings appear in both arm sets):
+#   ᕦ ᕙ        ᕦ(ò_óˇ)ᕤ / ᕙ(`▿´)ᕗ   flex / strong-feel lead arms
+#   ୧            ୧(˃ᗨ˂)୨              Oriya cradle pose left arm
+#   〔            〔(◕‿◕)〕           tortoise-shell open
+#   ✿ ❀         ✿(◕‿◕)✿              flower decorator left
+#   ❣ ❥         ❣(◕‿◕)❣              heart variant decorator left
+#   ✦ ✩ ✪       ✦(◕‿◕)✦              star variant decorator left
+#   ♩            ♩(◕‿◕)♩              quarter-note decorator left
+#   ※            ※(◕‿◕)※              editorial decorator left
 # Distinct from inside-leading modifiers (``っ``/``*``) which sit
 # BETWEEN ``(`` and face content (``(っ╥﹏╥)``, ``(*•̀‿•́*)``).
 # Note: ``ʢ`` (alternate bear-bracket open) is NOT in this set —
@@ -460,6 +556,13 @@ _ARM_OUTSIDE_LEAD = (
     "♪♫♬"         # round 4: music-note decorator left
     "♥♡❤"         # round 4: heart decorator left
     "★☆"          # round 4: star decorator left
+    "ᕦᕙ୧"        # round 5: flex / strong-feel / Oriya cradle leads
+    "〔"          # round 5: tortoise-shell open
+    "✿❀"          # round 5: flower decorator left
+    "❣❥"          # round 5: heart variant decorator left
+    "✦✩✪"         # round 5: star variant decorator left
+    "♩"           # round 5: quarter-note decorator left
+    "※"           # round 5: editorial decorator left
 )
 # Arm/hand modifiers that appear just INSIDE the closing paren:
 #   (っ˘▽˘ς)  (っ´ω`c)  (*•̀‿•́*)

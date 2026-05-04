@@ -100,6 +100,34 @@ from llmoji.taxonomy import (
         ("☆(◕‿◕)☆ outline",               "☆(◕‿◕)☆"),
         # v2.0 round 4: alternate bear-bracket pair (ʢ...ʡ).
         ("ʢ◉ᴥ◉ʡ alt-bear",                "ʢ◉ᴥ◉ʡ"),
+        # v2.0 round 5: flower decorators.
+        ("✿(◕‿◕)✿ flower-black",          "✿(◕‿◕)✿"),
+        ("❀(◕‿◕)❀ flower-white",          "❀(◕‿◕)❀"),
+        # v2.0 round 5: heart variants.
+        ("❣(◕‿◕)❣ emphatic",              "❣(◕‿◕)❣"),
+        ("❥(◕‿◕)❥ rotated",               "❥(◕‿◕)❥"),
+        # v2.0 round 5: star variants (filled-4pt / outlined / circled).
+        ("✦(◕‿◕)✦ four-pt",                "✦(◕‿◕)✦"),
+        ("✩(◕‿◕)✩ outlined",               "✩(◕‿◕)✩"),
+        ("✪(◕‿◕)✪ circled",                "✪(◕‿◕)✪"),
+        # v2.0 round 5: quarter-note decorator.
+        ("♩(◕‿◕)♩ quarter",                "♩(◕‿◕)♩"),
+        # v2.0 round 5: flex / strong-feel pose. Whitespace-fallback
+        # surfaces the whole token (no inner brackets to depth-walk).
+        ("ᕦ(ò_óˇ)ᕤ flex",                 "ᕦ(ò_óˇ)ᕤ"),
+        ("ᕙ(`▿´)ᕗ strong",                 "ᕙ(`▿´)ᕗ"),
+        # v2.0 round 5: tortoise-shell editorial bracket. Depth walker
+        # surfaces the `〔...〕` span via the new bracket pair.
+        ("〔(◕‿◕)〕 editorial",             "〔(◕‿◕)〕"),
+        # v2.0 round 5: tortoise-shell standalone (no inner paren).
+        # Same lookbehind-no-op behavior as the round-4
+        # `「・_・」` standalone case.
+        ("〔・_・〕 face-only",              "〔・_・〕"),
+        # v2.0 round 5: reference mark editorial decorator.
+        ("※(◕‿◕)※ refmark",               "※(◕‿◕)※"),
+        # v2.0 round 5: Oriya cradle pose. Whitespace-fallback surfaces
+        # the whole token (no inner bracket pair to walk).
+        ("୧(˃ᗨ˂)୨ cradle",                "୧(˃ᗨ˂)୨"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -335,6 +363,64 @@ def test_extract_unbalanced_bracket_fallback(
         # === v2.0 round 4 — alternate bear preserved as wrapper ===
         # ʢ/ʡ behave like ʕ/ʔ: the whole bear is the kaomoji.
         ("ʢ◉ᴥ◉ʡ",               "ʢ⊙ᴥ⊙ʡ",             "round4-alt-bear"),
+        # === v2.0 round 5 — flower decorator strip ===
+        # `✿`/`❀` strip on both lead and trail (paired-decorator
+        # pattern). In-paren flowers preserved as cheek decorations.
+        ("✿(◕‿◕)✿",            "(◕‿◕)",             "round5-flower-black"),
+        ("❀(◕‿◕)❀",            "(◕‿◕)",             "round5-flower-white"),
+        # Lead-only and trail-only single flowers strip independently.
+        ("✿(◕‿◕)",              "(◕‿◕)",             "round5-flower-lead-only"),
+        ("(◕‿◕)❀",              "(◕‿◕)",             "round5-flower-trail-only"),
+        # Black/white florettes preserved distinct (no fold).
+        ("✿(◕‿◕)❀",            "(◕‿◕)",             "round5-flower-mixed"),
+        # In-paren flower-as-cheek-decoration preserved (lead/trail
+        # anchors only fire OUTSIDE the parens, like round-4 hearts).
+        ("(✿◕‿◕)",              "(✿◕‿◕)",            "round5-flower-cheek"),
+        ("(◕‿◕❀)",              "(◕‿◕❀)",            "round5-flower-cheek"),
+        # === v2.0 round 5 — heart variant strip ===
+        # `❣` heavy-heart-with-exclamation, `❥` rotated-heart-bullet.
+        # Both kept distinct from the round-4 ♥/♡/❤ family.
+        ("❣(◕‿◕)❣",            "(◕‿◕)",             "round5-heart-emphatic"),
+        ("❥(◕‿◕)❥",            "(◕‿◕)",             "round5-heart-rotated"),
+        # In-paren heart-variant-as-eye preserved (mirrors the round-4
+        # `(♥‿♥)` heart-eye preservation).
+        ("(❣‿❣)",                "(❣‿❣)",             "round5-heart-eye"),
+        # === v2.0 round 5 — star variant strip ===
+        ("✦(◕‿◕)✦",            "(◕‿◕)",             "round5-star-4pt"),
+        ("✩(◕‿◕)✩",            "(◕‿◕)",             "round5-star-outlined"),
+        ("✪(◕‿◕)✪",            "(◕‿◕)",             "round5-star-circled"),
+        # === v2.0 round 5 — quarter-note decorator ===
+        ("♩(◕‿◕)♩",            "(◕‿◕)",             "round5-music-quarter"),
+        # === v2.0 round 5 — flex / strong-feel pose ===
+        # `ᕦ`/`ᕤ` collapse to bare face. Mouth `_` between middle-dot
+        # eyes is NOT in this case (eyes are accented Latin) so rule K
+        # doesn't fire; `_` stays as the mouth glyph it represents.
+        ("ᕦ(ò_óˇ)ᕤ",            "(ò_óˇ)",             "round5-flex"),
+        # `ᕙ`/`ᕗ` strong-feel pose — `ᕗ` was already in v1 trail set,
+        # round 5 promotes `ᕙ` to lead and the strip becomes symmetric.
+        ("ᕙ(`▿´)ᕗ",              "(`▿´)",              "round5-strong-feel"),
+        # Lead-only and trail-only flex arms strip independently.
+        ("ᕦ(ò_óˇ)",              "(ò_óˇ)",             "round5-flex-lead-only"),
+        ("(ò_óˇ)ᕤ",              "(ò_óˇ)",             "round5-flex-trail-only"),
+        # === v2.0 round 5 — tortoise-shell wrapper strip ===
+        # Paren-wrapped face inside `〔...〕`: brackets strip to bare
+        # face, mirroring the round-4 corner-bracket handling.
+        ("〔(◕‿◕)〕",            "(◕‿◕)",             "round5-tortoise"),
+        # Tortoise-shell standalone (no inner paren) preserved by the
+        # lookbehind/lookahead anchors, same logic as `「・_・」`.
+        ("〔・_・〕",              "〔・_・〕",          "round5-tortoise-standalone"),
+        # === v2.0 round 5 — reference-mark editorial decorator ===
+        # `※` is symmetric — same glyph on lead and trail.
+        ("※(◕‿◕)※",             "(◕‿◕)",             "round5-refmark"),
+        ("※(◕‿◕)",               "(◕‿◕)",             "round5-refmark-lead-only"),
+        ("(◕‿◕)※",               "(◕‿◕)",             "round5-refmark-trail-only"),
+        # === v2.0 round 5 — Oriya cradle pose ===
+        # `୧`/`୨` collapse to bare face (Oriya digits 1/2 used as
+        # cradling arms).
+        ("୧(˃ᗨ˂)୨",              "(˃ᗨ˂)",              "round5-oriya-cradle"),
+        # Lead-only and trail-only Oriya arms strip independently.
+        ("୧(˃ᗨ˂)",                "(˃ᗨ˂)",              "round5-oriya-lead-only"),
+        ("(˃ᗨ˂)୨",                "(˃ᗨ˂)",              "round5-oriya-trail-only"),
     ],
     ids=lambda v: v if isinstance(v, str) and len(v) < 30 else None,
 )
@@ -416,6 +502,29 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         # exclusion (Markdown bold/italic and tilde-run-on).
         ("~(˘▽˘~)",             False),
         ("*(◕‿◕)*",             False),
+        # v2.0 round 5 — flower decorators accepted.
+        ("✿(◕‿◕)✿",            True),
+        ("❀(◕‿◕)❀",            True),
+        # v2.0 round 5 — heart variants accepted.
+        ("❣(◕‿◕)❣",            True),
+        ("❥(◕‿◕)❥",            True),
+        # v2.0 round 5 — star variants accepted.
+        ("✦(◕‿◕)✦",            True),
+        ("✩(◕‿◕)✩",            True),
+        ("✪(◕‿◕)✪",            True),
+        # v2.0 round 5 — quarter-note decorator accepted.
+        ("♩(◕‿◕)♩",            True),
+        # v2.0 round 5 — flex / strong-feel pose accepted.
+        ("ᕦ(ò_óˇ)ᕤ",            True),
+        ("ᕙ(`▿´)ᕗ",             True),
+        # v2.0 round 5 — tortoise-shell wrapper accepted.
+        ("〔(◕‿◕)〕",            True),
+        # v2.0 round 5 — tortoise-shell standalone accepted.
+        ("〔・_・〕",              True),
+        # v2.0 round 5 — reference-mark decorator accepted.
+        ("※(◕‿◕)※",             True),
+        # v2.0 round 5 — Oriya cradle pose accepted.
+        ("୧(˃ᗨ˂)୨",              True),
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
@@ -437,4 +546,9 @@ def test_kaomoji_start_chars_includes_common_leaders() -> None:
     # v2.0 round 4 — corner brackets, standing-pose, music/hearts/
     # stars, alternate bear-bracket open:
     for c in "「『【〈《└┘♪♫♬♥♡❤★☆ʢ":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 5 — flowers, heart variants, star variants, quarter
+    # note, flex/strong-feel pose lead arms, tortoise-shell open
+    # bracket, reference mark, Oriya cradle pose left arm:
+    for c in "✿❀❣❥✦✩✪♩ᕦᕙ〔※୧":
         assert c in KAOMOJI_START_CHARS, c

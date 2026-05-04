@@ -28,9 +28,9 @@ Everything else — embedding, eriskii axis projection, clustering,
 figures — is research-side and lives in `llmoji-study`, which
 `pip install llmoji>=2,<3` and reads our public surface. (v1
 corpus pin was `>=1.1,<2`; the 2.0 sweep broadens
-`KAOMOJI_START_CHARS` and the arm-strip set so the canonical-form
-output for many existing kaomoji shifts — see "Cross-corpus
-invariant surface" below.)
+`KAOMOJI_START_CHARS` and the arm-strip set across five rounds so
+the canonical-form output for many existing kaomoji shifts — see
+"Cross-corpus invariant surface" below.)
 
 ## Pipeline
 
@@ -151,7 +151,7 @@ Bumping any of these is a cross-corpus change — flag in the PR body
 and update the HF dataset card to match.
 
 - **`llmoji.taxonomy`**: `KAOMOJI_START_CHARS` (broadened across
-  four 2.0 sweep rounds: round 1 added wing/hug/sparkle leaders
+  five 2.0 sweep rounds: round 1 added wing/hug/sparkle leaders
   `\ ⊂ ✧`; round 2 added Greek `Σ ψ Ψ ε`, Latin extension `ƪ ʕ`,
   and box-drawing diagonals `╱ ╲`; round 3 promoted box-drawing
   pose pairs and shrug components into the arm-strip sets without
@@ -159,29 +159,40 @@ and update the HF dataset card to match.
   real kaomoji leader" with Japanese corner brackets
   `「『【〈《`, box-drawing standing-pose corners `└ ┘`, music
   notes `♪ ♫ ♬`, hearts `♥ ♡ ❤`, stars `★ ☆`, and the
-  alternate bear-bracket open `ʢ`); rules A–P in
-  `canonicalize_kaomoji` plus the 2.0 paired-arm strip sweep
-  (`_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD` cover wing-hand
-  `\(...)/`, hugging arms `⊂(...)⊃`, sparkle `✧(...)✧`,
-  shocked sigma `Σ(...)`, horn-fingers `ψ(...)ψ`, kissing
-  `ε(...)з`, raised hands `ƪ(...)ʃ`, paired-arm leaders
+  alternate bear-bracket open `ʢ`; round 5 is the exhaustive
+  remainder sweep — flower decorators `✿ ❀`, heart variants
+  `❣ ❥`, star variants `✦ ✩ ✪`, the round-4-completing quarter
+  note `♩`, flex / strong-feel pose lead arms `ᕦ ᕙ` (Canadian
+  Syllabics), tortoise-shell editorial bracket `〔` (paired with
+  `〕`), reference mark `※`, and Oriya cradle pose left arm
+  `୧`); rules A–P in `canonicalize_kaomoji` plus the 2.0
+  paired-arm strip sweep (`_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD`
+  cover wing-hand `\(...)/`, hugging arms `⊂(...)⊃`, sparkle
+  `✧(...)✧`, shocked sigma `Σ(...)`, horn-fingers `ψ(...)ψ`,
+  kissing `ε(...)з`, raised hands `ƪ(...)ʃ`, paired-arm leaders
   `٩(...)۶` / `ᕕ(...)ᕗ` / `໒(...)७`, raised-hands katakana
   `ヽ(...)ノ`, box-drawing pose pairs `╰(...)╯` / `┐(...)┌`,
-  the iconic `¯\_(ツ)_/¯` shrug, plus round-4 corner-bracket
+  the iconic `¯\_(ツ)_/¯` shrug, round-4 corner-bracket
   wrappers `「(...)」`, standing-pose `└(...)┘`, music
-  `♪(...)♪`, heart `♥(...)♥`, and star `★(...)★` decorators);
-  `is_kaomoji_candidate` validator contract (backslash allowed at
-  position 0 only — wing-hand pattern); `extract` /
-  `KaomojiMatch` (span-only — no affect labels; gemma-tuned
-  label dicts moved to research-side `llmoji_study.taxonomy_labels`).
-  Bear faces `ʕ•ᴥ•ʔ` and `ʢ◉ᴥ◉ʡ` are special cases: the bracket
-  pairs go in `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` for depth-walk
-  recognition but stay OUT of arm-strip — the whole bear is the
-  kaomoji, no inner `(...)` to fall back to. Corner-bracket-only
-  standalone faces like `「・_・」` (no inner paren) are
-  preserved by the same logic: the lead-strip's `(?=\()` lookahead
-  fails (no `(`) and the trail-strip's round-4 `(?<=\))`
-  lookbehind fails (no `)` precedes `」`), so both regexes no-op.
+  `♪(...)♪`, heart `♥(...)♥`, and star `★(...)★` decorators,
+  plus round-5 flower `✿(...)✿`, heart-variant `❣(...)❣`,
+  star-variant `✦(...)✦`, quarter-note `♩(...)♩`, flex
+  `ᕦ(...)ᕤ` / strong-feel `ᕙ(...)ᕗ`, tortoise-shell
+  `〔(...)〕`, reference-mark `※(...)※`, and Oriya cradle
+  `୧(...)୨` decorators); `is_kaomoji_candidate` validator
+  contract (backslash allowed at position 0 only — wing-hand
+  pattern); `extract` / `KaomojiMatch` (span-only — no affect
+  labels; gemma-tuned label dicts moved to research-side
+  `llmoji_study.taxonomy_labels`). Bear faces `ʕ•ᴥ•ʔ` and
+  `ʢ◉ᴥ◉ʡ` are special cases: the bracket pairs go in
+  `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` for depth-walk recognition
+  but stay OUT of arm-strip — the whole bear is the kaomoji,
+  no inner `(...)` to fall back to. Corner-bracket-only
+  standalone faces like `「・_・」` and round-5 `〔・_・〕`
+  (no inner paren) are preserved by the same logic: the
+  lead-strip's `(?=\()` lookahead fails (no `(`) and the
+  trail-strip's round-4 `(?<=\))` lookbehind fails (no `)`
+  precedes `」`/`〕`), so both regexes no-op.
 - **`llmoji.synth_prompts`**: `DESCRIBE_PROMPT_WITH_USER`,
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
