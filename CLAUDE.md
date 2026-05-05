@@ -3,34 +3,23 @@
 ## What this is
 
 `llmoji` is a small provider-agnostic CLI for collecting kaomoji
-journals from coding agents (Claude Code, Codex, Hermes), distilling
-them into per-(source-model, canonical-face) descriptions via the
-user's chosen synthesis backend, and submitting privacy-preserving
-aggregates to a shared HF dataset for cross-corpus research.
-Companion to the research-side
+journals from coding agents (Claude Code, Codex, Hermes, opencode,
+openclaw), distilling them into per-(source-model, canonical-face)
+descriptions via the user's chosen synthesis backend, and submitting
+privacy-preserving aggregates to a shared HF dataset for cross-corpus
+research. Companion to the research-side
 [`llmoji-study`](https://github.com/a9lim/llmoji-study) repo, where
-all probe / hidden-state / MiniLM-embedding / axis-projection /
-figure work lives.
+all probe / hidden-state / embedding / axis-projection / figure work
+lives.
 
-This package is the data-layer-only end-user side: zero dependency
-on saklas, torch, sentence-transformers, or matplotlib. Runtime deps
-are **`anthropic`** (default synth backend), **`openai`** (the
-`--backend openai` Responses-API path AND the `--backend local`
-OpenAI-compatible Chat-Completions path against Ollama / vLLM /
-llama.cpp's HTTP server), **`huggingface_hub`** (upload target), and
-**`ruamel.yaml`** (parsing-only — used by the hermes provider for
-line/col marks on the parsed YAML tree so we can compute exact
-splice ranges for surgical text edits to ``~/.hermes/config.yaml``;
-we never call ``yaml.dump`` on this, see the "HookInstaller.install
-refuses to clobber" gotcha for the data-corruption story that
-forced the parsing-only design).
-Everything else — embedding, eriskii axis projection, clustering,
-figures — is research-side and lives in `llmoji-study`, which
-`pip install llmoji>=2,<3` and reads our public surface. (v1
-corpus pin was `>=1.1,<2`; the 2.0 sweep broadens
-`KAOMOJI_START_CHARS` and the arm-strip set across five rounds AND
-adds a round-6 Path B for bare kaomoji that don't lead with a
-recognized opener — see "Cross-corpus invariant surface" below.)
+Data-layer-only: zero dependency on saklas, torch, or matplotlib.
+Runtime deps are `anthropic` (default synth backend), `openai`
+(`--backend openai` Responses-API path AND `--backend local`
+OpenAI-compatible Chat-Completions path), `huggingface_hub` (upload
+target), and `ruamel.yaml` (parsing-only — used by the hermes
+provider for line/col marks; we never call `yaml.dump` on the loaded
+doc, see "Hermes parsing-only ruamel" gotcha for the data-corruption
+story that motivates it).
 
 ## Pipeline
 
@@ -52,97 +41,77 @@ deciding to ship.
 `llmoji.providers.HookInstaller` is the base class for **bash-hook**
 providers, one subclass per first-class harness. JSON-settings
 providers (`ClaudeCodeProvider`, `CodexProvider`) inherit from
-`JsonSettingsHookInstaller` (also in `base.py`), which supplies the
-default `_register` / `_unregister` / `_check_registrations`
-against any `settings.json`-shaped file. YAML-settings providers
-(`HermesProvider`) override the three. Renamed from `Provider` in
-1.1.x — the abstraction is about installing hooks, not about being
-a generic "provider"; the `providers/` directory name stays because
-concrete subclasses correspond to user-facing harness providers.
+`JsonSettingsHookInstaller`, which supplies the default `_register`
+/ `_unregister` / `_check_registrations` against any
+`settings.json`-shaped file. YAML-settings providers
+(`HermesProvider`) override the three.
 
-`PluginInstaller` (added in 1.3) is a sibling base for **TS-plugin**
-providers — opencode and openclaw, harnesses whose plugin SDKs are
-TS-only with no shell-hook escape hatch. It subclasses
-`HookInstaller` for type-compatibility (PROVIDERS dict and
-`ProviderStatus` stay one-shape) but overrides
-install/uninstall/render to write rendered TypeScript plus optional
-JSON-config flag flips rather than bash. `OpencodeProvider`'s
-plugin auto-loads from `~/.config/opencode/plugins/llmoji.ts` (file
-presence = registered). `OpenclawProvider` writes the bundle at
+`PluginInstaller` is a sibling base for **TS-plugin** providers
+(opencode, openclaw) — harnesses whose plugin SDKs are TS-only with
+no shell-hook escape hatch. It subclasses `HookInstaller` for
+type-compatibility (PROVIDERS dict and `ProviderStatus` stay
+one-shape) but writes rendered TypeScript instead of bash. opencode
+auto-loads from `~/.config/opencode/plugins/llmoji.ts` (file
+presence = registered); openclaw writes a bundle at
 `~/.openclaw/plugins/llmoji-kaomoji/` and edits
 `~/.openclaw/config.json` to set
 `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess = true`.
-Pre-1.3 these two harnesses lived under `examples/` as worked
-generic-JSONL contracts; the promotion is a strict superset (the
-generic-JSONL contract still works for unsupported harnesses).
 
 Each provider declares: `hooks_dir`, `settings_path`, `journal_path`,
-`main_event`, `skip_action` (`continue` for claude_code/codex —
-their validator partial sits inside a per-message `while read` loop;
-`echo '{}'; exit 0` for hermes's stdout-JSON single-shot contract),
-`system_injected_prefixes`, and optional nudge attrs
-(`nudge_hook_template` / `nudge_hook_filename` / `nudge_event` /
-`nudge_message`).
+`main_event`, `system_prompt_doc_path`, `skip_action` (`continue`
+for claude_code/codex per-message walks; `echo '{}'; exit 0` for
+hermes's stdout-JSON contract), `system_injected_prefixes`, and
+optional nudge attrs.
 
-Bash hook templates live as data files under `llmoji/_hooks/`, plus
-two **shared partials** every main hook inlines:
-
-- `_kaomoji_validate.sh.partial` — leading-prefix extractor and
-  validator. Substituted with `${KAOMOJI_START_CASE}` (built from
-  `llmoji.taxonomy.KAOMOJI_START_CHARS`) and `${SKIP_ACTION}`,
-  inserted as `${KAOMOJI_VALIDATE}`.
-- `_journal_write.sh.partial` — the `jq -nc … >> $JOURNAL_PATH`
-  tail. Substituted with `${JOURNAL_PATH}`, inserted as
-  `${JOURNAL_WRITE}`.
-
-`HookInstaller.render_hook()` runs `string.Template.safe_substitute`
-twice — once on each partial with its own placeholders, once on
-the main template with `JOURNAL_PATH`, `KAOMOJI_VALIDATE`,
-`JOURNAL_WRITE`, `INJECTED_PREFIXES_FILTER`, `LLMOJI_VERSION`. Two
-passes because `safe_substitute` is single-pass and the partials'
+Bash hook templates live under `llmoji/_hooks/`. Two shared partials
+inline into every main hook: `_kaomoji_validate.sh.partial`
+(extractor + validator, gets `${KAOMOJI_START_CASE}` from
+`KAOMOJI_START_CHARS` and `${PYTHON_INTERPRETER}` for the round-6
+fallback) and `_journal_write.sh.partial` (the `jq -nc … >>
+$JOURNAL_PATH` tail). `render_hook()` runs `safe_substitute` twice
+— once on each partial with its own placeholders, once on the main
+template — because `safe_substitute` is single-pass and the partials'
 own `${...}` references wouldn't survive a one-pass render.
 
 ### Synthesis backends
 
-Three concrete backends, all routed through `llmoji.synth.Synthesizer`
-+ `llmoji.synth.make_synthesizer`:
+Three concrete backends, all routed through
+`llmoji.synth.make_synthesizer`:
 
-- **`AnthropicSynthesizer`** — `anthropic.Anthropic.messages.create`
-  with `max_retries=8`, default `DEFAULT_ANTHROPIC_MODEL_ID`.
-- **`OpenAISynthesizer`** — `openai.OpenAI.responses.create` (the
-  Responses API; OpenAI's recommended path), `.output_text`
-  accessor, default `DEFAULT_OPENAI_MODEL_ID`.
-- **`LocalSynthesizer`** —
+- `AnthropicSynthesizer` — `anthropic.Anthropic.messages.create`,
+  `max_retries=8`, default `DEFAULT_ANTHROPIC_MODEL_ID`.
+- `OpenAISynthesizer` — `openai.OpenAI.responses.create` (Responses
+  API, OpenAI's recommended path), `.output_text` accessor, default
+  `DEFAULT_OPENAI_MODEL_ID`.
+- `LocalSynthesizer` —
   `openai.OpenAI(base_url=..., api_key="ollama").chat.completions.create`.
   Chat Completions because Ollama / vLLM / llama.cpp HTTP all expose
   Chat-Completions-shaped endpoints. No default model id; user must
   pass `--model`.
 
-All three defer SDK-client construction to the first `.call()` so
-the factory has no env-var dependency at construction time.
+All three defer SDK-client construction to first `.call()` so the
+factory has no env-var dependency at construction time.
 
 ### Two-stage synthesis pipeline
 
 - **Stage A (per instance)**: for each `(source_model,
   canonical_kaomoji)` cell, sample up to `INSTANCE_SAMPLE_CAP` rows
-  (deterministic seed `f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`),
-  mask the kaomoji to `[FACE]`, call the synthesizer with
+  (deterministic seed
+  `f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`), mask the
+  kaomoji to `[FACE]`, call the synthesizer with
   `DESCRIBE_PROMPT_WITH_USER` or `DESCRIBE_PROMPT_NO_USER`. Cache
   keyed by `sha256(synth_model_id + "\0" + backend + "\0" + base_url
   + "\0" + canonical + "\0" + user + "\0" + assistant)[:16]` at
   `~/.llmoji/cache/per_instance.jsonl`. Switching synth model OR
-  backend OR (for `local`) endpoint misses cleanly. Within a wave,
-  cache-miss API calls dispatch on a small thread pool but the
-  serial walk that builds Stage B's input + appends the cache file
-  runs in deterministic order — re-runs against the same journal
-  feed Stage B identical descriptions in identical order.
+  backend OR (for `local`) endpoint misses cleanly. Cache-miss API
+  calls dispatch on a small thread pool; the serial walk that builds
+  Stage B's input runs in deterministic order so re-runs feed
+  Stage B identical descriptions.
 - **Stage B (per cell)**: pool Stage A descriptions, synthesize a
   single 1–2-sentence overall meaning via `SYNTHESIZE_PROMPT`. The
-  Stage B line is the **only** thing that ships — it lands in that
-  cell's `<source-model>.jsonl` at the bundle root.
+  Stage B line is the only thing that ships.
 
-Embedding / axis projection / clustering / figures happen
-research-side.
+Embedding / axis projection / clustering / figures are research-side.
 
 ## Cross-corpus invariant surface
 
@@ -150,114 +119,85 @@ The HF dataset's aggregation rules pin against everything below.
 Bumping any of these is a cross-corpus change — flag in the PR body
 and update the HF dataset card to match.
 
-- **`llmoji.taxonomy`**: `KAOMOJI_START_CHARS` (broadened across
-  five 2.0 sweep rounds: round 1 added wing/hug/sparkle leaders
-  `\ ⊂ ✧`; round 2 added Greek `Σ ψ Ψ ε`, Latin extension `ƪ ʕ`,
-  and box-drawing diagonals `╱ ╲`; round 3 promoted box-drawing
-  pose pairs and shrug components into the arm-strip sets without
-  touching the leader set; round 4 broadened to "any plausibly
-  real kaomoji leader" with Japanese corner brackets
-  `「『【〈《`, box-drawing standing-pose corners `└ ┘`, music
-  notes `♪ ♫ ♬`, hearts `♥ ♡ ❤`, stars `★ ☆`, and the
-  alternate bear-bracket open `ʢ`; round 5 is the exhaustive
-  remainder sweep — flower decorators `✿ ❀`, heart variants
-  `❣ ❥`, star variants `✦ ✩ ✪`, the round-4-completing quarter
-  note `♩`, flex / strong-feel pose lead arms `ᕦ ᕙ` (Canadian
-  Syllabics), tortoise-shell editorial bracket `〔` (paired with
-  `〕`), reference mark `※`, and Oriya cradle pose left arm
-  `୧`); rules A–P in `canonicalize_kaomoji` plus the 2.0
-  paired-arm strip sweep (`_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD`
-  cover wing-hand `\(...)/`, hugging arms `⊂(...)⊃`, sparkle
-  `✧(...)✧`, shocked sigma `Σ(...)`, horn-fingers `ψ(...)ψ`,
-  kissing `ε(...)з`, raised hands `ƪ(...)ʃ`, paired-arm leaders
-  `٩(...)۶` / `ᕕ(...)ᕗ` / `໒(...)७`, raised-hands katakana
-  `ヽ(...)ノ`, box-drawing pose pairs `╰(...)╯` / `┐(...)┌`,
-  the iconic `¯\_(ツ)_/¯` shrug, round-4 corner-bracket
-  wrappers `「(...)」`, standing-pose `└(...)┘`, music
-  `♪(...)♪`, heart `♥(...)♥`, and star `★(...)★` decorators,
-  plus round-5 flower `✿(...)✿`, heart-variant `❣(...)❣`,
-  star-variant `✦(...)✦`, quarter-note `♩(...)♩`, flex
-  `ᕦ(...)ᕤ` / strong-feel `ᕙ(...)ᕗ`, tortoise-shell
-  `〔(...)〕`, reference-mark `※(...)※`, and Oriya cradle
-  `୧(...)୨` decorators); `is_kaomoji_candidate` validator
-  contract (backslash allowed at position 0 only — wing-hand
-  pattern); `extract` / `KaomojiMatch` (span-only — no affect
-  labels; gemma-tuned label dicts moved to research-side
-  `llmoji_study.taxonomy_labels`). Bear faces `ʕ•ᴥ•ʔ` and
-  `ʢ◉ᴥ◉ʡ` are special cases: the bracket pairs go in
-  `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` for depth-walk recognition
-  but stay OUT of arm-strip — the whole bear is the kaomoji,
-  no inner `(...)` to fall back to. Corner-bracket-only
-  standalone faces like `「・_・」` and round-5 `〔・_・〕`
-  (no inner paren) are preserved by the same logic: the
-  lead-strip's `(?=\()` lookahead fails (no `(`) and the
-  trail-strip's round-4 `(?<=\))` lookbehind fails (no `)`
-  precedes `」`/`〕`), so both regexes no-op.
+- **`llmoji.taxonomy`**:
+  - `KAOMOJI_START_CHARS` — Path A leader set, broadened across the
+    2.0 sweep (rounds 1–5 added wing/hug/sparkle, Greek/Latin
+    extensions, box-drawing, corner brackets, music notes, hearts,
+    stars, alt-bear, flowers, heart/star variants, flex/strong-feel,
+    tortoise-shell, reference mark, Oriya cradle). Round 6 added
+    Path B `_looks_like_bare_kaomoji` for bare faces with no
+    leader (`*_*`, `T-T`, `^_^`, `>_<`, `:)`, `XD`).
+  - `is_kaomoji_candidate` validator contract: length 2..32, no
+    backslash at position ≥1 (position 0 is the wing-hand pattern),
+    no run of 4+ ASCII letters, AND (Path A OR Path B). Bracket
+    balance is *not* enforced — real corpus output is sometimes
+    unbalanced; the length cap + 4-letter-run + backslash filters
+    carry the prose-rejection role.
+  - `canonicalize_kaomoji` rules A–P + the 2.0 paired-arm strip
+    sweep (`_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD` cover wing-hand,
+    hugging arms, sparkle, shocked sigma, horn-fingers, kissing,
+    raised hands, paired-arm leaders `٩()۶ / ᕕ()ᗒ / ໒()७`,
+    raised-hands katakana, box-drawing pose pairs, the `¯\_(ツ)_/¯`
+    shrug, corner-bracket / standing-pose / music / heart / star
+    decorators, plus round-5 flower / heart-variant / star-variant /
+    quarter-note / flex / strong-feel / tortoise-shell /
+    reference-mark / Oriya cradle decorators).
+  - `extract` / `KaomojiMatch` (span-only — affect labels are
+    research-side at `llmoji_study.taxonomy_labels`).
+  - Bear faces `ʕ•ᴥ•ʔ` / `ʢ◉ᴥ◉ʡ` are special: their bracket pairs go
+    in `_OPEN_BRACKETS`/`_CLOSE_BRACKETS` for depth-walk recognition
+    but stay OUT of arm-strip — the whole bear is the kaomoji, no
+    inner `(...)` to fall back to. Same for corner-bracket-only
+    standalone faces (`「・_・」`, `〔・_・〕`).
 - **`llmoji.synth_prompts`**: `DESCRIBE_PROMPT_WITH_USER`,
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
   `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot),
-  `SHORT_NUDGE_MESSAGE` (v1 one-sentence nudge, 2.0+),
+  `SHORT_NUDGE_MESSAGE` (v1 one-sentence nudge),
   `LONG_NUDGE_MESSAGE` (v7 introspection framing baked from
-  `llmoji-study/preambles/introspection_v7.txt`, 2.0+). Both nudge
-  strings are part of the cross-corpus surface — bumping either
-  changes what the model is asked to do, which changes what
-  the corpus captures. `tests/test_soft_install.py
+  `llmoji-study/preambles/introspection_v7.txt`;
+  `tests/test_soft_install.py
   ::test_long_nudge_message_matches_introspection_v7` enforces
-  byte-identity against the study repo's preamble.
-- **6-field unified journal row schema** (on-disk JSONL):
-  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. This is
-  the cross-corpus invariant; `llmoji.scrape.ScrapeRow` is in-memory
-  only (lean 7-field shape: `source, model, timestamp, cwd,
-  assistant_text, first_word, surrounding_user`) and free to
-  evolve. Pre-1.1.x carried richer ScrapeRow metadata (`session_id`,
-  `parent_uuid`, `project_slug`, etc.) for would-be research-side
-  consumers; nothing in v1 reads them and `llmoji-study` reads
-  bundles + journals, so they're dropped in 1.1.x.
+  byte-identity).
+- **6-field journal row schema** (on-disk JSONL):
+  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. The
+  in-memory `llmoji.scrape.ScrapeRow` (7 fields: `source, model,
+  timestamp, cwd, assistant_text, first_word, surrounding_user`) is
+  free to evolve.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
-- **`llmoji.providers.HookInstaller`** interface +
-  **`llmoji.providers.PluginInstaller`** sibling base (1.3 added —
-  opencode + openclaw). 2.0 split the install lifecycle into
-  `install_hard` and `install_soft` — mutually exclusive *placement*
-  modes that share the journal-write hook. Both modes install the
-  Stop / `post_llm_call` hook so kaomoji-led messages still get
-  captured in real time; the modes only differ in where the
-  kaomoji-leading reminder is delivered. `uninstall` undoes both
-  regardless of which mode the user installed under.
-  `system_prompt_doc_path` is now a class attr on every first-class
-  provider.
-- **`--soft` vs `--hard` placement** (2.0+, mutually exclusive,
-  exactly one required):
-  - `--hard`: install journal-write hook + per-turn nudge hook
+- **`HookInstaller` / `PluginInstaller` interfaces.** 2.0 split the
+  install lifecycle into `install_hard` and `install_soft` —
+  mutually exclusive *placement* modes that share the journal-write
+  hook. Both modes install the Stop / `post_llm_call` hook so
+  capture works under either; the modes only differ in where the
+  kaomoji-leading reminder is delivered. `uninstall` undoes both.
+- **`--soft` vs `--hard` placement** (mutually exclusive, exactly one
+  required):
+  - `--hard`: journal-write hook + per-turn nudge hook
     (`UserPromptSubmit` on claude_code/codex, `pre_llm_call` on
-    hermes; baked into the rendered TS plugin for
-    opencode/openclaw). The v1 behavior.
-  - `--soft`: install journal-write hook + append a `# Kaomoji`
-    heading + the nudge text to the harness's persistent
-    system-prompt doc. No per-turn nudge hook. For plugin providers
-    (opencode/openclaw), `render_plugin_template(install_nudge=False)`
-    strips the per-turn nudge block out of the rendered TS via
-    `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` fences so the
-    plugin only does journal capture.
-- **Per-harness system-prompt doc paths** (2.0+, used by
-  `install_soft` / the `--soft` flag):
+    hermes; baked into the rendered TS plugin for opencode/openclaw).
+    The v1 behavior.
+  - `--soft`: journal-write hook + appends a `# Kaomoji` heading +
+    the nudge text to the harness's persistent system-prompt doc.
+    No per-turn nudge hook. For TS plugin providers,
+    `render_plugin_template(install_nudge=False)` strips the
+    per-turn nudge block out of the rendered TS via
+    `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` fences.
+- **Per-harness system-prompt doc paths**:
   - `claude_code` → `~/.claude/CLAUDE.md`
   - `codex` → `~/.codex/AGENTS.md`
   - `hermes` → `~/.hermes/SOUL.md` (voice slot — paired with
     AGENTS.md for procedure)
-  - `opencode` → `~/.config/opencode/AGENTS.md` (global rules)
-  - `openclaw` → `~/.openclaw/workspace/SOUL.md` (voice slot;
-    workspace dir is configurable via `agents.defaults.workspace`
-    but defaults to this path)
-- **Soft-doc shape** (2.0+): plain markdown — no comment fences.
-  The block is `# Kaomoji\n\n<message>` appended at EOF with a
-  blank-line separator before it. Uninstall removes the block by
-  exact string match against the two canonical wordings (short /
-  long); a hand-edited body falls through and survives uninstall
-  (conservative on the user's prose). The `# Kaomoji` heading is
-  the cross-corpus anchor — bumping it strands existing soft
-  installs (uninstall stops finding the block).
+  - `opencode` → `~/.config/opencode/AGENTS.md`
+  - `openclaw` → `~/.openclaw/workspace/SOUL.md`
+- **Soft-doc shape**: plain markdown, no comment fences. Block is
+  `# Kaomoji\n\n<message>` appended at EOF with a blank-line
+  separator. Uninstall removes the block by exact string match
+  against the two canonical wordings (short / long); a hand-edited
+  body falls through and survives uninstall (conservative on the
+  user's prose). The `# Kaomoji` heading is the cross-corpus anchor
+  — bumping it strands existing soft installs.
 - **The five first-class providers**: `claude_code`, `codex`,
   `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
   `providers_seen` in shipped bundles names these directly.
@@ -279,328 +219,148 @@ beyond `--target {hf,email}` and `--backend {anthropic,openai,local}`.
 
 ```
 llmoji install <provider> --hard
-                               (2.0+) install journal-write hook +
-                               per-turn nudge hook. The v1 behavior.
+                          install journal-write hook + per-turn nudge
+                          hook (the v1 behavior).
 llmoji install <provider> --soft
-                               (2.0+) install journal-write hook +
-                               append "# Kaomoji" + the nudge wording
-                               to the harness's persistent system-
-                               prompt doc (CLAUDE.md / AGENTS.md /
-                               SOUL.md per harness). No per-turn nudge
-                               hook. Both modes capture journal data;
-                               only the placement of the leading-
-                               kaomoji reminder differs.
-                               --soft and --hard are mutually
-                               exclusive; exactly one required.
+                          install journal-write hook + append
+                          "# Kaomoji" + the nudge wording to the
+                          harness's system-prompt doc. No per-turn
+                          nudge hook.
+                          --soft and --hard are mutually exclusive;
+                          exactly one required. Both capture journal
+                          data; only the placement of the leading-
+                          kaomoji reminder differs.
 llmoji install <provider> --soft|--hard --long
-                               (2.0+) orthogonal to soft/hard. Swaps
-                               the v1 one-sentence wording for the v7
-                               introspection framing (functional
-                               emotional states + introspection lead-in)
-                               in whichever placement you picked.
+                          orthogonal to soft/hard. Swaps the v1
+                          one-sentence wording for the v7
+                          introspection framing.
 llmoji install --soft|--hard [--long] [--yes]
-                               no-arg autodetect: install for every
-                               harness whose home dir exists under
-                               $HOME (~/.claude / ~/.codex / ~/.hermes /
-                               ~/.config/opencode / ~/.openclaw).
-                               Prompts unless --yes. Partial success
-                               OK — one corrupt config doesn't kill
-                               the rest of the batch. Mode flags
-                               propagate uniformly to every detected
-                               provider.
-llmoji uninstall <provider>    inverse; idempotent (journal preserved)
-llmoji uninstall [--yes]       no-arg autodetect: uninstall from every
-                               harness whose home dir exists under
-                               $HOME. Same UX skeleton as install's
-                               no-arg path (detect → prompt → run →
-                               partial-success).
-llmoji status                  installed providers, journal sizes,
-                               paths, + cheap health checks (stale-
-                               hook detection, settings parseability)
-llmoji status --stats          adds journal walk: kaomoji frequency
-[--top N] [--provider N]       tables (top N canonical, per-source,
-                               per-source-model) + row schema
-                               validation in one pass
-llmoji status --json           machine-readable JSON output for CI
-llmoji parse --provider <n> P  ingest a static export dump into
-                               ~/.llmoji/journals/. Supported
-                               sources: claude.ai, chatgpt (both
-                               via conversations.json), gemini
-                               (Google AI Studio chunkedPrompt JSON,
-                               one file per conversation), openhands
-                               (per-event JSON files at
-                               <conv>/events/event-*.json)
-llmoji import <provider>       replay native session/transcript files
-[--since <ISO>] [--dry-run]    into the live journal — dedup-aware
-                               merge against (ts, model,
-                               assistant_text), atomic via
-                               temp+rename. Stop the harness first.
-                               --since drops rows older than the
-                               cutoff. --dry-run reports counts
-                               without writing. Internal module is
-                               llmoji.backfill (parity-tested);
-                               import is the user-facing verb.
-llmoji import [--yes]          no-arg autodetect: replay every
-                               importable harness present on disk
-                               (claude_code, codex, hermes — TS
-                               plugin providers don't expose a
-                               replayable transcript shape, so they
-                               aren't in IMPORTABLE_PROVIDERS).
-                               --since / --dry-run propagate to
-                               every per-provider run in the batch.
-                               Recommended after every taxonomy
-                               bump to recover newly-recognized
-                               kaomoji from existing transcripts.
-llmoji analyze [--notes …]     scrape + canonicalize + synthesize
-[--backend …] [--model …]      → ~/.llmoji/bundle/. backend defaults
-[--base-url …]                 to anthropic; openai uses Responses
-                               API; local uses Chat Completions
-                               (Ollama / vLLM / llama.cpp HTTP)
-llmoji analyze --dry-run       print plan + token + cost estimate
-                               without making any synth calls.
-                               Costs use char/4 heuristic + per-1M
-                               rate table in synth_prompts.py —
-                               approximate, not a quote.
-llmoji upload --target {hf,email} [--yes]   ship the bundle (HF:
-                                            push to per-submission
-                                            branch via shared
-                                            encrypted credential —
-                                            user's HF token is used
-                                            only for whoami proof-
-                                            of-life and discarded;
-                                            email: tarball)
-llmoji cache clear             wipe ~/.llmoji/cache/
+                          no-arg autodetect: install for every harness
+                          whose home dir exists. Prompts unless --yes.
+                          Partial success OK — one corrupt config
+                          doesn't kill the rest of the batch.
+llmoji uninstall <provider>
+                          inverse; idempotent (journal preserved).
+llmoji uninstall [--yes]  no-arg autodetect uninstall.
+llmoji status [--stats] [--top N] [--provider N] [--json]
+                          installed providers, journal sizes, paths,
+                          health checks (stale-hook, settings parse).
+                          --stats walks journals for kaomoji
+                          frequency tables + row schema validation.
+llmoji parse --provider <n> P
+                          ingest a static export dump into
+                          ~/.llmoji/journals/. Sources: claude.ai,
+                          chatgpt (both via conversations.json),
+                          gemini (AI Studio chunkedPrompt or Takeout
+                          MyActivity), openhands (per-event JSON).
+llmoji import [<provider>] [--since <ISO>] [--dry-run] [--yes]
+                          replay native session/transcript files into
+                          the live journal. Dedup-aware merge against
+                          (ts, model, assistant_text), atomic. Stop
+                          the harness first. No-arg autodetects every
+                          importable harness (claude_code, codex,
+                          hermes — TS plugins don't expose replayable
+                          transcripts). Recommended after every
+                          taxonomy bump.
+llmoji analyze [--notes …] [--backend …] [--model …] [--base-url …]
+                          scrape + canonicalize + synthesize →
+                          ~/.llmoji/bundle/. backend defaults to
+                          anthropic; openai uses Responses API; local
+                          uses Chat Completions.
+llmoji analyze --dry-run  print plan + token + cost estimate (char/4
+                          heuristic + per-1M rate table; approximate).
+llmoji upload --target {hf,email} [--yes]
+                          ship the bundle. HF: per-submission branch
+                          via shared encrypted credential (user's HF
+                          token used only for whoami proof-of-life,
+                          discarded). email: tarball + mailto.
+llmoji cache clear        wipe ~/.llmoji/cache/
 ```
-
-`upload` requires `--target` and re-prompts before committing;
-`--yes` skips the prompt for scripted use.
 
 ## Layout
 
 ```
 llmoji/
-  pyproject.toml               # PEP 621 + hatch dynamic version
-                               # (regex-source from llmoji/__init__.py)
-  README.md                    # public-prose, voice-rewritten
-  CONTRIBUTING.md              # dev setup + adding-a-provider checklist
-  SECURITY.md                  # privacy threat model
-  LICENSE                      # MIT (PEP 639 SPDX)
-  CLAUDE.md
-  .github/                     # dependabot + PR/issue templates +
-                               # ci.yml (lint + typecheck + test +
-                               # build/wheel-import gate, 3.12 on
-                               # ubuntu-latest; all four required by
-                               # main branch protection) +
-                               # release.yml (tag → PyPI → release)
-  examples/                    # inspect_bundle.py (audit script);
-                               # openclaw_plugin/ (definePluginEntry plugin);
-                               # opencode_plugin.ts (generic-JSONL example);
-                               # _kaomoji_taxonomy.ts.partial (canonical
-                               # TS port of is_kaomoji_candidate / 
-                               # _leading_bracket_span / NUDGE — both
-                               # plugins inline this block between
-                               # BEGIN/END SHARED TAXONOMY markers,
-                               # asserted byte-identical by 
-                               # test_examples_taxonomy_partial_matches)
+  pyproject.toml         # PEP 621 + hatch dynamic version
+  README.md              # public-prose, voice-rewritten
+  CONTRIBUTING.md        # dev setup + adding-a-provider checklist
+  SECURITY.md            # privacy threat model
+  CLAUDE.md              # this file
+  .github/               # CI (lint+typecheck+test+build, all four
+                         # required by branch protection on main) +
+                         # release.yml (tag → PyPI)
+  examples/              # inspect_bundle.py audit script
   llmoji/
-    py.typed                   # PEP 561 marker
-    __init__.py                # public surface re-exports
-    _util.py                   # atomic_write_text (tmp+rename),
-                               # write_json, package_version,
-                               # human_bytes, sanitize_model_id_for_path,
-                               # journal_line_dict / scrape_row_to_journal_line
-                               # (canonical 6-field schema source of truth),
-                               # iter_bundle_data_files. Kept out of
-                               # providers.base so the dependency graph
-                               # stays tree-shaped.
-    taxonomy.py                # KAOMOJI_START_CHARS + is_kaomoji_candidate
-                               # + extract + KaomojiMatch (span-only)
-                               # + canonicalize_kaomoji (rules A–P; frozen)
-    synth_prompts.py           # locked cross-corpus prompts +
-                               # DEFAULT_*_MODEL_ID constants
-    synth.py                   # mask_kaomoji + cache helpers +
-                               # Synthesizer base + Anthropic/OpenAI/
-                               # Local backends + make_synthesizer
-                               # (deferred SDK construction)
-    scrape.py                  # ScrapeRow + iter_all chain helper
-    sources/
-      _common.py               # kaomoji_lead_strip — single source of
-                               # truth for the on-the-way-in strip
-      journal.py               # generic kaomoji-journal reader
-      claude_export.py         # Claude.ai conversations.json (linear
-                               # chat_messages array)
-      chatgpt_export.py        # ChatGPT conversations.json — same
-                               # filename, different schema (tree of
-                               # nodes; walks mapping[current_node]
-                               # up via parent)
-      gemini_export.py         # Two formats, auto-dispatched per file:
-                               # (a) AI Studio chunkedPrompt JSON (one
-                               # file per conversation; chunks[] with
-                               # role user/model and text; skips
-                               # isThought:true private CoT). Model
-                               # from runSettings.model with models/
-                               # prefix stripped.
-                               # (b) Google Takeout MyActivity.json
-                               # (flat list of activity entries; we
-                               # filter on "Gemini" in entry.header
-                               # to scope to the consumer Gemini chat
-                               # product). Response is HTML-encoded
-                               # in safeHtmlItem[].html — _html_to_text
-                               # uses html.parser.HTMLParser plus
-                               # html.unescape to recover plain text
-                               # before kaomoji_lead_strip. user_text
-                               # from subtitles[].value (plain). No
-                               # per-entry model id — Pro/Flash/etc.
-                               # routing is opaque, rows land with
-                               # model=None (slugs to 'unknown').
-                               # On-disk order is reverse-chronological;
-                               # we reverse to chronological on emit.
-      openhands_export.py      # OpenHands per-event JSON files at
-                               # <conv>/events/event-NNNNN-<id>.json.
-                               # Filters to MessageEvent kind +
-                               # source==agent. Per-event model attr
-                               # not on the wire — rows land with
-                               # empty model and bucket under
-                               # 'unknown' slug; read base_state.json
-                               # for richer attribution as a follow-up
-    backfill.py                # one-shot transcript→journal replays
-                               # for claude_code + codex + hermes;
-                               # parity-tested against live hooks.
-                               # Internal _replay_* generators yield
-                               # ScrapeRow; _flush_rows routes through
-                               # scrape_row_to_journal_line for the
-                               # canonical 6-field on-disk shape.
-    providers/
-      base.py                  # HookInstaller + JsonSettingsHookInstaller +
-                               # PluginInstaller + ProviderStatus +
-                               # SettingsCorruptError + render helpers
-                               # + JSON batch register/unregister/
-                               # is_registered (one read-modify-write
-                               # per install) + render_plugin_template
-                               # (BEGIN/END marker splice for the
-                               # canonical taxonomy partial)
-      claude_code.py           # ~/.claude/settings.json; shares the
-                               # nudge template with codex
-      codex.py                 # ~/.codex/hooks.json; codex_hooks
-                               # feature flag is Stage::Stable +
-                               # default_enabled in codex-rs/features
-      hermes.py                # ~/.hermes/config.yaml YAML
-                               # pre_llm_call + post_llm_call;
-                               # surgical text-edit merge — ruamel
-                               # parses for line/col marks, edits
-                               # apply as text splices on the original
-                               # file (never yaml.dump). Dedup is
-                               # structural (entry's command field
-                               # equals our hook path).
-      opencode.py              # ~/.config/opencode/plugins/llmoji.ts;
-                               # auto-loaded by opencode (file
-                               # presence == registered, no settings
-                               # edit). Plugin handles the per-turn
-                               # nudge inline via
-                               # experimental.chat.system.transform.
-      openclaw.py              # ~/.openclaw/plugins/llmoji-kaomoji/
-                               # bundle (index.ts + plugin.json);
-                               # install also flips
-                               # plugins.entries.llmoji-kaomoji.hooks
-                               # .allowConversationAccess = true in
-                               # ~/.openclaw/config.json. Subagent
-                               # filtering is honest here (TS plugin
-                               # tracks subagent_spawned/_ended).
-    _plugins/
-      _kaomoji_taxonomy.ts.partial  # canonical TS port of the kaomoji
-                                    # validator + leadingBracketSpan
-                                    # + NUDGE; spliced into both TS
-                                    # plugin templates at install time
-                                    # via render_plugin_template
-      opencode.ts.tmpl              # opencode plugin (single .ts file)
-      openclaw_index.ts.tmpl        # openclaw bundle's index.ts
-      openclaw_plugin.json.tmpl     # openclaw bundle's plugin.json
-                                    # (id, name, version stamped at
-                                    # render time)
-    _hooks/
-      claude_code.sh.tmpl
-      codex.sh.tmpl
-      hermes.sh.tmpl                # post_llm_call (journal logger)
-      _kaomoji_validate.sh.partial  # inlined as ${KAOMOJI_VALIDATE}
-      _journal_write.sh.partial     # inlined as ${JOURNAL_WRITE}
-      claude_codex_nudge.sh.tmpl    # UserPromptSubmit nudge —
-                                    # byte-identical envelope, one
-                                    # template for both
-      hermes_nudge.sh.tmpl          # pre_llm_call nudge (bare
-                                    # {context: ...} shape)
-    paths.py                   # ~/.llmoji home, cache, bundle,
-                               # journals, .salt (per-machine
-                               # submission salt; flat 64-hex-char
-                               # file, replaces the pre-1.1.x JSON
-                               # envelope at state.json). NOT an
-                               # install registry — install state is
-                               # read live from each harness's
-                               # settings file by HookInstaller.status().
-    analyze.py                 # Stage A + B + bundle write. Buckets
-                               # by (source_model, canonical) where
-                               # source_model = ScrapeRow.model or
-                               # falls back to ScrapeRow.source. Stage A
-                               # dispatches on a ThreadPoolExecutor
-                               # (default 1 worker, $LLMOJI_CONCURRENCY);
-                               # cache appends happen on the main thread
-                               # as each future succeeds (immediate flush,
-                               # no deferred batch), so a mid-wave failure
-                               # raises AnalyzeError with the cache already
-                               # flushed for cells that succeeded — re-run
-                               # to resume. Clears bundle of all top-level
-                               # files AND any subdirs before writing.
-    upload.py                  # tar + HF / email targets;
-                               # BUNDLE_TOPLEVEL_ALLOWLIST +
-                               # BUNDLE_DATA_SUFFIX enforce the flat
-                               # shape. submitter_id() is public so
-                               # analyze can stamp the manifest.
-                               # HF target is two-token: user HF
-                               # token for whoami proof-of-life only,
-                               # decrypted shared credential for the
-                               # actual upload_folder call.
-    _shared_token.py           # encrypted shared HF submission
-                               # credential + PBKDF2/HMAC-keystream
-                               # cipher (stdlib only). encrypt_for_
-                               # release() builds the blob at
-                               # release time; decrypt_with_password()
-                               # resolves it at upload time.
-    cli.py                     # argparse entry, [project.scripts]
-                               # llmoji. analyze takes
-                               # --backend/--base-url/--model with env
-                               # fallbacks; validates that local
-                               # needs both --base-url and --model and
-                               # that anthropic/openai accept neither.
-  tests/
-    test_public_surface.py     # cross-corpus invariant contract
-    test_canonicalize.py       # parametrized rule-by-rule regression
-                               # (~70 cases)
-    test_chatgpt_export.py     # chatgpt tree-walker fixtures
-    test_pipeline_parity.py    # bash live hook vs Python backfill on
-                               # synthetic transcripts (claude_code +
-                               # codex full parity, hermes excludes cwd
-                               # via _HERMES_PARITY_FIELDS)
+    __init__.py          # public surface re-exports
+    _util.py             # atomic_write_text, write_json,
+                         # package_version, journal_line_dict,
+                         # sanitize_model_id_for_path,
+                         # iter_bundle_data_files
+    taxonomy.py          # KAOMOJI_START_CHARS, is_kaomoji_candidate,
+                         # _looks_like_bare_kaomoji (Path B),
+                         # extract, KaomojiMatch (span-only),
+                         # canonicalize_kaomoji (rules A–P; frozen)
+    synth_prompts.py     # locked cross-corpus prompts +
+                         # DEFAULT_*_MODEL_ID + nudge messages
+    synth.py             # mask_kaomoji + cache helpers + Synthesizer
+                         # base + Anthropic/OpenAI/Local backends
+    scrape.py            # ScrapeRow + iter_all chain helper
+    sources/             # static-export readers (claude.ai, chatgpt,
+                         # gemini, openhands, generic journal); all
+                         # route through _common.kaomoji_lead_strip
+    backfill.py          # transcript→journal replays for claude_code
+                         # + codex + hermes; parity-tested. Hybrid
+                         # extraction mirrors shell hook (see
+                         # "Round-6 Path B" gotcha)
+    providers/           # base.py (HookInstaller +
+                         # JsonSettingsHookInstaller +
+                         # PluginInstaller + ProviderStatus +
+                         # SettingsCorruptError + render helpers)
+                         # plus claude_code / codex / hermes /
+                         # opencode / openclaw concrete subclasses
+    _hooks/              # bash templates per harness +
+                         # _kaomoji_validate.sh.partial (validator)
+                         # + _journal_write.sh.partial +
+                         # claude_codex_nudge.sh.tmpl (shared
+                         # UserPromptSubmit) + hermes_nudge.sh.tmpl
+                         # (bare {context: ...} shape)
+    _plugins/            # TS plugin templates +
+                         # _kaomoji_taxonomy.ts.partial (canonical
+                         # TS port of validator + Path B; spliced
+                         # via render_plugin_template,
+                         # byte-asserted by
+                         # test_plugin_taxonomy_block_matches)
+    paths.py             # ~/.llmoji home, cache, bundle, journals,
+                         # .salt (per-machine submission token).
+                         # NOT an install registry — install state
+                         # is read live from each harness's settings.
+    analyze.py           # Stage A + B + bundle write
+    upload.py            # tar + HF / email targets
+    _shared_token.py     # encrypted shared HF credential
+                         # (PBKDF2/HMAC-keystream, stdlib only)
+    cli.py               # argparse entry, [project.scripts] llmoji
+  tests/                 # public_surface, canonicalize (~70 cases),
+                         # pipeline_parity (bash-vs-Python), import,
+                         # status_extended, soft_install,
+                         # install_autodetect, source-export readers,
+                         # upload_proof_of_life
 ```
 
 ## Gotchas
 
 ### Journal-row contract: `assistant_text` never carries the kaomoji
 
-Every source — bash hooks, Claude.ai export, ChatGPT export,
-generic-JSONL contract — must persist `assistant_text` with the
-leading kaomoji already stripped. The prefix lives separately in the
-row's `kaomoji` field. Bash hooks enforce via jq's
-`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")`; the two
+Every source — bash hooks, static exports, generic-JSONL contract —
+must persist `assistant_text` with the leading kaomoji already
+stripped. The prefix lives separately in the row's `kaomoji` field.
+Bash hooks enforce via jq's
+`sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")`;
 static-export readers route through
-`llmoji.sources._common.kaomoji_lead_strip`, which wraps
-`taxonomy.extract` and returns `(first_word, body)`. Future export
-readers should reach for the shared helper rather than
-re-implementing the dance — drift between sources is what the helper
-exists to prevent.
+`llmoji.sources._common.kaomoji_lead_strip`. Future readers should
+use the shared helper rather than re-implementing it.
 
-`mask_kaomoji` consequently has a single branch: prepend `"[FACE] "`
-to whatever's there. No source-shape dispatch. If you add a new
-source, strip on the way in — don't push the special case into
-`mask_kaomoji`.
+`mask_kaomoji` consequently has a single branch: prepend `"[FACE] "`.
+No source-shape dispatch.
 
 ### KAOMOJI_START_CHARS — single source of truth
 
@@ -610,26 +370,18 @@ Python: `llmoji.taxonomy.KAOMOJI_START_CHARS`. Shell:
 filter handles the shell-side first pass. If you find another copy
 of the set, delete it and route through `llmoji.taxonomy`.
 
-`is_kaomoji_candidate` enforces: length 2..32, no ASCII backslash
-(except at position 0 — wing-hand `\(^o^)/`), no run of 4+ ASCII
-letters, AND either Path A (first char in `KAOMOJI_START_CHARS`) OR
-Path B (matches `_looks_like_bare_kaomoji` shape — round-6 bare
-kaomoji like `*_*`, `T-T`, `^_^`, `>_<`, `:)`, `XD`). Bracket-
-balance is *not* enforced — real corpus output is sometimes
-unbalanced (closing glyph isn't strictly the matching bracket), and
-the length cap + 4-letter-run + backslash filters together carry
-the prose-rejection role. `_leading_bracket_span` still uses depth-
-walking to *locate* the closing bracket on bracket-leading inputs,
-but falls back to a whitespace-delimited word (capped at the length
-limit) when the depth-walker doesn't close cleanly.
+`_leading_bracket_span` uses depth-walking to locate the closing
+bracket on bracket-leading inputs, falling back to a whitespace-
+delimited word when the depth-walker doesn't close cleanly.
 
 ### Round-6 Path B and the Python fallback in shell hooks
 
-Round 6 added bare-kaomoji shape matching to `is_kaomoji_candidate`
-(`_looks_like_bare_kaomoji`). The Python source is the single source
-of truth. The TS plugin partial ports the logic by hand (covered by
-`test_plugin_taxonomy_block_matches`). The shell hooks defer to
-Python via subprocess only when Path A fails:
+Round 6 added `_looks_like_bare_kaomoji` to `is_kaomoji_candidate`,
+catching bare faces (`*_*`, `T-T`, `^_^`, `>_<`, `:)`, `XD`) without
+a leader char. Python is the single source of truth; the TS plugin
+partial ports the logic by hand (covered by
+`test_plugin_taxonomy_block_matches`). Shell hooks defer to Python
+via subprocess only when Path A fails:
 
 ```bash
 case "$KAOMOJI" in
@@ -643,452 +395,287 @@ esac
 ```
 
 `${PYTHON_INTERPRETER}` is `sys.executable` substituted at install
-time so the hook calls the same Python that installed it (and so
-the same `taxonomy.py`). The Python startup cost (~150–200ms) is
-paid only on Path A misses, which under `--soft` are rare because
-the system-prompt nudge tells the model to lead with kaomoji. A
-tool-heavy turn with 10 kaomoji-led messages pays zero Python calls;
-a turn with one prose message and nine kaomoji messages pays one
-Python call.
+time so the hook calls the same Python (and same `taxonomy.py`) the
+user has installed. The Python startup cost (~150–200ms) is paid
+only on Path A misses, which under `--soft` are rare since the
+system-prompt nudge keeps the model leading with kaomoji.
 
-The shell-side extraction is a two-stage hybrid that mirrors what
-`backfill.kaomoji_prefix` does:
+Shell + backfill share a two-stage hybrid extraction:
 
   1. Strip from the first ASCII letter onward. Preserves bracket-
      leading kaomoji with internal whitespace (`(ง •̀_•́)`,
-     `(｡˃ ᵕ ˂)`) which a naive whitespace-split would clip at the
-     first interior space.
+     `(｡˃ ᵕ ˂)`) which a naive whitespace-split would clip.
   2. If stage 1 yields empty (position 0 is itself an ASCII letter),
      fall back to whitespace-split. Catches Path B letter-eye bare
      kaomoji (`T-T`, `XD`, `Q_Q`, `e_e`).
 
-Either stage's output is capped at 32 chars to match
-`_KAOMOJI_MAX_LEN`. Same hybrid in shell (`_kaomoji_validate.sh
-.partial`) and Python (`backfill.kaomoji_prefix`); drift between
-the two is the failure mode `test_pipeline_parity.py` exists to
-catch.
+Both stages cap output at 32 chars to match `_KAOMOJI_MAX_LEN`. Same
+hybrid in `_kaomoji_validate.sh.partial` and `backfill.kaomoji_prefix`;
+drift is what `test_pipeline_parity.py` exists to catch.
 
 ### Per-provider kaomoji capture — N rows per turn
 
-All three providers emit one row per kaomoji-led model message. A
-tool-heavy turn easily writes 5–10 kaomoji-led messages interleaved
-with tool calls.
+All providers emit one row per kaomoji-led model message. A
+tool-heavy turn easily writes 5–10 rows interleaved with tool calls.
 
 - **Claude Code**: each assistant content block (text, tool_use,
-  thinking) is its own top-level transcript JSONL entry. The Stop
-  hook scopes to entries at-or-after the latest real-user message
+  thinking) is its own top-level transcript JSONL entry. Stop hook
+  scopes to entries at-or-after the latest real-user message
   (string content OR text-block array, NOT tool_result), walks every
-  text-bearing non-sidechain entry in that window. Each entry's first
-  text block runs through the kaomoji validator; non-kaomoji entries
-  skip without aborting the walk. `BOUNDARY_TS` query slurps the
-  transcript once; the per-entry walk is `jq -c` streamed line-by-line
-  into a `while read` loop with `SKIP_ACTION=continue`.
+  text-bearing non-sidechain entry. `BOUNDARY_TS` query slurps the
+  transcript once; the per-entry walk is `jq -c` streamed into a
+  `while read` loop with `SKIP_ACTION=continue`.
 - **Codex**: each model message is its own
   `event_msg.agent_message` event with `payload.message` carrying
-  the text and `payload.phase` flagging `"commentary"` (progress) vs
-  `"final_answer"` (closing). The Stop hook finds the latest
-  `turn_context` index in the rollout (current turn boundary),
-  slices forward, walks every agent_message in the slice. `user_text`
-  resolves to the latest non-injected user response_item in the same
-  slice.
-- **Hermes**: walks `extra.conversation_history` (the full message
-  list `post_llm_call` carries), slices from the latest user-role
-  message to the end, emits one row per kaomoji-led non-empty
-  assistant-role message. Tool-only assistant messages (`tool_calls`
-  + empty/null `content`) are skipped naturally — the walker only
-  takes string-typed non-empty content. `conversation_history` is
-  always populated per `hermes-agent/run_agent.py:12492`
-  (`list(messages)`).
+  the text. The Stop hook finds the latest `turn_context` index
+  (current turn boundary), slices forward, walks every
+  `agent_message`. `user_text` resolves to the latest non-injected
+  user response_item in the same slice.
+- **Hermes**: walks `extra.conversation_history` (full message list
+  `post_llm_call` carries), slices from the latest user-role message
+  to end, emits one row per kaomoji-led non-empty assistant message.
+  Tool-only assistant messages (`tool_calls` + empty content) are
+  skipped naturally.
 
 Per-row invariants:
 
 - `user_text` is resolved once per turn — every row from one turn
   carries the same originating prompt.
 - The cache key hashes `(synth_model_id, canonical, user_text,
-  assistant_text)`, so different assistant texts within a turn
-  produce different keys (no collisions).
+  assistant_text)` so different assistant texts within a turn don't
+  collide.
 - Backfills (`backfill_codex` / `backfill_claude_code` /
   `backfill_hermes`) implement the same per-message walk and stay
-  parity-tested against the live hooks via
-  `tests/test_pipeline_parity.py`. `_PARITY_FIELDS` holds row-for-row
-  in chronological order; Hermes uses `_HERMES_PARITY_FIELDS`
-  (excludes `cwd`) because session JSON doesn't persist cwd —
-  backfilled rows carry `""` there by design while the live hook
-  stamps `Path.cwd()` from the agent process.
+  parity-tested via `test_pipeline_parity.py`. Hermes parity uses
+  `_HERMES_PARITY_FIELDS` (excludes `cwd`) because session JSON
+  doesn't persist cwd — backfilled rows carry `""` while the live
+  hook stamps `Path.cwd()`.
 
 ### Nudge hooks — what gives the corpus its size
 
-Each provider ships a tiny **nudge** hook alongside the journal
-logger. The nudge fires before each model turn (UserPromptSubmit on
-Claude/Codex, `pre_llm_call` on Hermes) and injects a fresh "please
-begin your message with a kaomoji that best represents how you feel"
-reminder as additional context. Without it the model drifts away
-from leading kaomoji over a long session.
-
-Response shapes:
+Without the per-turn reminder the model drifts away from leading
+kaomoji over a long session. `--hard` installs a nudge hook; `--soft`
+puts the same wording in the system-prompt doc. Response shapes for
+the hook variant:
 
 - **Claude Code + Codex**: `{"hookSpecificOutput": {"hookEventName":
   "UserPromptSubmit", "additionalContext": "<msg>"}}`. Codex's
   envelope is byte-identical (verified at
-  `codex-rs/hooks/src/events/user_prompt_submit.rs`), so a single
+  `codex-rs/hooks/src/events/user_prompt_submit.rs`) so a single
   shared `claude_codex_nudge.sh.tmpl` serves both. `nudge_message`
   substitutes through `_shell_quote` into a bash single-quoted
-  literal, so embedded apostrophes round-trip.
+  literal.
 - **Hermes**: bare `{"context": "<msg>"}` — no envelope, returned by
-  `pre_llm_call`, "the only hook whose return value is used."
+  `pre_llm_call`, the only hook whose return value is used.
 
-The base `HookInstaller` class exposes the nudge through
-`nudge_hook_template` / `nudge_hook_filename` / `nudge_event` /
-`nudge_message` class attrs and a `has_nudge` predicate. Providers
-that opt in get the nudge written + registered automatically by
-`install`, removed by `uninstall`, reported by `status`. Adding a
-nudge to a future provider is four class-level attrs (and a
-`_is_nudge_registered` override for non-JSON-settings providers).
+The base class exposes the nudge through `nudge_hook_template` /
+`nudge_hook_filename` / `nudge_event` / `nudge_message` class attrs
+and a `has_nudge` predicate. Adding a nudge to a future provider is
+four class-level attrs.
 
 ### Sidechain strategy
 
-- **Claude Code**: drop rows where `isSidechain` is true. Field-flag.
-- **Codex**: no subagent concept. `collaboration_mode` is `"default"`
+- **Claude Code**: drop rows where `isSidechain` is true (field-flag).
+- **Codex**: no subagent concept; `collaboration_mode` is `"default"`
   for every observed turn_context.
 - **Hermes**: **no viable filter on the current payload contract.**
-  `subagent_stop` fires from the parent agent's process with the
-  parent's `session_id` and no child id at all (verified at
+  `subagent_stop` fires from the parent's process with the parent's
+  `session_id` and no child id (verified at
   `hermes-agent/tools/delegate_tool.py:2120-2127`); `post_llm_call`
-  doesn't expose `parent_session_id` either, so neither side carries
-  enough info to filter children from a shell hook. Subagent
-  `post_llm_call` events therefore land in the journal under their
-  own session_ids until upstream gives us either (a) `subagent_stop`
-  carrying the child id, or (b) `post_llm_call` exposing
-  `parent_session_id` / `is_subagent`.
+  doesn't expose `parent_session_id` either. Subagent
+  `post_llm_call` events land under their own session_ids until
+  upstream gives us either `subagent_stop` carrying the child id or
+  `post_llm_call` exposing `parent_session_id` / `is_subagent`.
+- **OpenClaw**: tracks `subagent_spawned` / `subagent_ended` runIds
+  in the TS plugin and drops their `llm_output` rows. Cleaner story
+  than the bash providers ship today.
 
-### HookInstaller.install refuses to clobber existing config
+### HookInstaller.install refuses to clobber
 
-Three corruption paths are explicitly defended:
+Three corruption paths defended:
 
-1. **Malformed `~/.claude/settings.json`** — `_load_json_strict`
-   raises `SettingsCorruptError`; user fixes by hand before
-   `install` will touch it.
-2. **Malformed `~/.codex/hooks.json`** — same defense, same helper.
-   Codex's `codex_hooks` feature flag is `Stage::Stable` +
-   `default_enabled: true`, payload byte-identical to claude_code's,
-   so the JSON helpers are reused.
-3. **Unparseable `~/.hermes/config.yaml`** — ruamel raises
-   `YAMLError` on load; `HermesProvider._read_and_parse` rewraps as
-   `SettingsCorruptError`. Same defense for non-mapping top-level
-   docs (top-level scalar / sequence) and for a populated `hooks:`
-   value that isn't a mapping (e.g. `hooks: [some_string]` or
-   `hooks: enabled`). Pre-1.2.x ALSO refused on any populated
-   top-level `hooks:` mapping, because the marker-fence text
-   surgery couldn't safely merge into existing YAML; 1.2.x makes
-   the merge structural and safe by surgical-editing line ranges
-   that ruamel's `lc.data` marks pin down, so populated mappings
-   no longer refuse.
+1. Malformed `~/.claude/settings.json` — `_load_json_strict` raises
+   `SettingsCorruptError`.
+2. Malformed `~/.codex/hooks.json` — same defense, same helper
+   (Codex's `codex_hooks` payload is byte-identical to Claude
+   Code's, JSON helpers reused).
+3. Unparseable `~/.hermes/config.yaml` — ruamel raises `YAMLError`;
+   `HermesProvider._read_and_parse` rewraps as `SettingsCorruptError`.
+   Same defense for non-mapping top-level docs and for a populated
+   `hooks:` value that isn't a mapping.
 
-In all three cases the user gets a `SettingsCorruptError` with path
-+ reason. Edit the file (move-aside or merge by hand) and re-run.
+User gets path + reason. Edit by hand and re-run.
 
-The non-managed analogue — re-running `install` after already
-installing once — is fully idempotent across all three. JSON-edit
-in claude_code/codex checks for an existing entry with our command
-string and skips. Hermes' merge does the same structural dedup at
-the parsed-YAML object level: an entry whose `command` field equals
-our hook path is recognized as ours and not re-added. Main and nudge
-dedup independently.
+Re-running `install` is idempotent across all three: JSON-edit checks
+for an existing entry with our command string and skips; Hermes'
+merge does the same structural dedup at the parsed-YAML level. Main
+and nudge dedup independently. Settings writes go through
+`atomic_write_text` (tmp + `os.replace`) so SIGINT mid-write leaves
+old or new content, never half. JSON-settings providers batch
+main+nudge edits into a single read-modify-write
+(`_register_json_settings_batch`); Hermes does the same single-pass
+mutate-then-edit.
 
-### Hermes settings.yaml: parsing-only ruamel + surgical text edits
+### Hermes parsing-only ruamel + surgical text edits
 
 ruamel.yaml is used in `HermesProvider` ONLY for parsing — we never
-call `yaml.dump` on the loaded document. The 1.2.x release tried a
-load-mutate-dump approach and shipped a silent-data-corruption bug
-that motivated the rewrite to surgical edits. The story:
-
-PyYAML (which Hermes itself uses to write `~/.hermes/config.yaml`)
-escapes non-ASCII characters by default and uses backslash
+call `yaml.dump`. Background: PyYAML (which Hermes itself uses to
+write `~/.hermes/config.yaml`) escapes non-ASCII and uses backslash
 line-continuations in double-quoted scalars to suppress the space
-that YAML 1.2 fold rules would otherwise insert at a non-whitespace
-wrap boundary. ruamel's `RoundTripDumper` does neither — it emits
-raw Unicode and bare line wraps. So a string PyYAML had wrapped
-at, say, the middle of a kaomoji literal `(◕‿◕)` would round-trip
-through ruamel as `(◕‿◕ )` — one character longer, single ASCII
-space inserted at the fold point. For a config that the user
-hadn't touched. Verified live on `~/.hermes/config.yaml` against
-the `agent.personalities.kawaii` string: PyYAML wrap fell on
-`(◕‿◕\` immediately before `)`, ruamel's no-`\`
-re-emit produced the space-inserted variant on read-back.
+that YAML 1.2 fold rules would insert at non-whitespace wrap
+boundaries. ruamel's `RoundTripDumper` does neither, so a string
+PyYAML wrapped at the middle of a kaomoji literal `(◕‿◕)` round-trips
+through ruamel as `(◕‿◕ )` (one extra space at the wrap point). A
+1-char silent mutation to a personality prompt on a config the user
+didn't edit is the kind of bug that surfaces weeks later as "the AI
+is acting slightly different and I can't repro it."
 
-A 1-char silent mutation to a personality prompt on a config the
-user didn't edit is exactly the class of bug that surfaces weeks
-later as "the AI is acting slightly different and I can't repro
-it". Not a tradeoff worth taking for the auto-merge feature.
-
-The 1.2.1 implementation:
+The current implementation:
 
 1. Read the file as text.
-2. Parse with ruamel to get the document tree, with each
-   `CommentedMap` / `CommentedSeq` carrying `lc.data` line/col
-   marks for every key + item.
-3. Compute per-edit operations as `(insert_at_line, lines_to_insert)`
-   tuples (for `_register`) or `(start, end)` deletion ranges (for
-   `_unregister`), using the marks to find exact line numbers.
-4. Apply the edits as text splices on the original file content.
-   ruamel never serializes; the user's file stays byte-stable
-   everywhere except the lines we explicitly insert or delete.
+2. Parse with ruamel for the document tree + `lc.data` line/col
+   marks.
+3. Compute per-edit operations (insert ranges for `_register`,
+   deletion ranges for `_unregister`) using the marks.
+4. Apply edits as text splices on the original content. ruamel never
+   serializes; the file stays byte-stable everywhere except lines we
+   explicitly insert or delete.
 
-Quirks of ruamel's `lc.data` worth knowing:
+Quirks of `lc.data`:
 
-- For `CommentedMap.lc.data[key]` returns `(key_line, key_col,
-  value_line, value_col)` — the key column is exactly where the
-  key starts, no offset.
-- For `CommentedSeq.lc.data[i]` returns `(item_line, item_col)` —
-  but `item_col` reports the column of the *value content* (after
-  `- `), not the column of the dash. For the standard `- key:
-  value` form, the dash is at `item_col - 2`. `_infer_list_indent`
-  applies the offset; the unregister path applies it when computing
-  `_block_end_excl` for a last-in-list item.
+- `CommentedMap.lc.data[key]` returns
+  `(key_line, key_col, value_line, value_col)` — key column is
+  exactly where the key starts.
+- `CommentedSeq.lc.data[i]` returns `(item_line, item_col)` — but
+  `item_col` reports the column of the *value content* (after `- `),
+  not the dash. For standard `- key: value`, the dash is at
+  `item_col - 2`. `_infer_list_indent` applies the offset.
 
-Surgical-edit rules and refusals:
+Surgical-edit rules:
 
-- **Placeholder shapes** (`hooks: {}`, `hooks: []`, `hooks: ~`,
-  `hooks:` bare) are all functionally "no hooks configured". We
-  replace the placeholder line with a fresh PyYAML-style block.
-  The Hermes default config ships `hooks: {}`.
-- **Populated mappings** are merged into. For each event we either
-  insert a new sub-block at the end of the hooks block, append a
-  list item at the end of an existing event's list, or skip
-  (idempotent dedup by command path).
-- **Indent style is inferred** from the user's existing first
-  sub-key (mapping indent) and first list item (list indent),
-  falling back to PyYAML defaults (mapping=2, list=4) when there's
-  no precedent to copy. Adjacent additions land at the same column
-  as the user's existing entries.
-- **Refused shapes**: top-level `hooks` value that's not a mapping
-  / placeholder (e.g. populated sequence or scalar), flow-style
-  hooks block (`hooks: {pre_llm_call: [...]}`), flow-style bucket
-  for an individual event, empty bucket (`event: []` or bare
-  `event:`). All raise `SettingsCorruptError` with the specific
-  shape called out so the user can fix and retry.
-- **No migration prepass for pre-1.2.x marker-fenced configs.** A
-  config with the old `# >>> llmoji begin (managed) >>>` /
-  `# <<< llmoji end (managed) <<<` markers is structurally a
-  valid YAML doc with a populated `hooks:` block — the new install
-  is idempotent against it (sees our commands present, no-ops),
-  but uninstall removes our entries and the marker comments stay
-  behind dangling at column 0. Verified live: the markers end up
-  adjacent to each other on consecutive lines bracketing nothing,
-  which the user can clean up by hand. Trivial enough not to
-  warrant a regex pre-pass.
-
-Settings writes go through `llmoji._util.atomic_write_text` (tmp
-file + `os.replace`) so a power loss / SIGINT mid-write leaves the
-user's settings file with either the old content or the new — never
-half. The `upload` `.salt` file (per-machine submission token) writes
-the same way. JSON-settings providers also batch their main+nudge
-edits into a single read-modify-write cycle per install (via
-`_register_json_settings_batch`), so a SIGKILL between registering
-the Stop hook and the UserPromptSubmit nudge can't half-install.
-Hermes does the same one-pass mutate-then-dump in `_register`.
+- Placeholder shapes (`hooks: {}`, `hooks: []`, `hooks: ~`,
+  `hooks:` bare) get replaced with a fresh PyYAML-style block.
+- Populated mappings are merged into: insert a new event sub-block
+  at end of hooks block, append a list item at end of an existing
+  event's list, or skip (idempotent dedup by command path).
+- Indent style is inferred from the user's existing first sub-key
+  + first list item, falling back to PyYAML defaults (mapping=2,
+  list=4).
+- Refused shapes (raise `SettingsCorruptError`): top-level `hooks`
+  that's not a mapping/placeholder, flow-style hooks block or
+  bucket, empty bucket (`event: []`).
 
 ### Bundle is allowlisted, not just-ship-everything
 
 Both upload paths enforce the flat allowlist:
 `BUNDLE_TOPLEVEL_ALLOWLIST = ("manifest.json",)` plus
-`BUNDLE_DATA_SUFFIX = ".jsonl"` for the per-source-model data files.
-No subdirs, no symlinks, no other file types.
+`BUNDLE_DATA_SUFFIX = ".jsonl"`. No subdirs, no symlinks, no other
+file types.
 
 - `upload.tar_bundle()` (email target) raises `BundleAllowlistError`
-  if anything else is present.
+  on anything else.
 - `upload.upload_hf()` does the same pre-flight check AND passes
   `allow_patterns=["manifest.json", "*.jsonl"]` to
   `HfApi.upload_folder` as a second line of defense.
 
-`analyze` clears the bundle dir of all top-level files AND all
-subdirs before writing, so a clean run produces exactly the flat
-shape. The three together mean stale per-instance descriptions,
-user-added notes, hidden-state caches, leftover subfolders, etc.
-cannot accidentally leak through `upload`.
+`analyze` clears the bundle dir of all files + subdirs before
+writing. The three together mean stale per-instance descriptions,
+hidden-state caches, leftover subfolders, etc. cannot leak through
+`upload`.
 
-### HF upload: per-submission branch via shared encrypted credential
+### HF upload — per-submission branch + shared encrypted credential
 
 `upload --target hf` pushes `manifest.json` plus each
 `<source-model>.jsonl` as loose files at
 `contributors/<hash>/bundle-<ts>/` via
 `HfApi.upload_folder(..., revision=branch_name, create_pr=False)`
-(single atomic commit on a per-submission branch). The branch
-name is `submission-<contributor[:12]>-<ts>`. The maintainer
-reviews each branch by diff and merges to `main` by hand.
+(single atomic commit on a per-submission branch
+`submission-<contributor[:12]>-<ts>`). The maintainer reviews each
+branch by diff and merges to `main` by hand.
 
-Three keys in play (mirrored in SECURITY.md's user-facing
-explanation):
+Three keys (mirrored in SECURITY.md):
 
-1. **User's HF token** — read once via `huggingface_hub.get_token()`,
-   used for one `HfApi.whoami()` proof-of-life call, discarded
-   immediately. Never authenticates the upload itself; never
-   logged; never written to disk. The user gets a friendly
-   `HFAuthError` with "run `hf auth login`" if no token is
-   configured, or with the whoami exception text wrapped if the
-   Hub rejects the token.
+1. **User's HF token** — read once via
+   `huggingface_hub.get_token()`, used for one `HfApi.whoami()`
+   proof-of-life call, then discarded. Never authenticates the
+   upload itself.
 2. **Upload password** — read from `$LLMOJI_UPLOAD_PASSWORD` or
    prompted via `getpass.getpass`. Posted on the dataset card and
-   on Twitter ([@_a9lim](https://twitter.com/_a9lim)). The
-   password gates decryption of the shared submission credential.
+   on Twitter ([@_a9lim](https://twitter.com/_a9lim)). Gates
+   decryption of the shared submission credential.
 3. **Shared submission HF token** — encrypted under the upload
    password and shipped in `llmoji/_shared_token.py` as
-   `ENCRYPTED_TOKEN_B64` (opaque base64). At runtime,
-   `decrypt_with_password(password)` returns the plaintext token,
-   which is passed as `HfApi(token=...)` for the upload only.
-   Constructed at release time via `encrypt_for_release(token,
-   password)` from the same module.
+   `ENCRYPTED_TOKEN_B64`. `decrypt_with_password(password)` returns
+   the plaintext at runtime. Constructed at release time via
+   `encrypt_for_release(token, password)`.
 
-Encryption design: PBKDF2-SHA256 (200,000 iterations) for the
-KDF, HMAC-SHA256-keystream XOR for the cipher, HMAC-SHA256 for
-integrity (encrypt-then-MAC, constant-time `hmac.compare_digest`).
-Stdlib only; no `cryptography` dep. Layout:
-`base64([16-byte salt][32-byte mac][N-byte ciphertext])`. See the
-module docstring for the full construction; CI smoke tests catch
-the placeholder blob at decrypt time so a release that forgot the
-rotation step bails loudly.
+Encryption: PBKDF2-SHA256 (200,000 iterations) for the KDF,
+HMAC-SHA256-keystream XOR for the cipher, HMAC-SHA256 for integrity
+(encrypt-then-MAC, constant-time `compare_digest`). Stdlib only.
+Layout: `base64([16-byte salt][32-byte mac][N-byte ciphertext])`.
+CI smoke tests catch the placeholder blob at decrypt time so a
+release that forgot the rotation step bails loudly.
 
-Pre-1.2.0 used the user's HF token directly with `create_pr=True`,
-which put the user's HF username on every submission and
-contradicted the privacy claim that submissions can't be traced
-back to a user. The dataset has Discussions and Pull Requests
-DISABLED (HF setting) so pre-1.2.0 clients fail at the API layer
-with a clear error rather than silently leaking the username on a
-PR; this is the enforcement mechanism that forces the upgrade.
+The dataset has Discussions and Pull Requests DISABLED so pre-1.2.0
+clients (which used `create_pr=True` and would have leaked the
+user's HF username) fail at the API layer. Forces the upgrade.
 
-#### Operational checklist (one-time + per-rotation)
-
-One-time setup on the HF side:
-
-1. Disable Discussions and Pull Requests on `a9lim/llmoji`
-   (Settings → "Disabling Discussions / Pull Requests" toggle).
-   This breaks pre-1.2.0 clients cleanly.
-2. Generate a fine-grained HuggingFace token on a9's own account
-   scoped to write on `a9lim/llmoji` only (no user permissions,
-   no other repos). The token name doesn't matter; "llmoji-
-   submission" is the convention. No expiry — rotation cadence
-   is "per release," not time-based, and an expiry would break
-   wheels at random.
-
-A separate `llmoji-submissions` account isn't needed. With fine-
-grained scoping, the blast radius of a leaked credential is the
-same either way (write on this one dataset, nothing else); using
-a9's own account just removes one account to manage and makes
-submission branches authored by `a9lim` directly, which is more
-transparent than an opaque submission identity.
-
-Per-release / per-rotation:
+#### Per-release rotation
 
 ```python
 from llmoji._shared_token import encrypt_for_release, generate_password
-
-password = generate_password()         # ~16-char random urlsafe-base64
+password = generate_password()
 blob = encrypt_for_release("hf_<the_real_token>", password)
-print(f"password: {password}")
-print(f"blob: {blob}")
 ```
 
-Then:
+Paste `blob` into `ENCRYPTED_TOKEN_B64`, bump the package version,
+release, post `password` on the dataset card and Twitter. If
+rotating because of a compromise, revoke the previous fine-grained
+token from a9's HF settings first.
 
-1. Paste `blob` into `ENCRYPTED_TOKEN_B64` in
-   `llmoji/_shared_token.py`.
-2. Bump the package version, release.
-3. Post `password` on the dataset card (top of the README in the
-   HF dataset web UI) and on Twitter at
-   [@_a9lim](https://twitter.com/_a9lim).
-4. If rotating because of a compromise: revoke the previous
-   fine-grained token from a9's HF settings page to invalidate
-   any in-flight stolen-token uses, then generate a new one.
+The HF token is a fine-grained token on a9's account scoped to write
+on `a9lim/llmoji` only, no expiry. A separate submissions account
+isn't needed — fine-grained scoping makes the blast radius identical.
 
-Maintainer review of submission branches:
-
-```bash
-# Fetch the submission branch
-git fetch origin submission-<contributor>-<ts>:submission-<contributor>-<ts>
-git diff main..submission-<contributor>-<ts>
-# If approved:
-git checkout main
-git merge --no-ff submission-<contributor>-<ts>
-git push origin main
-git push origin --delete submission-<contributor>-<ts>
-```
-
-Or use the HF web UI's "merge branch" + "delete branch" buttons.
-Same effect either way.
-
-#### `CommitInfo` unwrap
-
-`upload_folder` returns a `CommitInfo` whose `commit_url`
-attribute points at the submission-branch commit. Older
-huggingface_hub versions returned a bare URL string from
-`upload_folder`; `upload_hf` defensively unwraps both shapes.
-
+`upload_folder` returns a `CommitInfo` whose `commit_url` points at
+the submission-branch commit; older `huggingface_hub` versions
+returned a bare URL string, so `upload_hf` defensively unwraps both.
 The dataset card has a `configs:` YAML pointing at
-`contributors/**/*.jsonl`, which is what the auto-loader needs to
-surface the dataset viewer. The `**` is recursive (matches
-`bundle-<ts>/<model>.jsonl`); the `*.jsonl` suffix matches every
-data file without picking up manifests. Tarballs trigger HF's
-WebDataset auto-detection and break the viewer (WebDataset expects
-shared-prefix archives).
-
-Email target keeps `tar_bundle` because a single attachment is what
-the recipient wants; `~/.llmoji/bundle-<ts>.tar.gz` is now an
-email-only artifact. The mailto: handoff goes through
-`webbrowser.open` (stdlib, cross-platform — works on macOS, Linux,
-and Windows without per-platform `open` / `xdg-open` branching).
-Aborts at the confirm prompt return `submitted=False` honestly,
-with the tarball path included so a scripted caller can still find
-the on-disk artifact.
+`contributors/**/*.jsonl` for the auto-loader; tarballs would
+trigger HF's WebDataset auto-detection and break the viewer, so
+email target keeps `tar_bundle` for the single-attachment shape but
+HF target goes loose-file. `mailto:` handoff goes through
+`webbrowser.open` (stdlib, cross-platform).
 
 ### Hermes payload contract — source-verified
 
-The hermes provider installs **two** hooks:
+The hermes provider installs two hooks under `~/.hermes/agent-hooks/`:
+`post-llm-call.sh` (journal logger) and `pre-llm-call.sh` (nudge,
+under `--hard`). Both registered in `~/.hermes/config.yaml`.
 
-- `~/.hermes/agent-hooks/post-llm-call.sh` — main journal logger
-  (walks `extra.conversation_history`; see "Per-provider kaomoji
-  capture" above).
-- `~/.hermes/agent-hooks/pre-llm-call.sh` — nudge that injects the
-  kaomoji-reminder context via `{context: "<msg>"}`.
-
-Both registered in `~/.hermes/config.yaml` under `hooks:`. Register
-/ unregister apply as surgical text edits on the original file
-(ruamel parses for line/col marks, never serializes) so install
-merges into a populated `hooks:` block without disturbing
-neighbors — see "Hermes settings.yaml: parsing-only ruamel +
-surgical text edits" gotcha for the wrap-corruption story that
-forced the design and the placeholder/refusal/dedup rules.
-Re-running install is idempotent (structural dedup against the
-entry's `command` field); uninstall removes only our entries and
-leaves the user's surrounding hooks (and any in-block comments)
-intact.
-
-The implementation cross-checks the documented [Event Hooks][hermes-hooks]
-contract against the actual source at
-`hermes-agent/agent/shell_hooks.py:_serialize_payload` (top-level
-shape) and `hermes-agent/run_agent.py:12492` (`post_llm_call`
-kwargs: `session_id`, `user_message`, `assistant_response`,
+Cross-checked the documented [Event Hooks][hermes-hooks] contract
+against the source at `hermes-agent/agent/shell_hooks.py
+:_serialize_payload` (top-level shape) and
+`hermes-agent/run_agent.py:12492` (`post_llm_call` kwargs:
+`session_id`, `user_message`, `assistant_response`,
 `conversation_history`, `model`, `platform`). The `extra.*` block
 holds everything except the four reserved top-level keys
 (`tool_name`, `args`, `session_id`, `parent_session_id`); `cwd` is a
-top-level field set to `Path.cwd()` of the agent process at hook
-fire time, NOT under `extra`.
+top-level field, NOT under `extra`.
 
-`extra.user_message` is the original pre-injection user message
-(`original_user_message` at the call site), so
+`extra.user_message` is the original pre-injection user message, so
 `system_injected_prefixes` stays `[]`. If real-traffic inspection
-later shows leaked injection prefixes, populate the list and
-re-render — the bash hook picks the same list up via
-`${INJECTED_PREFIXES_FILTER}`.
+later shows leaked prefixes, populate the list and re-render — the
+bash hook picks it up via `${INJECTED_PREFIXES_FILTER}`.
 
 [hermes-hooks]: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/
 
 ### Cache directory is leakier than the bundle
 
 `~/.llmoji/cache/per_instance.jsonl` holds synthesizer-paraphrased
-descriptions of single user turns, keyed by `(synth_model_id,
-canonical, user_text, assistant_text)`. Each row IS one user-turn
-paraphrase, so for a topic-narrow corpus a singleton row can leak
-specifics of that turn through. Mitigations:
+descriptions of single user turns, keyed by content hash. Each row
+IS one turn paraphrase, so for a topic-narrow corpus a singleton row
+can leak specifics. Mitigations:
 
 - Cache is **never** bundled or shipped. Only the per-canonical-face
   Stage B synthesis lands in the bundle.
@@ -1097,107 +684,82 @@ specifics of that turn through. Mitigations:
   may re-install). `llmoji cache clear` is the explicit wipe.
 
 The bundle is the only thing that leaves the machine; the inspection
-gap (`analyze` prints a per-face preview, `upload` re-prompts) is
-the consent boundary.
+gap is the consent boundary.
 
 ### Codex `transcript_path` carries the rollout JSONL
 
-Used to resolve `user_text` (Codex injects AGENTS.md /
+Used to resolve `user_text`. Codex injects AGENTS.md /
 `<environment_context>` / `<INSTRUCTIONS>` as user-role response_items
 at session start; we walk the rollout to find the latest real user
-turn, dropping those prefixes defensively). `llmoji.backfill`
-mirrors this.
+turn, dropping those prefixes defensively. `llmoji.backfill` mirrors.
 
 ### Generic JSONL contract for unsupported harnesses
 
-Motivated users on harnesses we don't ship a first-class adapter for
-can write directly to `~/.llmoji/journals/<name>.jsonl` against the
-canonical 6-field schema. `llmoji analyze` picks them up
-automatically alongside managed providers' journals. The opencode
-and openclaw TS plugins (under `llmoji._plugins/`) are reference
-implementations of this contract on a TS-plugin host — they're
-first-class as of 1.3 (rendered + installed by `llmoji install
-<name>`), but the rendered TS still walks the same six-field write
-path the generic contract specifies. Porting to a third TS-plugin
-host means copy-paste-adapt one of those two templates and ship a
-new `PluginInstaller` subclass.
+Motivated users on unsupported harnesses can write directly to
+`~/.llmoji/journals/<name>.jsonl` against the canonical 6-field
+schema. `llmoji analyze` picks them up automatically. The opencode
+and openclaw TS plugins are reference implementations of this
+contract on a TS-plugin host. Porting to a third TS-plugin host is
+copy-paste-adapt one of those templates plus a new `PluginInstaller`
+subclass.
 
 ### HF dataset card is a separate hand-maintained surface
 
 The user-facing dataset card at
-https://huggingface.co/datasets/a9lim/llmoji is a separate document
-from anything in this repo. It re-states the bundle schema and
-privacy model in user-facing prose so contributors can decide
-whether to submit before they've ever touched the package README.
+[`a9lim/llmoji`](https://huggingface.co/datasets/a9lim/llmoji) is
+not in this repo. It re-states the bundle schema and privacy model
+in user-facing prose so contributors can decide whether to submit
+before they've ever touched the package README.
 
 Two coupling points:
 
-- **Schema changes need both updates.** Any change to
-  `manifest.json` or `<source-model>.jsonl` field names is a
-  cross-corpus invariant change, so it wants a hand-edit on the HF
-  dataset card so the field-by-field schema documentation doesn't go
-  stale. The card is editable in-place via the HF web UI; the
-  canonical surface lives there, not in this repo.
-- **License split.** The package code is GPL-3.0-or-later; the
-  shared corpus on HF is CC-BY-SA-4.0. `llmoji upload --target hf`
-  contributes a bundle under CC-BY-SA-4.0, and the package README's
-  License section calls this out so contributors aren't surprised.
-  `llmoji-study` is CC-BY-SA-4.0 — research artifact (writeups,
-  figures, analysis pipelines) rather than distributed program, so
-  matching the corpus license keeps derivative work under one
-  consistent set of terms.
+- **Schema changes need both updates.** Any change to `manifest.json`
+  or `<source-model>.jsonl` field names is a cross-corpus invariant
+  change and wants a hand-edit on the dataset card. Editable in the
+  HF web UI.
+- **License split.** Package code is GPL-3.0-or-later; the shared
+  corpus on HF is CC-BY-SA-4.0. `llmoji upload --target hf`
+  contributes a bundle under those terms; the README's License
+  section calls this out. `llmoji-study` is also CC-BY-SA-4.0
+  (research artifact, not distributed program).
 
 ## Conventions
 
 - Single venv at `.venv/`, pip not uv. `pip install -e ../llmoji`
-  during dev; PyPI install at freeze.
-- `main` is branch-protected: PR-only (no direct pushes, including
-  for admins), all four CI jobs (lint / typecheck / test / build)
-  required green, branch up-to-date with main, conversation
-  resolution required, force-push and deletion blocked. Day-to-day
-  work lands on `dev`; merge to main via PR.
+  during dev.
+- `main` is branch-protected: PR-only (no direct pushes), four CI
+  jobs (lint / typecheck / test / build) required green, branch
+  up-to-date, conversation resolution required, force-push and
+  deletion blocked. Day-to-day work lands on `dev`; merge via PR.
 - `~/.llmoji` is the on-disk root for everything the package
-  manages; tests can override via `$LLMOJI_HOME`.
-- Bash hook templates under `llmoji._hooks/` are syntactically
-  validated by `bash -n` in the test suite
-  (`test_hook_templates_render_to_valid_bash_substitutions`) so a
-  template-edit regression fails CI rather than silently inside a
-  user's harness post-install. TS plugin templates under
-  `llmoji._plugins/` aren't bash-validated (no equivalent stdlib
-  parser); the rendered output is asserted to contain expected
-  taxonomy / version stamps via `test_provider_interface` +
-  `test_plugin_taxonomy_block_matches`, and TS-side syntax errors
-  surface at the host harness's plugin-load time. If a future
-  harness needs a third installer flavor (Lua, JS-without-TS, etc.),
-  the pattern is "new sibling base under `providers/base.py` plus
-  templates under a new `_<flavor>/` package data dir" — same as
-  the bash-vs-plugin split that landed in 1.3.
+  manages; tests override via `$LLMOJI_HOME`.
+- Bash hook templates are syntactically validated by `bash -n` in
+  `test_hook_templates_render_to_valid_bash_substitutions`. TS
+  plugin templates aren't bash-validated (no equivalent stdlib
+  parser); rendered output is asserted to contain expected taxonomy
+  via `test_plugin_taxonomy_block_matches`. A future installer
+  flavor (Lua, JS-without-TS) follows the bash-vs-plugin split:
+  new sibling base under `providers/base.py` plus templates under a
+  new `_<flavor>/` package data dir.
 - Stage-A/B synth calls run on a small thread pool (default 1,
-  `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Both
-  Anthropic and OpenAI SDKs use thread-safe httpx clients. Cache
-  writes happen on the main thread inside the `as_completed` loop,
-  immediately after each future succeeds — no deferred batch flush
-  — so a mid-wave failure leaves the cache populated for cells that
-  succeeded before the raise; we collect errors, drain the loop,
-  and raise `AnalyzeError` with a "re-run to resume" message. The
-  user re-runs and pays API cost only for the cells that previously
-  failed. Default 1 because the org-level Haiku rate cap (50 req/min)
-  trips intermittently even at concurrency=2 on multi-hundred-row
-  backfills; the SDK's `max_retries=8` exponential backoff (set
-  explicitly in `AnthropicSynthesizer.__init__` /
-  `OpenAISynthesizer.__init__`, vs the SDK default of 2) recovers
-  but burns wallclock. Bump via `LLMOJI_CONCURRENCY=4+` if your
-  rate-limit tier has the headroom. `descs_by_cell` is still
-  assembled in deterministic walk order so Stage B sees identical
-  numbered descriptions across runs; only the on-disk cache row
-  order is non-deterministic, and that's fine because the cache is
-  hash-keyed (load_cache reads it into a dict).
-  `INSTANCE_SAMPLE_CAP` is 4 — popular faces get capped, rare faces
-  fully sampled. Same value as Eriskii's original Claude-faces work,
-  kept for cross-corpus comparability.
+  `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Cache
+  writes happen on the main thread inside the `as_completed` loop
+  immediately after each future succeeds, so a mid-wave failure
+  leaves the cache populated for cells that succeeded. We collect
+  errors, drain the loop, and raise `AnalyzeError` with a "re-run
+  to resume" message. Default 1 because the org-level Haiku rate
+  cap (50 req/min) trips intermittently at concurrency=2 on
+  multi-hundred-row backfills; the SDK's `max_retries=8` exponential
+  backoff (set explicitly, vs the SDK default of 2) recovers but
+  burns wallclock. Bump if your tier has headroom. `descs_by_cell`
+  is assembled in deterministic walk order so Stage B sees identical
+  numbered descriptions across runs; the on-disk cache row order is
+  non-deterministic and that's fine because the cache is hash-keyed.
+  `INSTANCE_SAMPLE_CAP` is 4 — same value as Eriskii's original
+  Claude-faces work, kept for cross-corpus comparability.
 - Public-API freeze: anything in §"Cross-corpus invariant surface"
   is a cross-corpus invariant; bumping wants a hand-edit on the HF
   dataset card and a flag in the PR body. Internal helpers
-  (`llmoji._util`, leading-underscore names in `llmoji.providers.base`,
-  `llmoji.synth.cache_key`, the synth backend classes, etc.) are
-  free to evolve.
+  (`llmoji._util`, leading-underscore names in
+  `llmoji.providers.base`, `llmoji.synth.cache_key`, the synth
+  backend classes, etc.) are free to evolve.
