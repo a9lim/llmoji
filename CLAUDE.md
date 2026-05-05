@@ -28,9 +28,9 @@ Everything else — embedding, eriskii axis projection, clustering,
 figures — is research-side and lives in `llmoji-study`, which
 `pip install llmoji>=2,<3` and reads our public surface. (v1
 corpus pin was `>=1.1,<2`; the 2.0 sweep broadens
-`KAOMOJI_START_CHARS` and the arm-strip set across five rounds so
-the canonical-form output for many existing kaomoji shifts — see
-"Cross-corpus invariant surface" below.)
+`KAOMOJI_START_CHARS` and the arm-strip set across five rounds AND
+adds a round-6 Path B for bare kaomoji that don't lead with a
+recognized opener — see "Cross-corpus invariant surface" below.)
 
 ## Pipeline
 
@@ -610,16 +610,63 @@ Python: `llmoji.taxonomy.KAOMOJI_START_CHARS`. Shell:
 filter handles the shell-side first pass. If you find another copy
 of the set, delete it and route through `llmoji.taxonomy`.
 
-`is_kaomoji_candidate` enforces: length 2..32, first char in
-`KAOMOJI_START_CHARS`, no ASCII backslash, no run of 4+ ASCII
-letters. Bracket-balance is *not* enforced — real corpus output is
-sometimes unbalanced (closing glyph isn't strictly the matching
-bracket), and the length cap + 4-letter-run + backslash filters
-together carry the prose-rejection role. `_leading_bracket_span`
-still uses depth-walking to *locate* the closing bracket on
-bracket-leading inputs, but falls back to a whitespace-delimited
-word (capped at the length limit) when the depth-walker doesn't
-close cleanly.
+`is_kaomoji_candidate` enforces: length 2..32, no ASCII backslash
+(except at position 0 — wing-hand `\(^o^)/`), no run of 4+ ASCII
+letters, AND either Path A (first char in `KAOMOJI_START_CHARS`) OR
+Path B (matches `_looks_like_bare_kaomoji` shape — round-6 bare
+kaomoji like `*_*`, `T-T`, `^_^`, `>_<`, `:)`, `XD`). Bracket-
+balance is *not* enforced — real corpus output is sometimes
+unbalanced (closing glyph isn't strictly the matching bracket), and
+the length cap + 4-letter-run + backslash filters together carry
+the prose-rejection role. `_leading_bracket_span` still uses depth-
+walking to *locate* the closing bracket on bracket-leading inputs,
+but falls back to a whitespace-delimited word (capped at the length
+limit) when the depth-walker doesn't close cleanly.
+
+### Round-6 Path B and the Python fallback in shell hooks
+
+Round 6 added bare-kaomoji shape matching to `is_kaomoji_candidate`
+(`_looks_like_bare_kaomoji`). The Python source is the single source
+of truth. The TS plugin partial ports the logic by hand (covered by
+`test_plugin_taxonomy_block_matches`). The shell hooks defer to
+Python via subprocess only when Path A fails:
+
+```bash
+case "$KAOMOJI" in
+  $KAOMOJI_START_CASE) ;;            # Path A — fast bash path
+  *)
+    if ! '${PYTHON_INTERPRETER}' -c '...' "$KAOMOJI" ; then
+      ${SKIP_ACTION}
+    fi
+    ;;
+esac
+```
+
+`${PYTHON_INTERPRETER}` is `sys.executable` substituted at install
+time so the hook calls the same Python that installed it (and so
+the same `taxonomy.py`). The Python startup cost (~150–200ms) is
+paid only on Path A misses, which under `--soft` are rare because
+the system-prompt nudge tells the model to lead with kaomoji. A
+tool-heavy turn with 10 kaomoji-led messages pays zero Python calls;
+a turn with one prose message and nine kaomoji messages pays one
+Python call.
+
+The shell-side extraction is a two-stage hybrid that mirrors what
+`backfill.kaomoji_prefix` does:
+
+  1. Strip from the first ASCII letter onward. Preserves bracket-
+     leading kaomoji with internal whitespace (`(ง •̀_•́)`,
+     `(｡˃ ᵕ ˂)`) which a naive whitespace-split would clip at the
+     first interior space.
+  2. If stage 1 yields empty (position 0 is itself an ASCII letter),
+     fall back to whitespace-split. Catches Path B letter-eye bare
+     kaomoji (`T-T`, `XD`, `Q_Q`, `e_e`).
+
+Either stage's output is capped at 32 chars to match
+`_KAOMOJI_MAX_LEN`. Same hybrid in shell (`_kaomoji_validate.sh
+.partial`) and Python (`backfill.kaomoji_prefix`); drift between
+the two is the failure mode `test_pipeline_parity.py` exists to
+catch.
 
 ### Per-provider kaomoji capture — N rows per turn
 

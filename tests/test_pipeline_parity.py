@@ -152,8 +152,19 @@ _CLAUDE_CASES: list[tuple[str, str, str, bool]] = [
     ("backslash escape",     "(\\*_*) tricks",                      "hi",         False),
     ("oversize span",        "(this is a sentence in parens with "
                               "way more than thirty-two chars)",     "hi",        False),
-    ("no leading kaomoji "
-     "char",                 "*_* no opener",                       "hi",         False),
+    # Round-6 bare kaomoji: no leader char from KAOMOJI_START_CHARS,
+    # but match _looks_like_bare_kaomoji shape. Bash defers to Python
+    # for Path B via the ${PYTHON_INTERPRETER} subprocess fallback;
+    # backfill goes through is_kaomoji_candidate directly.
+    ("bare symmetric *_*",   "*_* no opener",                       "hi",         True),
+    ("bare symmetric T-T",   "T-T sad",                              "hi",         True),
+    ("bare symmetric ^_^",   "^_^ happy!",                           "hi",         True),
+    ("bare paired >_<",      ">_< ouch",                             "hi",         True),
+    ("bare 2-char XD",       "XD lol",                               "hi",         True),
+    ("bare western :)",      ":) cool",                              "hi",         True),
+    # Prose-shaped pseudo-bare kaomoji that should still reject.
+    ("prose 2-char OK",      "OK got it",                           "hi",         False),
+    ("prose contraction",    "I'll get it",                         "hi",         False),
 ]
 
 

@@ -44,30 +44,85 @@ function codepoints(s: string): string[] {
   return Array.from(s);
 }
 
-// Port of llmoji.taxonomy.is_kaomoji_candidate. Rules (all must pass):
-//   - length 2..KAOMOJI_MAX_LEN
-//   - first char in KAOMOJI_START_CHARS
-//   - no ASCII backslash AT POSITION >= 1 (markdown-escape artifact);
-//     position 0 is allowed (wing-hand `\(^o^)/` pattern, v2.0)
-//   - no run of 4+ consecutive ASCII letters (prose)
-//   - bracket-balanced across OPEN_BRACKETS / CLOSE_BRACKETS,
-//     regardless of leading char.
+// Bare-kaomoji mouth-glyph regex (round-6 Path B). Mirrors
+// llmoji.taxonomy._BARE_KAOMOJI_MOUTH_RE — used to validate the
+// interior of an EYE-MOUTH-EYE bare kaomoji. Restricted to canonical
+// kaomoji mouth glyphs (ASCII connectors, dashes, CJK presentation
+// forms, geometric shapes); explicitly excludes ASCII letters so
+// prose doesn't validate.
+const BARE_KAOMOJI_MOUTH_RE = /^[_\-.;:~=^|/\\·•°‐-―‥…′-‷‿⁀、。　・ー･＿？︰-﹏▰-◿]+$/u;
+
+// Visually-paired eye glyphs for non-symmetric bare kaomoji like
+// `>_<`, `)_(`, `]_[`. These are eye shapes, NOT bracket delimiters
+// (the OPEN_BRACKETS depth-walker doesn't fire on them).
+const BARE_KAOMOJI_PAIRED_EYES: ReadonlySet<string> = new Set([
+  "><", "<>", ")(", "()", "][", "[]", "}{", "{}",
+]);
+
+// Port of llmoji.taxonomy._looks_like_bare_kaomoji. Catches faces
+// that don't start with a KAOMOJI_START_CHARS leader: symmetric
+// EYE-MOUTH-EYE (`^_^`, `T-T`, `Q_Q`, `*_*`), paired-eye (`>_<`,
+// `)_(`), Western emoticons (`:)`, `:-D`, `;)`), and 2-char closed-
+// eye doubles (`^^`, `vv`, `uu`) plus `XD` style.
+function looksLikeBareKaomoji(s: string): boolean {
+  const chars = codepoints(s);
+  const n = chars.length;
+  if (n < 2) return false;
+
+  // 2-char patterns.
+  if (n === 2) {
+    if (chars[0] === chars[1] && "^vu".includes(chars[0])) return true;
+    if (s.toUpperCase() === "XD") return true;
+    if (":;=8".includes(chars[0]) && ")(DPpOo3<>/\\|*[]".includes(chars[1])) {
+      return true;
+    }
+    return false;
+  }
+
+  // Western emoticon: 3-4 chars, starting with `:`, `;`, `=`, or `8`,
+  // optional 1-char nose, then 1-2 mouth chars.
+  if (n <= 4 && ":;=8".includes(chars[0])) {
+    let rest = chars.slice(1);
+    if (rest.length > 0 && "-^o'".includes(rest[0])) {
+      rest = rest.slice(1);
+    }
+    if (rest.length > 0 && rest.every((c) => ")(DPpOo3<>/\\|*[]".includes(c))) {
+      return true;
+    }
+  }
+
+  // Symmetric / paired-eye EYE-MOUTH-EYE.
+  const interior = chars.slice(1, -1).join("");
+  if (!interior) return false;
+  if (!BARE_KAOMOJI_MOUTH_RE.test(interior)) return false;
+  const first = chars[0];
+  const last = chars[n - 1];
+  // First must NOT be a mouth char (rejects strings of pure mouth
+  // glyphs without distinct eyes, e.g. `___`, `...`).
+  if (BARE_KAOMOJI_MOUTH_RE.test(first)) return false;
+  if (first === last) return true;
+  if (BARE_KAOMOJI_PAIRED_EYES.has(first + last)) return true;
+  return false;
+}
+
+// Port of llmoji.taxonomy.is_kaomoji_candidate. Rules:
+//   Universal (all must pass):
+//     - length 2..KAOMOJI_MAX_LEN
+//     - no ASCII backslash AT POSITION >= 1 (markdown-escape artifact);
+//       position 0 is allowed (wing-hand `\(^o^)/` pattern, v2.0)
+//     - no run of 4+ consecutive ASCII letters (prose)
+//   Path A (existing leader-char path):
+//     - first char in KAOMOJI_START_CHARS
+//   Path B (round-6 bare-kaomoji extension):
+//     - matches looksLikeBareKaomoji shape
 function isKaomojiCandidate(s: string): boolean {
   const chars = codepoints(s);
   if (chars.length < 2 || chars.length > KAOMOJI_MAX_LEN) return false;
-  if (!KAOMOJI_START_CHARS.has(chars[0])) return false;
   if (chars.slice(1).includes("\\")) return false;
   if (LETTER_RUN_RE.test(s)) return false;
-  let depth = 0;
-  for (const c of chars) {
-    if (OPEN_BRACKETS.includes(c)) {
-      depth += 1;
-    } else if (CLOSE_BRACKETS.includes(c)) {
-      depth -= 1;
-      if (depth < 0) return false;
-    }
-  }
-  return depth === 0;
+  if (KAOMOJI_START_CHARS.has(chars[0])) return true;
+  if (looksLikeBareKaomoji(s)) return true;
+  return false;
 }
 
 // Port of llmoji.taxonomy._leading_bracket_span. If the lstripped

@@ -525,6 +525,41 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         ("※(◕‿◕)※",             True),
         # v2.0 round 5 — Oriya cradle pose accepted.
         ("୧(˃ᗨ˂)୨",              True),
+        # v2.0 round 6 — Path B bare kaomoji (no leader char, but
+        # match the EYE-MOUTH-EYE / Western-emoticon shapes).
+        ("*_*",                    True),   # symmetric paired
+        ("^_^",                    True),   # symmetric (^ as eye)
+        ("T-T",                    True),   # symmetric letter-eye
+        ("Q_Q",                    True),
+        (";_;",                    True),
+        ("o_o",                    True),
+        ("0_0",                    True),
+        ("ಥ_ಥ",                    True),   # symmetric Unicode-eye
+        ("T﹏T",                    True),   # CJK presentation form mouth
+        (">_<",                    True),   # paired bracket-eye
+        (">.<",                    True),
+        (")_(",                    True),
+        ("XD",                     True),   # 2-char laugh
+        ("xD",                     True),
+        ("^^",                     True),   # 2-char closed eyes
+        (":)",                     True),   # Western 2-char
+        (":(",                     True),
+        (":D",                     True),
+        (":-)",                    True),   # Western with nose
+        (";-)",                    True),
+        (":-D",                    True),
+        # Round-6 false positives we explicitly reject:
+        ("___",                    False),  # all-mouth, no distinct eyes
+        ("...",                    False),  # all-mouth
+        ("---",                    False),
+        ("OK",                     False),  # 2-char prose
+        ("Hi",                     False),  # 2-char prose
+        ("It's",                   False),  # apostrophe contraction
+        ("I-I",                    True),   # actually catches — `I` is
+                                            # capital letter, `-` is mouth.
+                                            # False positive we accept; the
+                                            # Stage-B synthesizer drops
+                                            # noise faces that don't pool.
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:

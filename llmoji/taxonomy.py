@@ -217,6 +217,117 @@ _KAOMOJI_MAX_LEN = 32
 _LETTER_RUN_RE = re.compile(r"[A-Za-z]{4}")
 
 
+# Bare-kaomoji mouth-glyph set (v2.0 round-6 speculative extension).
+#
+# Used by `_looks_like_bare_kaomoji` to validate the interior of an
+# `EYE MOUTH EYE` candidate that doesn't start with a
+# `KAOMOJI_START_CHARS` leader. Restricted to canonical kaomoji mouth
+# glyphs (ASCII connectors, dashes/punctuation, CJK presentation
+# forms, geometric shapes) — explicitly excludes ASCII letters so
+# prose tokens like "It's" don't validate as bare kaomoji.
+_BARE_KAOMOJI_MOUTH_RE = re.compile(
+    r"["
+    r"_\-.;:~=^|/\\"           # ASCII mouth glyphs
+    r"·•°"      # middle dot, bullet, degree sign
+    r"‐-―"           # various dashes
+    r"‥…′-‷"  # ellipsis variants, primes
+    r"‿⁀"            # undertie, character tie
+    r"、。"            # CJK comma/fullstop
+    r"　・ー･＿？"  # CJK spaces / mid-dots / fullwidth forms
+    r"︰-﹏"           # CJK presentation forms (︵ ︶ ﹏ ﹋ ﹌ ︿ ︶ etc.)
+    r"▰-◿"           # geometric shapes (▽ ◡ ◠ ○ ● ◇ etc.)
+    r"]+"
+)
+
+# Visually-paired eye glyphs for non-symmetric bare kaomoji like `>_<`,
+# `>.<`, `(_)`, `)_(`. Used as eyes (NOT brackets — these don't trigger
+# the `_OPEN_BRACKETS` depth-walker).
+_BARE_KAOMOJI_PAIRED_EYES: frozenset[tuple[str, str]] = frozenset({
+    (">", "<"), ("<", ">"),
+    (")", "("), ("(", ")"),
+    ("]", "["), ("[", "]"),
+    ("}", "{"), ("{", "}"),
+})
+
+
+def _looks_like_bare_kaomoji(s: str) -> bool:
+    """Speculative bare-kaomoji shape match (v2.0 round-6 extension).
+
+    Catches faces that don't start with a `KAOMOJI_START_CHARS` leader:
+      * Symmetric `EYE MOUTH EYE`: ``^_^``, ``T-T``, ``Q_Q``, ``;_;``,
+        ``o_o``, ``O_O``, ``0_0``, ``ಥ_ಥ``, ``ಥ﹏ಥ``, ``T﹏T``,
+        ``e_e``, etc. — same eye on both sides, mouth glyphs in
+        between.
+      * Paired-eye `EYE MOUTH EYE`: ``>_<``, ``>.<``, ``)_(``,
+        ``]_[`` — visually-mirrored bracket eyes (NOT bracket
+        delimiters, just eye shapes).
+      * Western emoticons: ``:)``, ``:(``, ``:D``, ``;)``, ``:P``,
+        ``:3``, ``:O``, ``=)``, ``8)``, ``:-)``, ``:-D``, ``;-)`` —
+        ``:`` ``;`` ``=`` ``8`` eye + optional ``-`` ``^`` ``o``
+        ``'`` nose + ``)`` ``(`` ``D`` ``P`` ``O`` ``o`` ``3``
+        ``<`` ``>`` ``/`` ``\\`` ``|`` ``*`` ``[`` ``]`` mouth.
+      * 2-char closed-eye doubles: ``^^``, ``vv``, ``uu``.
+      * 2-char ``XD``/``xD``/``xd`` style.
+
+    Length / backslash / 4-letter-run filters are applied by the
+    caller (`is_kaomoji_candidate`); this function focuses on the
+    structural shape.
+
+    "Speculative" framing: the goal is to surface bare-kaomoji
+    affective output from models whose register strips the
+    parenthesizing wrapper (e.g. granite emitting ``ಥ﹏ಥ`` for
+    every grief prompt). False positives are tolerated when the
+    shape is unambiguous; the length cap and letter-run filter
+    upstream limit damage from prose collisions.
+    """
+    n = len(s)
+    if n < 2:
+        return False
+
+    # 2-char patterns: closed-eye doubles + Western 2-char emoticons.
+    if n == 2:
+        if s[0] == s[1] and s[0] in "^vu":
+            return True
+        if s.upper() == "XD":
+            return True
+        if s[0] in ":;=8" and s[1] in ")(DPpOo3<>/\\|*[]":
+            return True
+        return False
+
+    # Western emoticon: 3-4 chars starting with ``:``/``;``/``=``/``8``,
+    # optional 1-char nose, then 1-2 mouth chars.
+    if n <= 4 and s[0] in ":;=8":
+        rest = s[1:]
+        if rest and rest[0] in "-^o'":
+            rest = rest[1:]
+        if rest and all(c in ")(DPpOo3<>/\\|*[]" for c in rest):
+            return True
+
+    # Symmetric "EYE MOUTH EYE": 3+ chars, eyes match (or paired
+    # bracket pair), interior is all mouth glyphs.
+    #
+    # The "distinct eye" check rejects strings of pure mouth chars
+    # without distinct eyes (`___`, `...`, `---`) by requiring the
+    # first character not to appear anywhere in the interior. The
+    # earlier "first must not be a mouth char" rule rejected legit
+    # faces like ``^_^`` and ``|_|`` because their eyes (`^`, `|`)
+    # are technically in the mouth set; the in-interior check
+    # accepts those while still rejecting fully-uniform sequences.
+    interior = s[1:-1]
+    if not interior:
+        return False
+    if not _BARE_KAOMOJI_MOUTH_RE.fullmatch(interior):
+        return False
+    first, last = s[0], s[-1]
+    if first in interior:
+        return False
+    if first == last:
+        return True
+    if (first, last) in _BARE_KAOMOJI_PAIRED_EYES:
+        return True
+    return False
+
+
 def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     """Return True iff `s` looks like a real kaomoji prefix.
 
@@ -225,22 +336,33 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     artifacts, and truncated junk that the leading-prefix sed
     pipeline would otherwise let through.
 
-    Rules (all must pass):
-      - length 2..`max_len`
-      - first char ∈ `KAOMOJI_START_CHARS`
-      - no ASCII backslash *except* at position 0 — backslash at
-        position 0 is the wing-hand pattern (``\\(^o^)/``), backslash
-        anywhere else is a markdown-escape artifact (e.g.
-        ``(\\*´∀｀\\*)`` came from a model emitting a literal ``\\*``
-        that it treated as Markdown escape).
-      - no run of 4+ consecutive ASCII letters (prose)
+    Rules:
+      Universal (all must pass):
+        - length 2..`max_len`
+        - no ASCII backslash *except* at position 0 — backslash at
+          position 0 is the wing-hand pattern (``\\(^o^)/``); backslash
+          anywhere else is a markdown-escape artifact (e.g.
+          ``(\\*´∀｀\\*)`` came from a model emitting a literal ``\\*``
+          that it treated as Markdown escape).
+        - no run of 4+ consecutive ASCII letters (prose)
+      Path A (existing v1.0+/v2.0 leader-char path):
+        - first char ∈ `KAOMOJI_START_CHARS`
+      Path B (v2.0 round-6 speculative bare-kaomoji extension):
+        - matches `_looks_like_bare_kaomoji` shape (symmetric
+          `EYE MOUTH EYE`, paired-eye, or Western emoticon)
 
-    Bracket balance is *not* enforced. Real corpus output is
+    Bracket balance is *not* enforced (Path A). Real corpus output is
     sometimes unbalanced — variant kaomoji where the closing glyph
     isn't strictly the matching bracket — and the previous balance
     check over-rejected valid entries. The length cap, the
     4-letter-run rule, and the backslash filter together carry the
     prose-rejection role.
+
+    v2.0 round-6 (Path B): added bare-kaomoji shape detection so
+    models whose register strips the parenthesizing wrapper (e.g.
+    granite emitting bare ``ಥ﹏ಥ`` for grief prompts) surface their
+    affective output through `extract`. See
+    `_looks_like_bare_kaomoji` for the shape rules.
 
     v2.0 (was: ``"\\\\" in s``): backslash filter relaxed to allow a
     leading wing. v1 rejected ``\\(^o^)/`` along with the markdown
@@ -249,13 +371,15 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
     """
     if not (2 <= len(s) <= max_len):
         return False
-    if s[0] not in KAOMOJI_START_CHARS:
-        return False
     if "\\" in s[1:]:
         return False
     if _LETTER_RUN_RE.search(s):
         return False
-    return True
+    if s[0] in KAOMOJI_START_CHARS:
+        return True
+    if _looks_like_bare_kaomoji(s):
+        return True
+    return False
 
 
 @dataclass(frozen=True)

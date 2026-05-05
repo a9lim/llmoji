@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -392,6 +393,12 @@ class HookInstaller:
         kaomoji_validate = Template(validate_partial).safe_substitute(
             KAOMOJI_START_CASE=render_kaomoji_start_chars_case(),
             SKIP_ACTION=self.skip_action,
+            # Absolute path to the Python interpreter that's
+            # installing the hook. Used by the Path B (round-6 bare-
+            # kaomoji) fallback so the hook calls the same taxonomy.py
+            # the user has installed, not whatever ``python3`` happens
+            # to be on PATH at hook fire time.
+            PYTHON_INTERPRETER=sys.executable,
         )
         journal_write = Template(journal_partial).safe_substitute(
             JOURNAL_PATH=journal_path,
