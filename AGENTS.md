@@ -275,10 +275,14 @@ llmoji status [--stats] [--top N] [--provider N] [--json]
                           frequency tables + row schema validation.
 llmoji parse --provider <n> P
                           ingest a static export dump into
-                          ~/.llmoji/journals/. Sources: claude.ai,
-                          chatgpt (both via conversations.json),
-                          gemini (AI Studio chunkedPrompt or Takeout
-                          MyActivity), openhands (per-event JSON).
+                          ~/.llmoji/journals/. Sources: claude.ai
+                          (combined conversations.json), claude.ai-
+                          alternate (per-conversation .json files +
+                          export_summary.json sibling; carries
+                          top-level model field), chatgpt
+                          (conversations.json), gemini (AI Studio
+                          chunkedPrompt or Takeout MyActivity),
+                          openhands (per-event JSON).
 llmoji import [<provider>] [--since <ISO>] [--dry-run] [--yes]
                           replay native session/transcript files into
                           the live journal. Dedup-aware merge against
@@ -331,9 +335,10 @@ llmoji/
     synth.py             # mask_kaomoji + cache helpers + Synthesizer
                          # base + Anthropic/OpenAI/Local backends
     scrape.py            # ScrapeRow + iter_all chain helper
-    sources/             # static-export readers (claude.ai, chatgpt,
-                         # gemini, openhands, generic journal); all
-                         # route through _common.kaomoji_lead_strip
+    sources/             # static-export readers (claude.ai +
+                         # claude.ai-alternate, chatgpt, gemini,
+                         # openhands, generic journal); all route
+                         # through _common.kaomoji_lead_strip
     backfill.py          # transcript→journal replays for claude_code
                          # + codex + hermes; parity-tested. Hybrid
                          # extraction mirrors shell hook (see
