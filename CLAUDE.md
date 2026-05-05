@@ -132,7 +132,16 @@ and update the HF dataset card to match.
     doubles (`ㅠㅠ`, `ㅜㅜ`), and the `XD`-style extension to
     `[xX][DPpOo3]` (catches `xP`, `X3`). Round 8 added `つ` to the
     arm-strip sets so the offering-hands gesture `(つface)つ`
-    canonicalizes to the bare face.
+    canonicalizes to the bare face. Round 9 broadened in three small
+    directions: `ヮ` (KATAKANA SMALL WA) and `〜` (WAVE DASH) joined
+    the Path B mouth class for bare `^ヮ^` / `T〜T`; U+FE00–U+FE0F
+    variation selectors joined the rule-A invisibles so emoji-vs-text
+    presentation forms (`♥️` / `♥︎`) collapse to bare `♥`; and `づ`
+    (HIRAGANA ZU) joined both arm-strip sets as the voiced cousin of
+    round-8 `つ` for `(づface)づ`. Plus four more typo-sub folds:
+    `〜→~`, `［→[`, `］→]`, `｜→|` (the last three are FF0x/FF1x
+    halfwidth/fullwidth-pair fills, the first is a parallel ASCII-fold
+    for the wave-dash glyph).
   - Round-7 false-alarm guards: an all-ASCII-alpha reject in the
     symmetric branch (rejects `lol` / `mom` / `pop` / `awa` /
     palindrome prose), an explicit `_UWU_FACES` allow-set so
@@ -157,7 +166,8 @@ and update the HF dataset card to match.
     decorators, plus round-5 flower / heart-variant / star-variant /
     quarter-note / flex / strong-feel / tortoise-shell /
     reference-mark / Oriya cradle decorators, plus round-8 `つ`
-    offering-hands on both arm sets).
+    offering-hands on both arm sets, plus round-9 `づ` voiced-offering
+    on both arm sets).
   - `extract` / `KaomojiMatch` (span-only — affect labels are
     research-side at `llmoji_study.taxonomy_labels`).
   - Bear faces `ʕ•ᴥ•ʔ` / `ʢ◉ᴥ◉ʡ` are special: their bracket pairs go

@@ -44,11 +44,17 @@ function codepoints(s: string): string[] {
   return Array.from(s);
 }
 
-// Bare-kaomoji mouth-glyph regex (round-6 + round-7 Path B). Mirrors
-// llmoji.taxonomy._BARE_KAOMOJI_MOUTH_RE. Round-7 added `ω` (Greek
-// omega — the canonical "cute / cat mouth"), `oOwW` (ASCII letter
-// mouths for `^o^`, `OwO`, `\o/`, etc.).
-const BARE_KAOMOJI_MOUTH_RE = /^[_\-.;:~=^|/\\oOwW·•°ω‐-―‥…′-‷‿⁀、。　・ー･＿？︰-﹏▰-◿]+$/u;
+// Bare-kaomoji mouth-glyph regex (round-6 + round-7 + round-9 Path B).
+// Mirrors llmoji.taxonomy._BARE_KAOMOJI_MOUTH_RE. Round-7 added `ω`
+// (Greek omega — the canonical "cute / cat mouth"), `oOwW` (ASCII
+// letter mouths for `^o^`, `OwO`, `\o/`, etc.). Round-9 added `ヮ`
+// (KATAKANA SMALL WA — the cute-mouth katakana counterpart to `ω`,
+// closing the bare-form gap for `^ヮ^` etc.) and `〜` (WAVE DASH,
+// U+301C — wavy-mouth glyph; the Python-side typo-sub fold `〜→~`
+// canonicalizes both forms, but Path B validation runs before
+// canonicalization, so the raw glyph has to live in the bare-mouth
+// class too).
+const BARE_KAOMOJI_MOUTH_RE = /^[_\-.;:~=^|/\\oOwW·•°ωヮ〜‐-―‥…′-‷‿⁀、。　・ー･＿？︰-﹏▰-◿]+$/u;
 
 // Visually-paired eye glyphs for non-symmetric bare kaomoji like
 // `>_<`, `)_(`, `]_[`. Round-7 added the slash pair (`\_/`, `\o/`)

@@ -217,7 +217,8 @@ _KAOMOJI_MAX_LEN = 32
 _LETTER_RUN_RE = re.compile(r"[A-Za-z]{4}")
 
 
-# Bare-kaomoji mouth-glyph set (v2.0 round-6 + round-7 extension).
+# Bare-kaomoji mouth-glyph set (v2.0 round-6 + round-7 + round-9
+# extensions).
 #
 # Used by `_looks_like_bare_kaomoji` to validate the interior of an
 # `EYE MOUTH EYE` candidate that doesn't start with a
@@ -237,12 +238,33 @@ _LETTER_RUN_RE = re.compile(r"[A-Za-z]{4}")
 #     like `awa`, `ewe` matches as a face. The Stage-B synthesizer
 #     pools many instances per face, so noise faces get filtered
 #     statistically.
+# Round-9 additions:
+#   - `ヮ` (U+30EE KATAKANA SMALL WA) — common cute mouth glyph
+#     in `(◕ヮ◕)` / `^ヮ^`. Inside-paren shapes already surfaced via
+#     Path A; the round-9 mouth-set addition closes the bare-form gap.
+#   - `〜` (U+301C WAVE DASH) — wavy-mouth glyph, same affect register
+#     as ASCII `~` (sleepy / "anyway"). The `〜→~` typo-sub fold means
+#     canonicalization collapses both forms, but Path B validation
+#     runs BEFORE canonicalization (it's part of `is_kaomoji_candidate`
+#     called by `extract`), so the raw glyph has to live in the
+#     bare-mouth class too — otherwise `T〜T` would never reach the
+#     canonicalizer.
 _BARE_KAOMOJI_MOUTH_RE = re.compile(
     r"["
     r"_\-.;:~=^|/\\"           # ASCII mouth glyphs
     r"oOwW"                    # round 7: ASCII letter mouths
     r"·•°"                     # middle dot, bullet, degree sign
     r"ω"                       # round 7: Greek omega (cute / cat mouth)
+    r"ヮ"                      # round 9: katakana small wa (`^ヮ^`,
+                                # `OヮO`). Inside-paren shapes already
+                                # worked via Path A; round 9 adds it to
+                                # Path B for bare faces.
+    r"〜"                      # round 9: wave dash (U+301C). Same role
+                                # as ASCII `~` (sleepy / wavy mouth);
+                                # canonicalize folds `〜→~` via _TYPO_SUBS,
+                                # but Path B validation runs BEFORE
+                                # canonicalization, so the bare regex needs
+                                # the raw glyph too.
     r"‐-―"                     # various dashes
     r"‥…′-‷"                   # ellipsis variants, primes
     r"‿⁀"                      # undertie, character tie
@@ -794,6 +816,11 @@ _ARM_OUTSIDE = (
                   # full-width tsu sits outside the close paren.
                   # Pairs with the round-8 `_ARM_INSIDE_LEAD` addition
                   # so both arms strip to the bare face.
+    "づ"         # round 9: voiced offering-arm right (HIRAGANA ZU,
+                  # U+3065). `(づface)づ` is the voiced register of
+                  # the round-8 `つ` shape; same gesture, same strip
+                  # rule. Mirrors the round-9 `_ARM_INSIDE_LEAD`
+                  # addition above.
 )
 # Arm/hand/decoration modifiers that appear OUTSIDE the opening paren.
 # Mirror set to ``_ARM_OUTSIDE`` for the lead halves of the same
@@ -860,12 +887,17 @@ _ARM_OUTSIDE_LEAD = (
 #   (っ˘▽˘ς)  (っ´ω`c)  (*•̀‿•́*)
 _ARM_INSIDE_TRAIL = "ςc*"
 # Arm/hand modifiers that appear just INSIDE the opening paren (leading):
-#   (っ╥﹏╥)  (*•̀‿•́*)  (つ◕‿◕)つ
+#   (っ╥﹏╥)  (*•̀‿•́*)  (つ◕‿◕)つ  (づ◕‿◕)づ
 # Round-8: ``つ`` (full-width tsu) for the offering-hands gesture.
 # The shape is `(つ<face>)つ` — both ends carry the offering arm,
 # inside the open paren AND outside the close paren. Strips to the
 # bare face like the other paired-arm shapes.
-_ARM_INSIDE_LEAD = "っ*つ"
+# Round-9: ``づ`` (HIRAGANA ZU, U+3065) — voiced cousin of ``つ`` in
+# the same offering-hands gesture (``(づ｡◕‿‿◕｡)づ``). Same shape and
+# same role, distinct only in voicing register, so we strip the same
+# way. Outside-trail ``づ`` is symmetrically added to ``_ARM_OUTSIDE``
+# below so both halves of the paired arm collapse.
+_ARM_INSIDE_LEAD = "っ*つづ"
 
 # ``(?<=\))`` lookbehind: trail-arm strips only fire when the run
 # they'd consume is immediately preceded by ``)``. Required by the
@@ -900,9 +932,23 @@ _LEAD_INSIDE_RE = re.compile(rf"^\([{re.escape(_ARM_INSIDE_LEAD)}]+")
 #      broader stripping of combining marks (U+0300–U+036F) would
 #      destroy intentional accent eye glyphs in ``(•̀_•́)``
 #      (U+0300 GRAVE / U+0301 ACUTE).
+#   Round 9 — A extension: U+FE00–U+FE0F VARIATION SELECTOR-1
+#      through VARIATION SELECTOR-16. By Unicode definition these
+#      are presentation hints, not part of the underlying character.
+#      U+FE0F (VS-16) requests emoji presentation and U+FE0E (VS-15)
+#      text presentation; models emit `♥️` (♥ + VS-16) and `♥︎` (♥ +
+#      VS-15) interchangeably with bare `♥` for the same expression.
+#      Dropping the whole range is safe — none of the 16 are visible
+#      glyphs, and no real kaomoji depends on a variation-selector
+#      payload.
 _INVISIBLE_CHARS = (
     "​‌‍⁠﻿؂"  # rule A
     "̴̵̶̷̸̿"               # rule G
+    # Round 9: U+FE00–U+FE0F variation selectors. Built from a range
+    # rather than a literal-string paste because every codepoint in
+    # the block renders as zero-width / fully invisible — pasting
+    # would be impossible to verify by eye.
+    + "".join(chr(cp) for cp in range(0xFE00, 0xFE10))
 )
 
 # Hand-picked typographic / glyph substitutions. Hand-picked over NFKC
@@ -943,6 +989,26 @@ _TYPO_SUBS: tuple[tuple[str, str], ...] = (
     ("～", "~"),   # FULLWIDTH TILDE — current corpus has the mixed
                    # `(~～~;)` form, internally inconsistent; folding
                    # gives `(~~~;)` and prevents future divergence.
+    # Round 9: ASCII-fold parallels for symbols that play the same role
+    # as ASCII glyphs already in the kaomoji vocabulary.
+    ("〜", "~"),   # WAVE DASH (U+301C). Visually wavy like ASCII tilde
+                   # and used in the same sleepy / "anyway" register —
+                   # `(´〜｀)` and `(´~`)` are the same expression. Not
+                   # a halfwidth/fullwidth pair (`～` U+FF5E covers
+                   # that), but the role is identical so we fold to
+                   # the ASCII canonical. Distinct from `￣`
+                   # (FULLWIDTH MACRON, flat) which stays separate per
+                   # the rule-B carve-out.
+    ("［", "["),   # FULLWIDTH LEFT SQUARE BRACKET — symmetry with the
+                   # other halfwidth/fullwidth pairs in this block;
+                   # `[` is a v1.0 leader char, so a `［face］` wrapper
+                   # canonicalizes to the ASCII-bracket form.
+    ("］", "]"),   # FULLWIDTH RIGHT SQUARE BRACKET — paired close.
+    ("｜", "|"),   # FULLWIDTH VERTICAL LINE — appears as the cheek-
+                   # line component in shocked-sigma (`Σ(°△°|||)`)
+                   # and as a closed-eye glyph in `(｜_｜)`. Folds to
+                   # ASCII `|` which already lives in the bare-mouth
+                   # set and `_WESTERN_MOUTHS`.
     # === Quotes: curly -> ASCII straight (rule H) ===
     ("‘", "'"),  # LEFT SINGLE QUOTATION MARK
     ("’", "'"),  # RIGHT SINGLE QUOTATION MARK

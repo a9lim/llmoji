@@ -160,6 +160,19 @@ from llmoji.taxonomy import (
         # strips the arms; extract preserves the raw form).
         ("(つ◕‿◕)つ take this",              "(つ◕‿◕)"),
         ("（つ´∀｀）つ take this fullwidth",   "（つ´∀｀）"),
+        # Round 9: voiced offering-arm `づ` mirrors `つ`; bracket walker
+        # surfaces the paren-balanced span, the trailing `づ` is for
+        # the canonicalizer.
+        ("(づ◕‿◕)づ take this voiced",       "(づ◕‿◕)"),
+        # Round 9: bare wave-dash mouth (Path B). `T〜T` is a sleepy /
+        # sad bare kaomoji; whitespace-split grabs the whole token and
+        # Path B's mouth set has to recognize the raw `〜` (the typo-sub
+        # `〜→~` fold runs in canonicalize, AFTER extract).
+        ("T〜T sleepy",                       "T〜T"),
+        # Round 9: bare katakana-small-wa mouth (Path B). Path A
+        # already handled `(^ヮ^)` via leader; round-9 closes the bare
+        # form by adding `ヮ` to the mouth class.
+        ("^ヮ^ excited",                      "^ヮ^"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -531,6 +544,36 @@ def test_extract_unbalanced_bracket_fallback(
         ("(つ◕‿◕)",               "(◕‿◕)",              "round8-tsu-lead-only"),
         # Trail-only `つ` (offering after the face).
         ("(◕‿◕)つ",                "(◕‿◕)",              "round8-tsu-trail-only"),
+        # === v2.0 round 9 — voiced offering-arm `づ` strip ===
+        # Voiced cousin of round-8 `つ`. Same paired-arm shape, both
+        # halves strip to the bare face.
+        ("(づ◕‿◕)づ",             "(◕‿◕)",              "round9-zu-offer"),
+        ("(づ◕‿◕)",               "(◕‿◕)",              "round9-zu-lead-only"),
+        ("(◕‿◕)づ",                "(◕‿◕)",              "round9-zu-trail-only"),
+        # Round 8 + 9 mixed (lead voiced, trail unvoiced — improbable
+        # but the strip is shape-anchored, so it still collapses).
+        ("(づ◕‿◕)つ",             "(◕‿◕)",              "round9-zu-tsu-mix"),
+        # === v2.0 round 9 — wave-dash → ASCII tilde fold ===
+        # `〜` (U+301C WAVE DASH) and `~` (ASCII TILDE) are the same
+        # sleepy / wavy register; both forms canonicalize identically.
+        ("(´〜｀)",                 "(´~`)",              "round9-wavedash"),
+        ("(〜ω〜)",                 "(~ω~)",              "round9-wavedash-eyes"),
+        # === v2.0 round 9 — fullwidth square brackets → ASCII ===
+        # `［／］` fold to `[`/`]` mirrors the rest of the FF0x/FF1x
+        # block. `[` is a v1.0 leader char — bracket-walked forms now
+        # canonicalize identically across half/full-width paren shapes.
+        ("［◕_◕］",                 "[◕_◕]",             "round9-fw-square"),
+        # === v2.0 round 9 — fullwidth vertical line → ASCII ===
+        # `｜` cheek-line in shocked-sigma collapses to ASCII `|`,
+        # matching the unstyled `Σ(°△°|||)` shape.
+        ("(°△°｜｜｜)",              "(°△°|||)",          "round9-fw-bar"),
+        # === v2.0 round 9 — variation selectors stripped ===
+        # U+FE0F (VS-16, emoji presentation) on a `♥` is presentation
+        # hint only; bare `♥` and `♥` + VS-16 are the same expression.
+        # Test uses `️` literal so the codepoint is unambiguous.
+        ("(♥️‿♥️)",     "(♥‿♥)",              "round9-vs16"),
+        # U+FE0E (VS-15, text presentation) — same fold.
+        ("(♥︎‿♥︎)",     "(♥‿♥)",              "round9-vs15"),
     ],
     ids=lambda v: v if isinstance(v, str) and len(v) < 30 else None,
 )
@@ -734,6 +777,16 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         # v2.0 round 7 — Korean closed-eye doubles (crying).
         ("ㅠㅠ",                    True),
         ("ㅜㅜ",                    True),
+        # v2.0 round 9 — `ヮ` (KATAKANA SMALL WA) as bare-Path-B mouth.
+        ("^ヮ^",                    True),
+        ("OヮO",                    True),
+        ("=ヮ=",                    True),
+        # v2.0 round 9 — `〜` (WAVE DASH) as bare-Path-B mouth. The
+        # candidate is validated BEFORE canonicalization runs the
+        # `〜→~` typo-sub fold, so the raw form has to pass.
+        ("T〜T",                    True),
+        ("^〜^",                    True),
+        ("=〜=",                    True),
         # Round-7 false positives we still reject:
         ("===",                    False),  # all-mouth (= is mouth)
         ("==",                     False),  # 2-char repeated mouth
