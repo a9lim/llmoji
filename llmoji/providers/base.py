@@ -18,8 +18,37 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-from .._util import package_version, write_json
+from .._util import atomic_write_text, package_version, write_json
+from ..synth_prompts import LONG_NUDGE_MESSAGE, SHORT_NUDGE_MESSAGE
 from ..taxonomy import KAOMOJI_START_CHARS
+
+# Soft-doc heading appended ahead of the nudge text in the user's
+# per-harness system-prompt doc (``~/.claude/CLAUDE.md``,
+# ``~/.codex/AGENTS.md``, ``~/.hermes/SOUL.md``,
+# ``~/.config/opencode/AGENTS.md``, ``~/.openclaw/workspace/SOUL.md``).
+# Plain markdown — no comment markers, no fence. Uninstall finds the
+# block by searching for the verbatim string ``"# Kaomoji\n\n<msg>"``
+# against the two canonical wordings (short / long); a hand-edited
+# block falls through and survives uninstall (conservative on the
+# user's prose).
+SOFT_DOC_HEADING = "# Kaomoji"
+
+
+class SoftInstallNotSupportedError(RuntimeError):
+    """Raised by :meth:`HookInstaller.install_soft` when the harness
+    has no canonical system-prompt doc to write into.
+
+    Currently every first-class provider ships a ``system_prompt_doc_path``
+    so this is defensive — kept loud so a future provider that omits
+    one surfaces the gap at install time rather than silently no-op'ing.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(
+            f"provider {name!r} has no system-prompt doc; --soft is "
+            f"not supported for this harness. Use --hard instead."
+        )
+        self.name = name
 
 
 @dataclass
@@ -59,6 +88,21 @@ class ProviderStatus:
     main_hook_current: bool = True
     nudge_hook_current: bool = True
     settings_parse_error: str | None = None
+    # Soft-install state (added in 2.0):
+    #   - ``system_prompt_doc_path`` — where ``--soft`` would write
+    #     (None for harnesses without a doc concept).
+    #   - ``soft_installed`` — marker-fenced block currently present
+    #     in the doc.
+    #   - ``soft_doc_current`` — block content matches what
+    #     ``install_soft`` would write right now (False = stale,
+    #     typically because ``--long`` was toggled without a re-run).
+    # ``installed`` (the rolled-up summary) stays anchored on the
+    # hard install — soft-only installs surface as ``installed=False``
+    # with ``soft_installed=True`` so the CLI can render "soft only"
+    # state distinctly from "fully installed".
+    system_prompt_doc_path: Path | None = None
+    soft_installed: bool = False
+    soft_doc_current: bool = True
 
 
 def _shell_quote(s: str) -> str:
@@ -119,10 +163,17 @@ def _read_plugin_data(name: str) -> str:
     return importlib.resources.files("llmoji._plugins").joinpath(name).read_text()
 
 
-def render_plugin_template(template_name: str) -> str:
+def render_plugin_template(
+    template_name: str,
+    *,
+    nudge_message: str = SHORT_NUDGE_MESSAGE,
+    install_nudge: bool = True,
+) -> str:
     """Render a TS plugin template by splicing the canonical taxonomy
     partial between ``// BEGIN SHARED TAXONOMY`` / ``// END SHARED
-    TAXONOMY`` markers and substituting ``__LLMOJI_VERSION__``.
+    TAXONOMY`` markers, optionally stripping the per-turn nudge hook
+    block between ``// BEGIN NUDGE HOOK`` / ``// END NUDGE HOOK``,
+    and substituting ``__LLMOJI_VERSION__`` + ``__NUDGE_LITERAL__``.
 
     The marker-fence approach (instead of ``string.Template``) is
     deliberate: TS template-literal syntax (``${expr}``) collides
@@ -138,21 +189,76 @@ def render_plugin_template(template_name: str) -> str:
     asserts the rendered output round-trips bit-identically against
     that file so a stale hand-edit in either template is caught at
     CI rather than landing as a quietly-divergent TS port.
+
+    ``install_nudge=False`` is the soft-mode render: the per-turn
+    nudge hook is stripped from the rendered TS so the plugin only
+    captures journal data, and the kaomoji-leading reminder is
+    delivered solely from the system-prompt doc. Without this strip,
+    soft mode for plugin providers would double-nudge (once from
+    the doc, once from the plugin's per-turn hook), which is exactly
+    the framing collapse soft mode was meant to avoid.
+
+    ``nudge_message`` is JSON-escaped (TS string literals share
+    JSON's escape grammar) and substituted at ``__NUDGE_LITERAL__``,
+    which lives OUTSIDE the SHARED TAXONOMY block by design — the
+    partial stays pure taxonomy and the byte-identity test against
+    the partial is unaffected by the short/long pick. Templates that
+    don't reference the placeholder (e.g. ``openclaw.plugin.json``)
+    are unaffected.
     """
     template_text = _read_plugin_data(template_name)
+
+    # Step 1 (optional): strip the nudge hook block in soft mode.
+    if not install_nudge:
+        template_text = _strip_nudge_hook_block(template_text)
+
+    nudge_literal = json.dumps(nudge_message, ensure_ascii=False)
     partial = _read_plugin_data("_kaomoji_taxonomy.ts.partial")
     BEGIN = "// BEGIN SHARED TAXONOMY"
     END = "// END SHARED TAXONOMY"
     if BEGIN not in template_text or END not in template_text:
         # Templates without markers (e.g. the openclaw plugin.json)
-        # only need version substitution.
-        return template_text.replace("__LLMOJI_VERSION__", package_version())
+        # only need the scalar substitutions.
+        return (
+            template_text
+            .replace("__LLMOJI_VERSION__", package_version())
+            .replace("__NUDGE_LITERAL__", nudge_literal)
+        )
     start = template_text.index(BEGIN)
     body_start = template_text.index("\n", start) + 1
     end_idx = template_text.index(END)
     body = partial if partial.endswith("\n") else partial + "\n"
     spliced = template_text[:body_start] + body + template_text[end_idx:]
-    return spliced.replace("__LLMOJI_VERSION__", package_version())
+    return (
+        spliced
+        .replace("__LLMOJI_VERSION__", package_version())
+        .replace("__NUDGE_LITERAL__", nudge_literal)
+    )
+
+
+def _strip_nudge_hook_block(template_text: str) -> str:
+    """Remove every ``// BEGIN NUDGE HOOK`` / ``// END NUDGE HOOK``
+    fence (and its body) from a TS template. Used by
+    :func:`render_plugin_template` in soft mode.
+
+    Templates that don't carry the markers (e.g. ``openclaw.plugin
+    .json``) pass through unchanged. Multiple fences are handled —
+    we loop until no marker remains.
+    """
+    BEGIN = "// BEGIN NUDGE HOOK"
+    END = "// END NUDGE HOOK"
+    while BEGIN in template_text:
+        begin_idx = template_text.index(BEGIN)
+        end_idx = template_text.index(END, begin_idx)
+        # Walk the begin index back to the start of its line so we
+        # remove the leading indent + the BEGIN marker line itself.
+        line_start = template_text.rfind("\n", 0, begin_idx) + 1
+        # Walk forward past the END marker to its trailing newline.
+        line_end = end_idx + len(END)
+        if line_end < len(template_text) and template_text[line_end] == "\n":
+            line_end += 1
+        template_text = template_text[:line_start] + template_text[line_end:]
+    return template_text
 
 
 class HookInstaller:
@@ -192,6 +298,20 @@ class HookInstaller:
     # ``type: ignore`` shuts up pyright's mutable-default warning.
     system_injected_prefixes: list[str] = []  # type: ignore[assignment]
 
+    # Per-harness canonical system-prompt doc — the markdown file the
+    # harness reads as its identity / global instructions on every
+    # session start. ``llmoji install --soft`` writes a marker-fenced
+    # block here; ``llmoji install --hard`` doesn't touch it. ``None``
+    # for harnesses without a doc concept (no first-class provider
+    # currently lacks one — the attr is here to future-proof the
+    # PluginInstaller base for a hypothetical doc-less harness).
+    #
+    # Cross-corpus invariant: bumping a path here means re-installing
+    # users land their --soft block in a new file while their old
+    # block sits orphaned in the old one. Worth a major bump and a
+    # one-shot migration note in the release.
+    system_prompt_doc_path: Path | None = None
+
     # --- nudge hook (optional secondary hook) ---
     #
     # A "nudge" is a fire-before-each-turn hook that injects extra
@@ -204,7 +324,14 @@ class HookInstaller:
     nudge_hook_template: str = ""
     nudge_hook_filename: str = ""
     nudge_event: str = ""
-    nudge_message: str = ""
+    # ``nudge_message`` defaults to the v1 short wording. The CLI
+    # ``--long`` flag swaps the per-instance attribute (instance ≠
+    # class) to :data:`llmoji.synth_prompts.LONG_NUDGE_MESSAGE` before
+    # calling install, so the rendered hook / soft-doc block carries
+    # the v7 introspection framing instead. Per-instance override
+    # keeps subclasses free to set their own class-level default
+    # without the CLI's --long mutation leaking across providers.
+    nudge_message: str = SHORT_NUDGE_MESSAGE
 
     # --- public API ---
 
@@ -297,29 +424,68 @@ class HookInstaller:
             LLMOJI_VERSION=package_version(),
         )
 
-    def install(self) -> None:
-        """Idempotent: write the hook(s), register them in settings,
-        ensure the journal directory exists. Safe to re-run.
+    def install_hard(self) -> None:
+        """Idempotent: write the journal-write hook + the per-turn
+        nudge hook, register both in settings, ensure the journal
+        directory exists. Safe to re-run.
 
-        If the provider has a nudge configured (:attr:`has_nudge`),
-        the nudge hook is written + registered alongside the main
-        hook. The default :meth:`_register` registers both in a single
-        atomic settings-file write.
+        The default :meth:`_register` registers both hooks in a
+        single atomic settings-file write.
+
+        Caller sets :attr:`nudge_message` to the long-prompt variant
+        before calling for ``--long`` mode (instance attr override).
+        """
+        self._write_journal_hook()
+        if self.has_nudge:
+            assert self.nudge_hook_path is not None
+            self.nudge_hook_path.write_text(self.render_nudge_hook())
+            self.nudge_hook_path.chmod(0o755)
+        self._register(include_nudge=True)
+
+    def install_soft(self) -> None:
+        """Idempotent: write the journal-write hook (so kaomoji-led
+        messages still land in the journal in real time) AND append
+        the nudge text to the harness's system-prompt doc.
+
+        Both modes capture journal data — the only difference is
+        where the kaomoji-leading reminder lives:
+
+          - hard: per-turn nudge hook (additional context every turn)
+          - soft: persistent system-prompt doc (CLAUDE.md / AGENTS.md
+            / SOUL.md) — the identity slot, no per-turn injection
+
+        Refuses (loudly) when the provider has no
+        :attr:`system_prompt_doc_path` configured.
+        """
+        if self.system_prompt_doc_path is None:
+            raise SoftInstallNotSupportedError(self.name)
+        self._write_journal_hook()
+        self._register(include_nudge=False)
+        self._write_soft_doc_block(
+            self.system_prompt_doc_path, self.nudge_message,
+        )
+
+    def _write_journal_hook(self) -> None:
+        """Render the journal-write (Stop / post_llm_call) hook +
+        chmod 0o755. Shared by :meth:`install_hard` and
+        :meth:`install_soft`. Ensures the hooks dir + journal dir
+        exist before writing.
         """
         self.hooks_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         self.hook_path.write_text(self.render_hook())
         self.hook_path.chmod(0o755)
-        if self.has_nudge:
-            assert self.nudge_hook_path is not None
-            self.nudge_hook_path.write_text(self.render_nudge_hook())
-            self.nudge_hook_path.chmod(0o755)
-        self._register()
 
     def uninstall(self) -> None:
         """Idempotent: deregister from settings, remove the hook
-        script(s). Leaves the journal in place (the user may want to
-        keep their history)."""
+        script(s) + the soft-doc heading block. Leaves the journal in
+        place (the user may want to keep their history).
+
+        Removes both placement footprints regardless of which mode
+        the user installed under — the verbatim-string match for
+        the soft-doc block is a clean no-op when the user installed
+        ``--hard`` and never edited the doc.
+        """
         self._unregister()
         if self.hook_path.exists():
             self.hook_path.unlink()
@@ -327,6 +493,166 @@ class HookInstaller:
             assert self.nudge_hook_path is not None
             if self.nudge_hook_path.exists():
                 self.nudge_hook_path.unlink()
+        if self.system_prompt_doc_path is not None:
+            self._remove_soft_doc_block(self.system_prompt_doc_path)
+
+    # --- soft-doc helpers ---
+    #
+    # The soft-doc block is a plain markdown heading + body:
+    #
+    #     # Kaomoji
+    #
+    #     <nudge_message>
+    #
+    # appended to EOF with a blank-line separator if the file isn't
+    # empty. No comment markers; uninstall finds the block by exact
+    # string match against the two canonical wordings (short / long).
+    # A hand-edited block falls through and survives uninstall —
+    # conservative on the user's prose. Both writers go through
+    # :func:`llmoji._util.atomic_write_text` so a SIGINT mid-write
+    # leaves the file with either old or new content, never half.
+
+    @staticmethod
+    def _soft_doc_block(message: str) -> str:
+        """Canonical block string for ``message`` — the exact bytes
+        the install path writes and the uninstall path searches for.
+        """
+        return f"{SOFT_DOC_HEADING}\n\n{message}"
+
+    @classmethod
+    def _all_canonical_blocks(cls) -> list[str]:
+        """Every canonical block string we might have written —
+        short and long variants. Uninstall iterates this list to
+        find what to strip."""
+        return [
+            cls._soft_doc_block(SHORT_NUDGE_MESSAGE),
+            cls._soft_doc_block(LONG_NUDGE_MESSAGE),
+        ]
+
+    def _write_soft_doc_block(self, path: Path, message: str) -> None:
+        """Append (or replace, if a canonical block is already there)
+        the kaomoji block in ``path``.
+
+        Idempotent on repeat with the same message. ``--long``
+        toggling: removes any prior canonical block first, then
+        appends the chosen variant fresh.
+        """
+        existing = path.read_text() if path.exists() else ""
+        new_content = self._merge_soft_doc(existing, message)
+        if new_content != existing:
+            atomic_write_text(path, new_content)
+
+    def _remove_soft_doc_block(self, path: Path) -> None:
+        """Remove the canonical soft-doc block from ``path``, if
+        present.
+
+        No-op when the file doesn't exist or neither canonical
+        variant matches verbatim. Collapses the surrounding blank-
+        line separator the install added so the file's spacing
+        returns to what the user had before.
+        """
+        if not path.exists():
+            return
+        existing = path.read_text()
+        new_content = self._strip_soft_doc(existing)
+        if new_content == existing:
+            return
+        if new_content.strip():
+            atomic_write_text(path, new_content)
+        else:
+            # Doc was empty apart from our block — remove the file
+            # entirely so a clean uninstall leaves no trace.
+            path.unlink()
+
+    @classmethod
+    def _merge_soft_doc(cls, existing: str, message: str) -> str:
+        """Pure-function planner for :meth:`_write_soft_doc_block`.
+
+        Two-step: strip any existing canonical block (handles re-
+        install + ``--long`` toggle), then append the fresh block
+        with a blank-line separator.
+        """
+        # Step 1: strip any pre-existing canonical block.
+        cleaned = cls._strip_soft_doc(existing)
+        block = cls._soft_doc_block(message)
+        # Step 2: append.
+        if not cleaned:
+            return block + "\n"
+        if cleaned.endswith("\n\n"):
+            return cleaned + block + "\n"
+        if cleaned.endswith("\n"):
+            return cleaned + "\n" + block + "\n"
+        return cleaned + "\n\n" + block + "\n"
+
+    @classmethod
+    def _strip_soft_doc(cls, existing: str) -> str:
+        """Pure-function planner for :meth:`_remove_soft_doc_block`.
+
+        Searches for either canonical block (short or long variant)
+        verbatim. On match: removes the block + the blank-line
+        separator the install path added before it (if any) + the
+        trailing newline after the block. On no match: returns the
+        input unchanged (conservative — we don't try to remove a
+        hand-edited block).
+        """
+        for block in cls._all_canonical_blocks():
+            idx = existing.find(block)
+            if idx == -1:
+                continue
+            cut_start = idx
+            cut_end = idx + len(block)
+            # Eat the trailing newline after the block.
+            if cut_end < len(existing) and existing[cut_end] == "\n":
+                cut_end += 1
+            # Eat the blank-line separator the install path added
+            # ahead of the block (one newline past the prior content's
+            # trailing newline).
+            if cut_start >= 2 and existing[cut_start - 2:cut_start] == "\n\n":
+                cut_start -= 1
+            return existing[:cut_start] + existing[cut_end:]
+        return existing
+
+    def _is_soft_doc_current(self) -> bool:
+        """``True`` iff a canonical short or long block is present
+        verbatim in the configured doc, OR no soft-doc is configured.
+
+        Returns ``False`` only when the heading is present but the
+        body has been hand-edited away from both canonical wordings
+        — surfaces as ``stale`` in :meth:`status`, prompting a
+        re-install.
+        """
+        if self.system_prompt_doc_path is None:
+            return True
+        if not self.system_prompt_doc_path.exists():
+            return True  # no install attempted yet
+        try:
+            text = self.system_prompt_doc_path.read_text()
+        except OSError:
+            return False
+        if SOFT_DOC_HEADING not in text:
+            return True  # no block present at all — not "stale"
+        return any(
+            block in text for block in self._all_canonical_blocks()
+        )
+
+    def _is_soft_doc_installed(self) -> bool:
+        """``True`` iff a canonical block is present verbatim in the
+        configured system-prompt doc. A hand-edited block (heading
+        present, body diverged) reads as ``installed=False`` here —
+        we won't claim ownership of something that doesn't match
+        what we'd write.
+        """
+        if self.system_prompt_doc_path is None:
+            return False
+        if not self.system_prompt_doc_path.exists():
+            return False
+        try:
+            text = self.system_prompt_doc_path.read_text()
+        except OSError:
+            return False
+        return any(
+            block in text for block in self._all_canonical_blocks()
+        )
 
     def status(self) -> ProviderStatus:
         # ``_check_registrations`` reads the settings file once and
@@ -368,6 +694,13 @@ class HookInstaller:
         else:
             nudge_hook_current = True
         settings_parse_error = self._check_settings_health()
+        soft_installed = self._is_soft_doc_installed()
+        # Always check current — _is_soft_doc_current returns True
+        # when no heading is present, but False when the heading is
+        # there but no canonical body matches (the "hand-edited
+        # block" case). That surfaces in status even when
+        # soft_installed=False, so the user sees their orphan edit.
+        soft_doc_current = self._is_soft_doc_current()
         return ProviderStatus(
             name=self.name,
             installed=installed,
@@ -382,6 +715,9 @@ class HookInstaller:
             main_hook_current=main_hook_current,
             nudge_hook_current=nudge_hook_current,
             settings_parse_error=settings_parse_error,
+            system_prompt_doc_path=self.system_prompt_doc_path,
+            soft_installed=soft_installed,
+            soft_doc_current=soft_doc_current,
         )
 
     def _is_main_hook_current(self) -> bool:
@@ -424,14 +760,17 @@ class HookInstaller:
     # settings file (hermes) override the four ``_register``-family
     # methods entirely.
 
-    def _register(self) -> None:
+    def _register(self, *, include_nudge: bool = True) -> None:
         edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
-        if self.has_nudge:
+        if include_nudge and self.has_nudge:
             assert self.nudge_hook_path is not None
             edits.append((self.nudge_event, self.nudge_hook_path))
         self._register_json_settings_batch(edits)
 
     def _unregister(self) -> None:
+        # Always tries to remove both — idempotent if either is absent
+        # (covers the case where the user installed --soft, which only
+        # registered the main hook, then runs uninstall).
         edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
         if self.has_nudge:
             assert self.nudge_hook_path is not None
@@ -686,10 +1025,10 @@ class PluginInstaller(HookInstaller):
     nudge_hook_template: str = ""
     nudge_hook_filename: str = ""
     nudge_event: str = ""
-    nudge_message: str = (
-        "Please begin your message with a kaomoji that best represents "
-        "how you feel."
-    )
+    # Inherit the same SHORT_NUDGE_MESSAGE default the bash base uses;
+    # the rendered plugin's ``__NUDGE_LITERAL__`` placeholder reads
+    # this attr (per-instance override on --long).
+    nudge_message: str = SHORT_NUDGE_MESSAGE
 
     # --- plugin-specific surface (subclass populates) ---
     #
@@ -744,22 +1083,39 @@ class PluginInstaller(HookInstaller):
 
     # --- rendering ---
 
+    # Per-instance flag set by :meth:`install_soft` so the rendered
+    # plugin file omits the per-turn nudge hook. Default True (the
+    # historical render path used by ``status()`` for staleness
+    # detection — until the install method overrides it, the on-disk
+    # file should match the hard-mode render).
+    install_nudge: bool = True
+
     def render_hook(self) -> str:
         """Render the primary plugin file (the one at :attr:`hook_path`).
 
         :class:`HookInstaller.status` calls this to detect a stale
         on-disk file (``main_hook_current``); reusing the same name
         keeps the staleness check uniform across installer kinds.
+        Honors :attr:`install_nudge` so a soft-installed plugin
+        compares against its nudge-stripped render.
         """
         if not self.plugin_files:
             return ""
         template_name, _ = self.plugin_files[0]
-        return render_plugin_template(template_name)
+        return render_plugin_template(
+            template_name,
+            nudge_message=self.nudge_message,
+            install_nudge=self.install_nudge,
+        )
 
     def render_plugin_file(self, template_name: str) -> str:
         """Render any plugin file by template name. Used by multi-file
         bundles (openclaw's index.ts + plugin.json)."""
-        return render_plugin_template(template_name)
+        return render_plugin_template(
+            template_name,
+            nudge_message=self.nudge_message,
+            install_nudge=self.install_nudge,
+        )
 
     def render_nudge_hook(self) -> str:  # pragma: no cover — has_nudge False
         raise RuntimeError(
@@ -768,25 +1124,57 @@ class PluginInstaller(HookInstaller):
 
     # --- install / uninstall lifecycle ---
 
-    def install(self) -> None:
-        """Idempotent: write every plugin file, register if the host
-        needs an explicit toggle, ensure the journal directory exists.
+    def install_hard(self) -> None:
+        """Idempotent: write every plugin file (with the per-turn
+        nudge hook included), register if the host needs an explicit
+        toggle, ensure the journal directory exists.
 
         File writes are simple ``write_text`` with mode 0o644 — these
         are TS / JSON files the host harness loads, not executables.
+
+        Renamed from ``install`` in 2.0 to mirror
+        :meth:`HookInstaller.install_hard`. Caller sets
+        :attr:`nudge_message` for ``--long`` mode.
         """
+        self.install_nudge = True
+        self._write_plugin_files()
+        self._register(include_nudge=True)
+
+    def install_soft(self) -> None:
+        """Idempotent: write every plugin file with the per-turn
+        nudge hook stripped (so journal capture still happens but
+        the kaomoji-leading reminder doesn't double-fire), register
+        if the host needs an explicit toggle, append the nudge to
+        the system-prompt doc.
+
+        Refuses (loudly) when no :attr:`system_prompt_doc_path` is
+        configured.
+        """
+        if self.system_prompt_doc_path is None:
+            raise SoftInstallNotSupportedError(self.name)
+        self.install_nudge = False
+        self._write_plugin_files()
+        self._register(include_nudge=False)
+        self._write_soft_doc_block(
+            self.system_prompt_doc_path, self.nudge_message,
+        )
+
+    def _write_plugin_files(self) -> None:
+        """Render + write every declared plugin file. Shared by
+        :meth:`install_hard` and :meth:`install_soft`. Honors
+        :attr:`install_nudge`, which the caller sets ahead of time."""
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
         self.journal_path.parent.mkdir(parents=True, exist_ok=True)
         for template_name, dest_filename in self.plugin_files:
             dest = self.plugin_dir / dest_filename
             dest.write_text(self.render_plugin_file(template_name))
-        self._register()
 
     def uninstall(self) -> None:
-        """Idempotent: deregister, remove every plugin file. Leaves
-        the journal in place (mirrors :meth:`HookInstaller.uninstall`)
-        and removes the plugin directory itself when empty so a
-        subsequent install starts clean."""
+        """Idempotent: deregister, remove every plugin file + the
+        soft-doc fenced block. Leaves the journal in place (mirrors
+        :meth:`HookInstaller.uninstall`) and removes the plugin
+        directory itself when empty so a subsequent install starts
+        clean."""
         self._unregister()
         for _, dest_filename in self.plugin_files:
             dest = self.plugin_dir / dest_filename
@@ -799,14 +1187,23 @@ class PluginInstaller(HookInstaller):
             self.plugin_dir.rmdir()
         except OSError:
             pass
+        if self.system_prompt_doc_path is not None:
+            self._remove_soft_doc_block(self.system_prompt_doc_path)
 
     # --- status helpers ---
 
-    def _register(self) -> None:
+    def _register(self, *, include_nudge: bool = True) -> None:
         """No-op default — file presence IS registration for harnesses
         that auto-load plugin files (opencode). Subclasses with an
         explicit registration step (openclaw's config flag) override.
+
+        ``include_nudge`` is accepted for signature parity with
+        :class:`HookInstaller._register` but plugin providers don't
+        register nudge hooks separately — the nudge is baked into
+        the plugin file itself, gated by the ``install_nudge`` flag
+        passed to :meth:`render_plugin_file` / :meth:`render_hook`.
         """
+        del include_nudge
         return None
 
     def _unregister(self) -> None:

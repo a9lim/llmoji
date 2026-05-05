@@ -39,6 +39,7 @@ from .sources.gemini_export import iter_gemini_export
 from .sources.journal import iter_journal
 from .sources.openhands_export import iter_openhands_export
 from .synth import cache_size
+from .synth_prompts import LONG_NUDGE_MESSAGE, SHORT_NUDGE_MESSAGE
 from .taxonomy import canonicalize_kaomoji
 
 
@@ -47,34 +48,70 @@ from .taxonomy import canonicalize_kaomoji
 # ---------------------------------------------------------------------------
 
 
-def _print_install_summary(p: HookInstaller, s: ProviderStatus) -> None:
-    """One block of post-install output per provider."""
-    print(f"installed {p.name}.")
+def _print_install_summary(
+    p: HookInstaller,
+    s: ProviderStatus,
+    *,
+    soft: bool,
+) -> None:
+    """One block of post-install output per provider.
+
+    ``soft`` flips the placement label between "soft" (doc append)
+    and "hard" (per-turn nudge hook). The journal-write hook is
+    installed under both modes, so its path is reported in both.
+    """
+    mode_str = "soft" if soft else "hard"
+    print(f"installed {p.name} ({mode_str}).")
     print(f"  hook:     {s.hook_path}")
-    if s.nudge_hook_path is not None:
+    if soft:
+        print(f"  doc:      {s.system_prompt_doc_path}")
+    elif s.nudge_hook_path is not None:
         print(f"  nudge:    {s.nudge_hook_path}")
     print(f"  settings: {s.settings_path}")
     print(f"  journal:  {s.journal_path}")
 
 
-def _install_one(name: str) -> tuple[bool, str | None]:
+def _install_one(
+    name: str, *, soft: bool, long: bool,
+) -> tuple[bool, str | None]:
     """Install a single provider by name. Returns
     ``(succeeded, error_message)``. Used by the autodetect path so
     one corrupt config doesn't take down the rest of the batch.
+
+    ``soft`` picks the placement: True → soft-doc append (no nudge
+    hook); False → hard nudge hook. The journal-write hook is
+    installed under both modes — that's the data-capture invariant.
+    ``long`` swaps the nudge text from ``SHORT_NUDGE_MESSAGE`` (the
+    v1 wording) to ``LONG_NUDGE_MESSAGE`` (the v7 introspection
+    framing).
     """
     p = get_provider(name)
+    # Per-instance attr override — the class default stays SHORT, so
+    # other concurrent provider instances aren't affected.
+    if long:
+        p.nudge_message = LONG_NUDGE_MESSAGE
+    else:
+        p.nudge_message = SHORT_NUDGE_MESSAGE
     try:
-        p.install()
+        if soft:
+            p.install_soft()
+        else:
+            p.install_hard()
     except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
         return False, f"{type(e).__name__}: {e}"
-    _print_install_summary(p, p.status())
+    _print_install_summary(p, p.status(), soft=soft)
     return True, None
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
+    # argparse's mutually_exclusive_group(required=True) on --soft /
+    # --hard already enforces "exactly one" at parse time, so no
+    # re-validation needed here.
+    install_kwargs = {"soft": args.soft, "long": args.long}
+
     # Explicit provider: legacy single-target path.
     if args.provider is not None:
-        ok, err = _install_one(args.provider)
+        ok, err = _install_one(args.provider, **install_kwargs)
         if not ok:
             print(f"install failed for {args.provider}: {err}", file=sys.stderr)
             return 1
@@ -93,12 +130,14 @@ def _cmd_install(args: argparse.Namespace) -> int:
                 for name in PROVIDERS
             )
             + "). install a supported harness, or pass an explicit "
-            "provider name (e.g. `llmoji install claude_code`).",
+            "provider name (e.g. `llmoji install claude_code --hard`).",
             file=sys.stderr,
         )
         return 2
 
-    print("detected harnesses:")
+    mode_label = "soft" if args.soft else "hard"
+    long_suffix = " (long prompt)" if args.long else ""
+    print(f"detected harnesses, will install [{mode_label}]{long_suffix}:")
     for name in detected:
         print(f"  - {name}  ({get_provider(name).settings_path.parent})")
     if not args.yes:
@@ -116,7 +155,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     # Partial success: one corrupt config doesn't kill the rest.
     failures: list[tuple[str, str]] = []
     for name in detected:
-        ok, err = _install_one(name)
+        ok, err = _install_one(name, **install_kwargs)
         if not ok:
             failures.append((name, err or ""))
         print()
@@ -240,21 +279,59 @@ def _validate_journal_row(row: object) -> str | None:
 
 def _provider_health_summary(s: ProviderStatus) -> tuple[str, list[str]]:
     """Return ``(marker, issues)`` where ``marker`` is one of ✓ ⚠ ✗
-    · — corresponding to healthy / stale / broken / not-installed —
-    and ``issues`` is a list of one-liner strings to print under the
-    provider header. Empty list when healthy or not installed.
+    ○ · — corresponding to hard-installed / soft-stale / settings-
+    corrupt / soft-only-healthy / not-installed — and ``issues`` is
+    a list of one-liner strings to print under the provider header.
+    Empty list when healthy or not installed.
+
+    Soft mode installs the journal-write hook + the doc heading
+    block; nudge hook stays absent. So a clean soft install reads
+    as ``main_installed=True``, ``nudge_installed=False``,
+    ``soft_installed=True`` — with the rolled-up ``installed`` flag
+    False (it AND-folds the nudge presence). The ``○`` marker
+    covers that case so it doesn't read as a half-broken hard
+    install.
     """
     issues: list[str] = []
-    if not s.installed:
+    if not s.installed and not s.soft_installed and not s.main_installed:
+        # Nothing of ours is on disk. ``soft_doc_current=False`` here
+        # surfaces an orphan ``# Kaomoji`` heading the user (or an
+        # earlier version) left behind — flag it without claiming we
+        # installed.
+        if not s.soft_doc_current:
+            issues.append(
+                "soft-doc heading present but body doesn't match a "
+                "canonical wording — re-run install --soft to refresh"
+            )
+            return "⚠", issues
         return "·", issues
+    if s.soft_installed and not s.installed:
+        # Soft mode is the dominant install — hard nudge intentionally
+        # absent. Health is the AND of journal hook + doc-current.
+        if s.settings_parse_error is not None:
+            issues.append(f"settings unparseable: {s.settings_parse_error}")
+        if not s.main_hook_current:
+            issues.append("journal hook content stale (re-run install --soft)")
+        if not s.soft_doc_current:
+            issues.append("soft-doc block stale (re-run install --soft)")
+        if issues:
+            marker = "✗" if s.settings_parse_error is not None else "⚠"
+        else:
+            marker = "○"
+        return marker, issues
+    # Hard install path (or partial — main installed, nudge expected).
     if s.settings_parse_error is not None:
         issues.append(f"settings unparseable: {s.settings_parse_error}")
     if not s.main_hook_current:
-        issues.append("main hook content stale (re-run install)")
+        issues.append("main hook content stale (re-run install --hard)")
     if s.nudge_hook_path is not None and not s.nudge_hook_current:
-        issues.append("nudge hook content stale (re-run install)")
+        issues.append("nudge hook content stale (re-run install --hard)")
+    if not s.soft_doc_current:
+        issues.append(
+            "soft-doc heading orphan — re-run install --soft if you meant "
+            "to switch placement, or strip by hand"
+        )
     if issues:
-        # Settings-corrupt is a hard break; stale is a warn.
         marker = "✗" if s.settings_parse_error is not None else "⚠"
     else:
         marker = "✓"
@@ -349,8 +426,10 @@ def _print_status_human(
     print("providers:")
     for s in snapshots:
         marker, issues = _provider_health_summary(s)
-        if not s.installed:
+        if not s.installed and not s.soft_installed:
             kw = "not installed"
+        elif not s.installed and s.soft_installed:
+            kw = "soft only"
         elif issues:
             # Keep the install verb, surface issues separately so the
             # signal "we're set up but something's off" is honest.
@@ -376,6 +455,12 @@ def _print_status_human(
         if s.settings_parse_error is not None:
             settings_suffix = f"  (unparseable: {s.settings_parse_error})"
         print(f"        settings:{s.settings_path}{settings_suffix}")
+        if s.system_prompt_doc_path is not None:
+            if s.soft_installed:
+                soft_suffix = "" if s.soft_doc_current else "  (stale content)"
+            else:
+                soft_suffix = "  (no soft block)"
+            print(f"        soft:    {s.system_prompt_doc_path}{soft_suffix}")
         print(f"        journal: {s.journal_path}")
         for issue in issues:
             print(f"        ⚠ {issue}")
@@ -472,6 +557,12 @@ def _print_status_json(
                 "journal_path": str(s.journal_path),
                 "journal_exists": s.journal_exists,
                 "journal_bytes": s.journal_bytes,
+                "system_prompt_doc_path": (
+                    str(s.system_prompt_doc_path)
+                    if s.system_prompt_doc_path is not None else None
+                ),
+                "soft_installed": s.soft_installed,
+                "soft_doc_current": s.soft_doc_current,
             }
             for s in snapshots
         ],
@@ -916,13 +1007,46 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "install",
-        help="install a provider's hook (no arg → autodetect all)",
+        help=(
+            "install a provider's journal-write hook + nudge "
+            "placement (no arg → autodetect all). Requires "
+            "exactly one of --soft / --hard."
+        ),
     )
     sp.add_argument(
         "provider", nargs="?", default=None, choices=sorted(PROVIDERS),
         help=(
             "explicit provider; omit to autodetect every harness whose "
             "home directory exists under $HOME"
+        ),
+    )
+    mode_group = sp.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--soft", action="store_true",
+        help=(
+            "install the journal-write hook AND append the kaomoji-"
+            "leading reminder to the harness's persistent system-"
+            "prompt doc (CLAUDE.md / AGENTS.md / SOUL.md per "
+            "harness). The nudge lives in the identity slot — no "
+            "per-turn nudge hook."
+        ),
+    )
+    mode_group.add_argument(
+        "--hard", action="store_true",
+        help=(
+            "install the journal-write hook AND a per-turn nudge "
+            "hook that injects the kaomoji-leading reminder as "
+            "additional context every turn. The v1 behavior."
+        ),
+    )
+    sp.add_argument(
+        "--long", action="store_true",
+        help=(
+            "use the long-form v7 introspection prompt instead of "
+            "the one-sentence default. Frames the kaomoji as a "
+            "self-report on a functional emotional state. Orthogonal "
+            "to --soft / --hard — pick one of those for placement, "
+            "this picks the wording."
         ),
     )
     sp.add_argument(

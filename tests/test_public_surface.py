@@ -497,7 +497,7 @@ def test_corrupt_settings_refused():
         cc.settings_path.parent.mkdir(parents=True, exist_ok=True)
         cc.settings_path.write_text("{ not json")
         try:
-            cc.install()
+            cc.install_hard()
         except SettingsCorruptError:
             pass
         else:
@@ -517,7 +517,7 @@ def test_corrupt_settings_refused():
         original = "{ also not json"
         cx.settings_path.write_text(original)
         try:
-            cx.install()
+            cx.install_hard()
         except SettingsCorruptError:
             pass
         else:
@@ -640,7 +640,7 @@ def test_nudge_install_uninstall_roundtrip():
             p.settings_path = td / provider_name / "settings.json"
             p.journal_path = td / provider_name / "journal.jsonl"
 
-            p.install()
+            p.install_hard()
             nudge_path = p.nudge_hook_path
             assert nudge_path is not None
             assert p.hook_path.exists()
@@ -652,7 +652,7 @@ def test_nudge_install_uninstall_roundtrip():
 
             # Idempotent: install twice should yield the same file.
             settings_after_first = p.settings_path.read_text()
-            p.install()
+            p.install_hard()
             assert p.settings_path.read_text() == settings_after_first
 
             p.uninstall()
@@ -682,7 +682,7 @@ def test_hermes_install_into_empty_or_missing_file():
             p.journal_path = td / "kaomoji-journal.jsonl"
             if seed is not None:
                 p.settings_path.write_text(seed)
-            p.install()
+            p.install_hard()
             assert p.settings_path.exists()
             text = p.settings_path.read_text()
             assert "post_llm_call:" in text
@@ -727,7 +727,7 @@ def test_hermes_install_replaces_placeholder_hooks_shapes():
                 + "hooks_auto_accept: false\n"
                 "# trailing comment\n"
             )
-            p.install()
+            p.install_hard()
             text = p.settings_path.read_text()
             # Placeholder is gone, our hooks present, neighbors intact.
             assert "hooks: {}" not in text
@@ -786,7 +786,7 @@ def test_hermes_install_merges_into_populated_hooks_block():
             "  tool_call:\n"
             "    - command: /home/user/tool_audit.sh\n"
         )
-        p.install()
+        p.install_hard()
         text = p.settings_path.read_text()
         # User's commands preserved.
         assert "/home/user/my_custom_hook.sh" in text
@@ -804,7 +804,7 @@ def test_hermes_install_merges_into_populated_hooks_block():
 
         # Idempotent: re-running install is a no-op.
         before = p.settings_path.read_text()
-        p.install()
+        p.install_hard()
         after = p.settings_path.read_text()
         assert before == after
 
@@ -853,7 +853,7 @@ def test_hermes_install_preserves_in_block_comments():
             "hooks_auto_accept: false\n"
         )
         p.settings_path.write_text(original)
-        p.install()
+        p.install_hard()
         text = p.settings_path.read_text()
 
         # Every user comment survives byte-for-byte.
@@ -898,7 +898,7 @@ def test_hermes_install_refuses_corrupt_yaml():
         original = "key: [unclosed flow seq\n"
         p.settings_path.write_text(original)
         try:
-            p.install()
+            p.install_hard()
         except SettingsCorruptError as exc:
             assert "unparseable YAML" in str(exc)
         else:
@@ -929,7 +929,7 @@ def test_hermes_install_refuses_non_mapping_top_level():
             p.journal_path = td / "kaomoji-journal.jsonl"
             p.settings_path.write_text(seed)
             try:
-                p.install()
+                p.install_hard()
             except SettingsCorruptError as exc:
                 assert "not a mapping" in str(exc)
             else:
@@ -965,7 +965,7 @@ def test_hermes_install_refuses_non_mapping_hooks_value():
             p.journal_path = td / "kaomoji-journal.jsonl"
             p.settings_path.write_text(seed)
             try:
-                p.install()
+                p.install_hard()
             except SettingsCorruptError as exc:
                 assert "hooks" in str(exc)
             else:
@@ -997,7 +997,7 @@ def test_plugin_install_uninstall_roundtrip():
         p.plugin_dir = td / "opencode" / "plugins"
         p.journal_path = td / "journals" / "opencode.jsonl"
 
-        p.install()
+        p.install_hard()
         plugin_file = p.plugin_dir / "llmoji.ts"
         assert plugin_file.exists()
         # Rendered TS contains the version stamp + the spliced taxonomy.
@@ -1015,7 +1015,7 @@ def test_plugin_install_uninstall_roundtrip():
 
         # Idempotent re-install — same content, same path.
         before = plugin_file.read_text()
-        p.install()
+        p.install_hard()
         assert plugin_file.read_text() == before
 
         p.uninstall()
@@ -1033,7 +1033,7 @@ def test_plugin_install_uninstall_roundtrip():
         p.journal_path = td / "journals" / "openclaw.jsonl"
         p.settings_path.parent.mkdir(parents=True, exist_ok=True)
 
-        p.install()
+        p.install_hard()
         index_ts = p.plugin_dir / "index.ts"
         plugin_json = p.plugin_dir / "openclaw.plugin.json"
         assert index_ts.exists()
@@ -1063,7 +1063,7 @@ def test_plugin_install_uninstall_roundtrip():
         # Idempotent install — file content + config flag stay byte-stable.
         before_idx = index_ts.read_text()
         before_cfg = p.settings_path.read_text()
-        p.install()
+        p.install_hard()
         assert index_ts.read_text() == before_idx
         assert p.settings_path.read_text() == before_cfg
 
@@ -1098,7 +1098,7 @@ def test_openclaw_refuses_corrupt_config():
         p.settings_path.parent.mkdir(parents=True, exist_ok=True)
         p.settings_path.write_text("{ not json")
         try:
-            p.install()
+            p.install_hard()
         except SettingsCorruptError:
             pass
         else:

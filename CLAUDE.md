@@ -196,7 +196,15 @@ and update the HF dataset card to match.
 - **`llmoji.synth_prompts`**: `DESCRIBE_PROMPT_WITH_USER`,
   `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
-  `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot).
+  `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot),
+  `SHORT_NUDGE_MESSAGE` (v1 one-sentence nudge, 2.0+),
+  `LONG_NUDGE_MESSAGE` (v7 introspection framing baked from
+  `llmoji-study/preambles/introspection_v7.txt`, 2.0+). Both nudge
+  strings are part of the cross-corpus surface — bumping either
+  changes what the model is asked to do, which changes what
+  the corpus captures. `tests/test_soft_install.py
+  ::test_long_nudge_message_matches_introspection_v7` enforces
+  byte-identity against the study repo's preamble.
 - **6-field unified journal row schema** (on-disk JSONL):
   `{ts, model, cwd, kaomoji, user_text, assistant_text}`. This is
   the cross-corpus invariant; `llmoji.scrape.ScrapeRow` is in-memory
@@ -210,7 +218,46 @@ and update the HF dataset card to match.
   `llmoji.providers.{claude_code,codex,hermes}`).
 - **`llmoji.providers.HookInstaller`** interface +
   **`llmoji.providers.PluginInstaller`** sibling base (1.3 added —
-  opencode + openclaw).
+  opencode + openclaw). 2.0 split the install lifecycle into
+  `install_hard` and `install_soft` — mutually exclusive *placement*
+  modes that share the journal-write hook. Both modes install the
+  Stop / `post_llm_call` hook so kaomoji-led messages still get
+  captured in real time; the modes only differ in where the
+  kaomoji-leading reminder is delivered. `uninstall` undoes both
+  regardless of which mode the user installed under.
+  `system_prompt_doc_path` is now a class attr on every first-class
+  provider.
+- **`--soft` vs `--hard` placement** (2.0+, mutually exclusive,
+  exactly one required):
+  - `--hard`: install journal-write hook + per-turn nudge hook
+    (`UserPromptSubmit` on claude_code/codex, `pre_llm_call` on
+    hermes; baked into the rendered TS plugin for
+    opencode/openclaw). The v1 behavior.
+  - `--soft`: install journal-write hook + append a `# Kaomoji`
+    heading + the nudge text to the harness's persistent
+    system-prompt doc. No per-turn nudge hook. For plugin providers
+    (opencode/openclaw), `render_plugin_template(install_nudge=False)`
+    strips the per-turn nudge block out of the rendered TS via
+    `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` fences so the
+    plugin only does journal capture.
+- **Per-harness system-prompt doc paths** (2.0+, used by
+  `install_soft` / the `--soft` flag):
+  - `claude_code` → `~/.claude/CLAUDE.md`
+  - `codex` → `~/.codex/AGENTS.md`
+  - `hermes` → `~/.hermes/SOUL.md` (voice slot — paired with
+    AGENTS.md for procedure)
+  - `opencode` → `~/.config/opencode/AGENTS.md` (global rules)
+  - `openclaw` → `~/.openclaw/workspace/SOUL.md` (voice slot;
+    workspace dir is configurable via `agents.defaults.workspace`
+    but defaults to this path)
+- **Soft-doc shape** (2.0+): plain markdown — no comment fences.
+  The block is `# Kaomoji\n\n<message>` appended at EOF with a
+  blank-line separator before it. Uninstall removes the block by
+  exact string match against the two canonical wordings (short /
+  long); a hand-edited body falls through and survives uninstall
+  (conservative on the user's prose). The `# Kaomoji` heading is
+  the cross-corpus anchor — bumping it strands existing soft
+  installs (uninstall stops finding the block).
 - **The five first-class providers**: `claude_code`, `codex`,
   `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
   `providers_seen` in shipped bundles names these directly.
@@ -231,13 +278,36 @@ beyond `--target {hf,email}` and `--backend {anthropic,openai,local}`.
 ## Commands
 
 ```
-llmoji install <provider>      write hook + register; idempotent
-llmoji install [--yes]         no-arg autodetect: install for every
+llmoji install <provider> --hard
+                               (2.0+) install journal-write hook +
+                               per-turn nudge hook. The v1 behavior.
+llmoji install <provider> --soft
+                               (2.0+) install journal-write hook +
+                               append "# Kaomoji" + the nudge wording
+                               to the harness's persistent system-
+                               prompt doc (CLAUDE.md / AGENTS.md /
+                               SOUL.md per harness). No per-turn nudge
+                               hook. Both modes capture journal data;
+                               only the placement of the leading-
+                               kaomoji reminder differs.
+                               --soft and --hard are mutually
+                               exclusive; exactly one required.
+llmoji install <provider> --soft|--hard --long
+                               (2.0+) orthogonal to soft/hard. Swaps
+                               the v1 one-sentence wording for the v7
+                               introspection framing (functional
+                               emotional states + introspection lead-in)
+                               in whichever placement you picked.
+llmoji install --soft|--hard [--long] [--yes]
+                               no-arg autodetect: install for every
                                harness whose home dir exists under
-                               $HOME (~/.claude / ~/.codex / ~/.hermes).
+                               $HOME (~/.claude / ~/.codex / ~/.hermes /
+                               ~/.config/opencode / ~/.openclaw).
                                Prompts unless --yes. Partial success
                                OK — one corrupt config doesn't kill
-                               the rest of the batch.
+                               the rest of the batch. Mode flags
+                               propagate uniformly to every detected
+                               provider.
 llmoji uninstall <provider>    inverse; idempotent (journal preserved)
 llmoji uninstall [--yes]       no-arg autodetect: uninstall from every
                                harness whose home dir exists under

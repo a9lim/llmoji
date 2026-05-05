@@ -46,14 +46,14 @@ For harnesses that expose shell hooks (Claude Code, Codex, Hermes), a first-clas
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_check_registrations` if the format isn't JSON-shaped.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_check_registrations` if the format isn't JSON-shaped. Please also set `system_prompt_doc_path` to the harness's persistent identity or instructions file (the file the harness reads on session start as voice or global guidance); `install --soft` appends a `# Kaomoji` heading and the nudge wording there.
 
 Please include in the PR:
 
 - The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl` or `hermes_nudge.sh.tmpl`.
-- The `HookInstaller` subclass and its `system_injected_prefixes` list (empty if the harness doesn't inject system-role-as-user-text payloads).
-- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage.
-- A short note on the harness's docs version and where the kaomoji lands in the stop payload.
+- The `HookInstaller` subclass with `system_injected_prefixes` (empty if the harness doesn't inject system-role-as-user-text payloads) and `system_prompt_doc_path` (the harness's identity or global-instructions file).
+- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage. Soft-mode coverage is in `test_soft_install.py`; the existing parametrized tests cover any provider with a `system_prompt_doc_path` set.
+- A short note on the harness's docs version and where the kaomoji lands in the stop payload, plus a note on which file the harness uses as its identity or global-instructions doc.
 
 ### TS plugin providers
 
@@ -61,20 +61,23 @@ For harnesses with a TypeScript-only plugin SDK (opencode, openclaw), a first-cl
 
 1. A `// BEGIN SHARED TAXONOMY` / `// END SHARED TAXONOMY` marker pair somewhere in the file. The body between them is left empty in the template. `render_plugin_template` splices in the canonical TS port from `_kaomoji_taxonomy.ts.partial` at install time. Don't paste the validator inline.
 2. A `__LLMOJI_VERSION__` token wherever you want the package version stamped.
-3. The actual harness-side hook registration: a per-turn nudge injection and a per-message journal write (one row per kaomoji-led assistant message, written to `~/.llmoji/journals/<harness>.jsonl` against the canonical schema).
+3. A `__NUDGE_LITERAL__` token where the chosen nudge wording (short or long) gets inlined. `render_plugin_template` JSON-escapes the wording, so the placeholder is a value in any context where a TS string literal is valid (`const NUDGE: string = __NUDGE_LITERAL__;` is the convention).
+4. A `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` marker pair around the per-turn nudge code. Under `--soft` the renderer strips this block out entirely so the plugin only does journal capture (the doc edit is the single place the reminder lives, no double nudge).
+5. The actual harness-side hook registration: a per-turn nudge injection between the NUDGE HOOK markers, and a per-message journal write (one row per kaomoji-led assistant message, written to `~/.llmoji/journals/<harness>.jsonl` against the canonical schema) outside the markers.
 
 The `PluginInstaller` subclass needs:
 
-- `plugin_dir` — where on disk the rendered files land (typically inside `~/.<harness>/plugins/` or similar).
-- `plugin_files` — list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
-- `journal_path` — `~/.llmoji/journals/<harness>.jsonl` by convention.
-- `is_present` — by default returns `plugin_dir.parent.exists()`; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the parent-dir check matches the bash providers).
-- `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults.
+- `plugin_dir`: where on disk the rendered files land (typically inside `~/.<harness>/plugins/` or similar).
+- `plugin_files`: list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
+- `journal_path`: `~/.llmoji/journals/<harness>.jsonl` by convention.
+- `system_prompt_doc_path`: the harness's identity or global-instructions file. `install --soft` appends a `# Kaomoji` heading and the nudge wording there.
+- `is_present`: by default returns `plugin_dir.parent.exists()`; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the parent-dir check matches the bash providers).
+- `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults. The base `_register` accepts `include_nudge`; the plugin path doesn't use the flag because the nudge is gated at render time via the BEGIN NUDGE HOOK markers, but please honor the keyword in the signature for parity with the bash path.
 
 Please include in the PR:
 
 - The TS template(s) under `llmoji/_plugins/<provider>*.ts.tmpl` (and `.json.tmpl` if the harness needs a manifest).
-- The `PluginInstaller` subclass under `llmoji/providers/<provider>.py`.
+- The `PluginInstaller` subclass under `llmoji/providers/<provider>.py`, with `system_prompt_doc_path` set.
 - An entry in `llmoji.providers.PROVIDERS` and the `__all__` re-export.
 - A round-trip install/uninstall test in `test_public_surface.py` (the existing `test_plugin_install_uninstall_roundtrip` is a template).
 

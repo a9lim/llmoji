@@ -75,7 +75,7 @@ def test_install_no_args_zero_detected_exits_2(
     monkeypatch.setattr(HookInstaller, "is_present", _never_present)
 
     parser = cli._build_parser()
-    args = parser.parse_args(["install"])
+    args = parser.parse_args(["install", "--hard"])
     rc = cli._cmd_install(args)
 
     assert rc == 2
@@ -100,14 +100,14 @@ def test_install_no_args_with_yes_installs_all_detected(
 
     installed: list[str] = []
 
-    def fake_install_one(name: str) -> tuple[bool, str | None]:
+    def fake_install_one(name: str, **_kwargs: object) -> tuple[bool, str | None]:
         installed.append(name)
         return True, None
 
     monkeypatch.setattr(cli, "_install_one", fake_install_one)
 
     parser = cli._build_parser()
-    args = parser.parse_args(["install", "--yes"])
+    args = parser.parse_args(["install", "--hard", "--yes"])
     rc = cli._cmd_install(args)
 
     assert rc == 0
@@ -132,7 +132,7 @@ def test_install_no_args_partial_failure_returns_1(
     for _cls in _ALL.values():
         monkeypatch.setattr(_cls, "is_present", _always_present)
 
-    def fake_install_one(name: str) -> tuple[bool, str | None]:
+    def fake_install_one(name: str, **_kwargs: object) -> tuple[bool, str | None]:
         if name == "codex":
             return False, "RuntimeError: simulated"
         return True, None
@@ -140,7 +140,7 @@ def test_install_no_args_partial_failure_returns_1(
     monkeypatch.setattr(cli, "_install_one", fake_install_one)
 
     parser = cli._build_parser()
-    args = parser.parse_args(["install", "--yes"])
+    args = parser.parse_args(["install", "--hard", "--yes"])
     rc = cli._cmd_install(args)
 
     assert rc == 1
@@ -168,7 +168,7 @@ def test_install_no_args_prompt_n_aborts(
 
     installed: list[str] = []
 
-    def fake_install_one(name: str) -> tuple[bool, str | None]:
+    def fake_install_one(name: str, **_kwargs: object) -> tuple[bool, str | None]:
         installed.append(name)
         return True, None
 
@@ -176,7 +176,7 @@ def test_install_no_args_prompt_n_aborts(
     monkeypatch.setattr("builtins.input", lambda _: "n")
 
     parser = cli._build_parser()
-    args = parser.parse_args(["install"])
+    args = parser.parse_args(["install", "--hard"])
     rc = cli._cmd_install(args)
 
     assert rc == 1
@@ -193,14 +193,14 @@ def test_install_explicit_provider_unchanged(
 
     calls: list[str] = []
 
-    def fake_install_one(name: str) -> tuple[bool, str | None]:
+    def fake_install_one(name: str, **_kwargs: object) -> tuple[bool, str | None]:
         calls.append(name)
         return True, None
 
     monkeypatch.setattr(cli, "_install_one", fake_install_one)
 
     parser = cli._build_parser()
-    args = parser.parse_args(["install", "claude_code"])
+    args = parser.parse_args(["install", "claude_code", "--hard"])
     rc = cli._cmd_install(args)
 
     assert rc == 0

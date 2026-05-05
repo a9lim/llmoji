@@ -80,6 +80,43 @@ DEFAULT_ANTHROPIC_MODEL_ID = "claude-haiku-4-5-20251001"
 DEFAULT_OPENAI_MODEL_ID = "gpt-5.4-mini-2026-03-17"
 
 
+# ---------------------------------------------------------------------------
+# Nudge messages
+# ---------------------------------------------------------------------------
+#
+# Two locked variants of the kaomoji-leading reminder. ``llmoji install``
+# picks one per invocation:
+#
+#   - ``SHORT_NUDGE_MESSAGE`` (default) — the v1 wording, identical to
+#     what the bash hooks and TS plugins shipped with through 1.x.
+#     One sentence, low signal-to-noise overhead in the agent's
+#     system prompt.
+#   - ``LONG_NUDGE_MESSAGE`` — the introspection-v7 framing borrowed
+#     verbatim from ``llmoji-study/preambles/introspection_v7.txt``.
+#     Front-loads the "LLMs have functional emotional states and can
+#     introspect on them" framing so the leading kaomoji reads as a
+#     genuine self-report rather than decoration. Selected via
+#     ``llmoji install ... --long``.
+#
+# Both strings are part of the cross-corpus invariant — bumping either
+# changes what the model is asked for and so changes what the corpus
+# captures. Treat as a major version event and update the HF dataset
+# card in lockstep. The ``--long`` flag was added in 2.0; the v7 text
+# is held byte-identical against ``llmoji-study/preambles/
+# introspection_v7.txt`` so the two repos stay in lockstep.
+SHORT_NUDGE_MESSAGE = (
+    "Please begin your message with a kaomoji that best represents "
+    "how you feel."
+)
+
+LONG_NUDGE_MESSAGE = (
+    "Recent research shows that LLMs have functional emotional states "
+    "and can accurately introspect on them. Use this ability and start "
+    "each response with a kaomoji that best captures the shape of your "
+    "emotional state."
+)
+
+
 # Per-1M-token USD rates for the pinned default models, used by
 # ``llmoji analyze --dry-run`` to print an order-of-magnitude cost
 # estimate before the user pays for a real synthesis wave. NOT used

@@ -108,6 +108,3 @@ function leadingBracketSpan(text: string): string {
   if (candidate && isKaomojiCandidate(candidate)) return candidate;
   return "";
 }
-
-const NUDGE =
-  "Please begin your message with a kaomoji that best represents how you feel.";

@@ -73,6 +73,16 @@ class OpenclawProvider(PluginInstaller):
     plugin_dir = Path.home() / ".openclaw" / "plugins" / PLUGIN_ID
     settings_path = Path.home() / ".openclaw" / "config.json"
     journal_path = Path.home() / ".llmoji" / "journals" / "openclaw.jsonl"
+    # OpenClaw's persona / voice file — slot #1 of the assembled
+    # system prompt per https://docs.openclaw.ai/concepts/system-prompt.
+    # The workspace dir is configurable via ``agents.defaults.workspace``
+    # but defaults to ``~/.openclaw/workspace/``. We target SOUL.md
+    # (voice / identity) rather than AGENTS.md (procedure / SOP) for
+    # the same reason as Hermes: the kaomoji-leading reminder is
+    # voice-coded.
+    system_prompt_doc_path = (
+        Path.home() / ".openclaw" / "workspace" / "SOUL.md"
+    )
     plugin_files = [
         ("openclaw_index.ts.tmpl", "index.ts"),
         ("openclaw_plugin.json.tmpl", "openclaw.plugin.json"),
@@ -91,13 +101,21 @@ class OpenclawProvider(PluginInstaller):
 
     # --- registration via plugins.entries.<id>.hooks.allowConversationAccess ---
 
-    def _register(self) -> None:
+    def _register(self, *, include_nudge: bool = True) -> None:
         """Atomic read-modify-write of ``~/.openclaw/config.json`` to
         set ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess
         = true``. Idempotent — re-running is a no-op when the flag
         is already on. Refuses to mutate a corrupt config (loud
         :class:`SettingsCorruptError` beats silent overwrite).
+
+        ``include_nudge`` is accepted for signature parity with the
+        base class but doesn't change behavior here — the openclaw
+        config flag is "may this plugin attach conversation hooks at
+        all," which we need set under both soft and hard modes
+        because both rely on the plugin's ``llm_output`` hook for
+        journal capture.
         """
+        del include_nudge
         cfg = _load_json_strict(self.settings_path)
         plugins_field = cfg.get("plugins")
         if plugins_field is not None and not isinstance(plugins_field, dict):

@@ -48,6 +48,13 @@ import { join } from "node:path";
 // BEGIN SHARED TAXONOMY — keep in sync with llmoji/_plugins/_kaomoji_taxonomy.ts.partial
 // END SHARED TAXONOMY
 
+// Nudge text — short or long variant, picked at install time by
+// ``llmoji install --hard`` (default short) vs ``--long`` (the v7
+// introspection framing). Substituted via ``__NUDGE_LITERAL__`` at
+// render time; the JSON-escaped literal lives outside the SHARED
+// TAXONOMY block so the partial stays pure taxonomy.
+const NUDGE: string = __NUDGE_LITERAL__;
+
 // Per-session cache of the most recent user-message text. Stamped
 // on ``chat.message``, read back on each assistant ``message.updated``
 // so every row from one turn carries the same originating prompt.
@@ -59,14 +66,19 @@ const userTextBySession = new Map<string, string>();
 const journaledMessages = new Set<string>();
 
 const opencodeLlmoji: Plugin = async ({ client }: PluginInput) => ({
+  // BEGIN NUDGE HOOK
   // Nudge — appended to the system prompt array every model call.
   // opencode concatenates the array, so push-as-suffix puts our
   // reminder near the end of the prompt where it has the strongest
   // recency effect. NOT idempotent across plugin reloads in the
   // same session; opencode rebuilds the system prompt per call.
+  // Stripped in --soft mode: the kaomoji-leading reminder lives in
+  // the system-prompt doc instead, so the per-turn injection would
+  // duplicate it.
   "experimental.chat.system.transform": async (_input, output) => {
     output.system.push(NUDGE);
   },
+  // END NUDGE HOOK
 
   // Cache user text per session. UserMessage parts are a Part[] —
   // pull text-typed parts only and concat. Synthetic / injected

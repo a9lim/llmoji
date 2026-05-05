@@ -55,6 +55,12 @@ class OpencodeProvider(PluginInstaller):
     # wants the journal across every project, not just one repo).
     plugin_dir = Path.home() / ".config" / "opencode" / "plugins"
     journal_path = Path.home() / ".llmoji" / "journals" / "opencode.jsonl"
+    # opencode's global rules file — applied across every opencode
+    # session per https://opencode.ai/docs/rules/. ``llmoji install
+    # --soft`` writes a marker-fenced block here.
+    system_prompt_doc_path = (
+        Path.home() / ".config" / "opencode" / "AGENTS.md"
+    )
     plugin_files = [
         ("opencode.ts.tmpl", "llmoji.ts"),
     ]

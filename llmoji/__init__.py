@@ -43,6 +43,8 @@ from .synth_prompts import (
     DEFAULT_OPENAI_MODEL_ID,
     DESCRIBE_PROMPT_NO_USER,
     DESCRIBE_PROMPT_WITH_USER,
+    LONG_NUDGE_MESSAGE,
+    SHORT_NUDGE_MESSAGE,
     SYNTHESIZE_PROMPT,
 )
 from .taxonomy import (
@@ -66,5 +68,7 @@ __all__ = [
     "SYNTHESIZE_PROMPT",
     "DEFAULT_ANTHROPIC_MODEL_ID",
     "DEFAULT_OPENAI_MODEL_ID",
+    "SHORT_NUDGE_MESSAGE",
+    "LONG_NUDGE_MESSAGE",
     "__version__",
 ]
