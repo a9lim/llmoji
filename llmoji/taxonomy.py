@@ -217,102 +217,223 @@ _KAOMOJI_MAX_LEN = 32
 _LETTER_RUN_RE = re.compile(r"[A-Za-z]{4}")
 
 
-# Bare-kaomoji mouth-glyph set (v2.0 round-6 speculative extension).
+# Bare-kaomoji mouth-glyph set (v2.0 round-6 + round-7 extension).
 #
 # Used by `_looks_like_bare_kaomoji` to validate the interior of an
 # `EYE MOUTH EYE` candidate that doesn't start with a
-# `KAOMOJI_START_CHARS` leader. Restricted to canonical kaomoji mouth
+# `KAOMOJI_START_CHARS` leader. Includes canonical kaomoji mouth
 # glyphs (ASCII connectors, dashes/punctuation, CJK presentation
-# forms, geometric shapes) — explicitly excludes ASCII letters so
-# prose tokens like "It's" don't validate as bare kaomoji.
+# forms, geometric shapes) plus round-7 expansions:
+#   - `ω` (Greek lowercase omega) — the canonical "cute / cat mouth"
+#     in `>ω<`, `^ω^`, `OωO`, `=ω=`. By far the highest-leverage
+#     round-7 addition.
+#   - `oO` — for `^o^`, `*O*`, `\o/`, `:O` (`:O` already worked via
+#     Western-mouth set, but adding `o`/`O` to the symmetric mouth
+#     class catches the bracket-free symmetric forms).
+#   - `wW` — for `>w<`, `^w^`, `OwO`, `UwU`, the cat / uwu register.
+#     Letters in mouth class do NOT collide with the 4-letter-run
+#     prose filter (`[A-Za-z]{4}`) because real bare kaomoji never
+#     contain 4 consecutive letters. Risk: 3-letter symmetric prose
+#     like `awa`, `ewe` matches as a face. The Stage-B synthesizer
+#     pools many instances per face, so noise faces get filtered
+#     statistically.
 _BARE_KAOMOJI_MOUTH_RE = re.compile(
     r"["
     r"_\-.;:~=^|/\\"           # ASCII mouth glyphs
-    r"·•°"      # middle dot, bullet, degree sign
-    r"‐-―"           # various dashes
-    r"‥…′-‷"  # ellipsis variants, primes
-    r"‿⁀"            # undertie, character tie
-    r"、。"            # CJK comma/fullstop
-    r"　・ー･＿？"  # CJK spaces / mid-dots / fullwidth forms
-    r"︰-﹏"           # CJK presentation forms (︵ ︶ ﹏ ﹋ ﹌ ︿ ︶ etc.)
-    r"▰-◿"           # geometric shapes (▽ ◡ ◠ ○ ● ◇ etc.)
+    r"oOwW"                    # round 7: ASCII letter mouths
+    r"·•°"                     # middle dot, bullet, degree sign
+    r"ω"                       # round 7: Greek omega (cute / cat mouth)
+    r"‐-―"                     # various dashes
+    r"‥…′-‷"                   # ellipsis variants, primes
+    r"‿⁀"                      # undertie, character tie
+    r"、。"                    # CJK comma/fullstop
+    r"　・ー･＿？"             # CJK spaces / mid-dots / fullwidth forms
+    r"︰-﹏"                    # CJK presentation forms (︵ ︶ ﹏ ﹋ ﹌ ︿ ︶ etc.)
+    r"▰-◿"                     # geometric shapes (▽ ◡ ◠ ○ ● ◇ etc.)
     r"]+"
 )
 
 # Visually-paired eye glyphs for non-symmetric bare kaomoji like `>_<`,
-# `>.<`, `(_)`, `)_(`. Used as eyes (NOT brackets — these don't trigger
-# the `_OPEN_BRACKETS` depth-walker).
+# `>.<`, `)_(`, `]_[`. Used as eyes (NOT brackets — these don't
+# trigger the `_OPEN_BRACKETS` depth-walker). Round-7 added the
+# slash pair `\` and `/` for celebration-arm faces (`\o/`, `\../`).
 _BARE_KAOMOJI_PAIRED_EYES: frozenset[tuple[str, str]] = frozenset({
     (">", "<"), ("<", ">"),
     (")", "("), ("(", ")"),
     ("]", "["), ("[", "]"),
     ("}", "{"), ("{", "}"),
+    ("\\", "/"), ("/", "\\"),  # round 7: celebration / facepalm
+    ("o", "O"), ("O", "o"),    # round 7: mismatched-case confusion
+                                # eyes (`o_O` / `O_o` is the canonical
+                                # "huh?" face; `o` and `O` are also
+                                # both valid symmetric eyes — `o_o`,
+                                # `O_O` already work via the same-eye
+                                # branch).
+})
+
+# Western emoticon eyes (round-7 expansion). The base set is
+# `:;=8`; round 7 adds `<>` so `<3` parses as a 2-char Western
+# (heart) and so the eyebrow-prefix Western branch can recognize
+# `>` and `<` as standalone eyes that COULD start a Western face.
+_WESTERN_EYES = ":;=8<>"
+
+# Western emoticon mouth chars. Unchanged from round-6.
+_WESTERN_MOUTHS = ")(DPpOo3<>/\\|*[]"
+
+# Western emoticon nose chars. Unchanged from round-6.
+_WESTERN_NOSES = "-^o'"
+
+
+def _is_western_emoticon(s: str) -> bool:
+    """Round-7 helper: standard Western emoticon shape — eye in
+    ``_WESTERN_EYES``, optional 1-char nose, then 1+ mouth chars,
+    total length 2..4. Lifted out of ``_looks_like_bare_kaomoji`` so
+    the new eyebrow-prefix branch (``>:(`` / ``<:(``) and the cat-
+    wrap recursion can reuse it.
+
+    Rejects "all-same-char-as-eye" mouth runs (``>>``, ``>>>``,
+    ``<<``, ``==``) — these structurally pass the eye/mouth check
+    because ``>``, ``<``, ``=`` are members of both
+    ``_WESTERN_EYES`` and ``_WESTERN_MOUTHS``, but they're not real
+    faces. The reject is the round-7 cost of widening the eye set
+    to include ``<>``.
+    """
+    n = len(s)
+    if not (2 <= n <= 4):
+        return False
+    if s[0] not in _WESTERN_EYES:
+        return False
+    rest = s[1:]
+    if rest and rest[0] in _WESTERN_NOSES:
+        rest = rest[1:]
+    if not rest or not all(c in _WESTERN_MOUTHS for c in rest):
+        return False
+    if all(c == s[0] for c in rest):
+        return False
+    return True
+
+
+# Round-7 explicit-allow set for the canonical anime / uwu shapes
+# whose body is entirely ASCII letters (`OwO`, `UwU`, etc.). These
+# would otherwise reject under the round-7 all-alpha symmetric
+# rule (which exists to filter `lol` / `mom` / `pop` / `awa` etc.
+# from the symmetric branch). We only allow shapes with `w` or `v`
+# as mouth — those are kaomoji-coded; other letter-mouth-letter
+# triples (`lol`, `mom`) stay rejected.
+_UWU_FACES: frozenset[str] = frozenset({
+    "OwO", "OWO", "owo",
+    "UwU", "UWU", "uwu",
+    "OvO", "OVO", "ovo",
+    "UvU", "UVU", "uvu",
 })
 
 
-def _looks_like_bare_kaomoji(s: str) -> bool:
-    """Speculative bare-kaomoji shape match (v2.0 round-6 extension).
+# Round-7 cat-wrap maximum length. The recursive call inside
+# `_looks_like_bare_kaomoji` consumes 2 chars per level (one `=` on
+# each side); cap depth implicitly via the outer `_KAOMOJI_MAX_LEN`.
+# Korean closed-eye doubles caught via a literal set (cheaper than
+# a regex).
+_KOREAN_CLOSED_EYE_DOUBLES = frozenset({"ㅠㅠ", "ㅜㅜ"})
 
-    Catches faces that don't start with a `KAOMOJI_START_CHARS` leader:
-      * Symmetric `EYE MOUTH EYE`: ``^_^``, ``T-T``, ``Q_Q``, ``;_;``,
-        ``o_o``, ``O_O``, ``0_0``, ``ಥ_ಥ``, ``ಥ﹏ಥ``, ``T﹏T``,
-        ``e_e``, etc. — same eye on both sides, mouth glyphs in
-        between.
-      * Paired-eye `EYE MOUTH EYE`: ``>_<``, ``>.<``, ``)_(``,
-        ``]_[`` — visually-mirrored bracket eyes (NOT bracket
-        delimiters, just eye shapes).
+
+def _looks_like_bare_kaomoji(s: str) -> bool:
+    """Speculative bare-kaomoji shape match (v2.0 round-6 + round-7).
+
+    Catches faces that don't start with a ``KAOMOJI_START_CHARS``
+    leader. Six shape branches (round-7 added the cat-wrap, eyebrow
+    Western, Korean doubles, and the slash paired-eyes):
+
+      * Symmetric ``EYE MOUTH EYE``: ``^_^``, ``T-T``, ``Q_Q``,
+        ``;_;``, ``o_o``, ``0_0``, ``@_@``, ``?_?``, ``$_$``,
+        ``+_+``, ``ಥ_ಥ``, ``T﹏T``, ``•_•``, ``°_°``, plus round-7
+        ``OωO``, ``=ω=``, ``^w^``, ``^o^``, ``\\o/`` (slash pair).
+      * Paired-eye ``EYE MOUTH EYE``: ``>_<``, ``>.<``, ``)_(``,
+        ``]_[``, ``\\_/`` (round-7 paired slash for facepalm).
       * Western emoticons: ``:)``, ``:(``, ``:D``, ``;)``, ``:P``,
-        ``:3``, ``:O``, ``=)``, ``8)``, ``:-)``, ``:-D``, ``;-)`` —
-        ``:`` ``;`` ``=`` ``8`` eye + optional ``-`` ``^`` ``o``
-        ``'`` nose + ``)`` ``(`` ``D`` ``P`` ``O`` ``o`` ``3``
-        ``<`` ``>`` ``/`` ``\\`` ``|`` ``*`` ``[`` ``]`` mouth.
-      * 2-char closed-eye doubles: ``^^``, ``vv``, ``uu``.
-      * 2-char ``XD``/``xD``/``xd`` style.
+        ``:3``, ``:O``, ``=)``, ``8)``, ``:-)``, ``:-D``, ``;-)``,
+        plus round-7 ``<3`` (heart, ``<`` as eye).
+      * Eyebrow-modified Western (round-7): ``>:(``, ``>:)``,
+        ``>:D``, ``>:O``, ``>:-(`` etc. ``>`` or ``<`` prefix
+        followed by a standard Western emoticon.
+      * Cat-wrap (round-7): ``=^.^=``, ``=^_^=``, ``=ω.ω=``. Outer
+        ``=...=`` markers around a recursive Path B match.
+      * 2-char closed-eye doubles: ``^^``, ``vv``, ``uu``, plus
+        round-7 Korean ``ㅠㅠ`` / ``ㅜㅜ`` (crying).
+      * 2-char laugh: ``XD``/``xD``/``xd``/``Xd``, plus round-7
+        ``XP``/``xP``/``xp``/``Xp``/``X3``/``x3`` (`[xX][DPpOo3]`).
 
     Length / backslash / 4-letter-run filters are applied by the
-    caller (`is_kaomoji_candidate`); this function focuses on the
+    caller (``is_kaomoji_candidate``); this function focuses on the
     structural shape.
 
     "Speculative" framing: the goal is to surface bare-kaomoji
     affective output from models whose register strips the
     parenthesizing wrapper (e.g. granite emitting ``ಥ﹏ಥ`` for
-    every grief prompt). False positives are tolerated when the
-    shape is unambiguous; the length cap and letter-run filter
-    upstream limit damage from prose collisions.
+    grief prompts). False positives are tolerated when the shape is
+    unambiguous; the length cap, letter-run filter, and Stage-B
+    synthesis pooling smooth out the noise.
     """
     n = len(s)
     if n < 2:
         return False
 
-    # 2-char patterns: closed-eye doubles + Western 2-char emoticons.
+    # 2-char patterns: closed-eye doubles, XD-style, Korean doubles,
+    # 2-char Western.
     if n == 2:
         if s[0] == s[1] and s[0] in "^vu":
             return True
-        if s.upper() == "XD":
+        if s in _KOREAN_CLOSED_EYE_DOUBLES:
             return True
-        if s[0] in ":;=8" and s[1] in ")(DPpOo3<>/\\|*[]":
+        # XD-family: `[xX][DPpOo3]` — round-7 generalizes `XD`/`xD`
+        # to also accept `XP`/`x3` etc.
+        if s[0] in "xX" and s[1] in "DPpOo3":
+            return True
+        # 2-char Western. Reject same-char (`>>`, `<<`, `==`) — these
+        # pass structurally because `>`, `<`, `=` are in both the
+        # eye and mouth sets, but they're not real faces.
+        if s[0] in _WESTERN_EYES and s[1] in _WESTERN_MOUTHS and s[0] != s[1]:
             return True
         return False
 
-    # Western emoticon: 3-4 chars starting with ``:``/``;``/``=``/``8``,
-    # optional 1-char nose, then 1-2 mouth chars.
-    if n <= 4 and s[0] in ":;=8":
-        rest = s[1:]
-        if rest and rest[0] in "-^o'":
-            rest = rest[1:]
-        if rest and all(c in ")(DPpOo3<>/\\|*[]" for c in rest):
+    # Round-7 cat-wrap: `=EYE-MOUTH-EYE=` where the inner span is
+    # itself a valid bare-kaomoji shape (recurses one level — n
+    # shrinks by 2 so the recursion is bounded by `_KAOMOJI_MAX_LEN`).
+    if n >= 5 and s[0] == "=" and s[-1] == "=":
+        if _looks_like_bare_kaomoji(s[1:-1]):
             return True
+
+    # Standard Western (3-4 chars).
+    if _is_western_emoticon(s):
+        return True
+
+    # Round-7 eyebrow-prefix Western: `>` or `<` prefix on a
+    # standard Western emoticon. Catches `>:(`, `>:)`, `>:D`,
+    # `>:-(`, `<:(`, etc. The eyebrow indicates "angry / devious"
+    # in classic emoticon culture.
+    if n >= 3 and s[0] in "><" and _is_western_emoticon(s[1:]):
+        return True
+
+    # Round-7 explicit anime/uwu shapes (`OwO`, `UwU`, etc.). These
+    # are entirely ASCII-alpha and would otherwise reject under the
+    # all-alpha guard at the bottom of the symmetric branch.
+    if s in _UWU_FACES:
+        return True
 
     # Symmetric "EYE MOUTH EYE": 3+ chars, eyes match (or paired
     # bracket pair), interior is all mouth glyphs.
     #
     # The "distinct eye" check rejects strings of pure mouth chars
     # without distinct eyes (`___`, `...`, `---`) by requiring the
-    # first character not to appear anywhere in the interior. The
-    # earlier "first must not be a mouth char" rule rejected legit
-    # faces like ``^_^`` and ``|_|`` because their eyes (`^`, `|`)
-    # are technically in the mouth set; the in-interior check
-    # accepts those while still rejecting fully-uniform sequences.
+    # first character not to appear anywhere in the interior. Lets
+    # ``^_^`` and ``|_|`` pass even though their eyes are in the
+    # mouth set.
+    #
+    # The all-alpha guard rejects 3-letter palindromes like ``lol``,
+    # ``mom``, ``pop``, ``eye``, ``did``, ``nun``, ``awa``, ``ewe``
+    # that pass the structural shape (letter-eye + letter-mouth +
+    # letter-eye) but are unambiguously prose. Real letter-letter-
+    # letter kaomoji are rare enough to enumerate via ``_UWU_FACES``;
+    # everything else with at least one non-alpha char passes.
     interior = s[1:-1]
     if not interior:
         return False
@@ -320,6 +441,15 @@ def _looks_like_bare_kaomoji(s: str) -> bool:
         return False
     first, last = s[0], s[-1]
     if first in interior:
+        return False
+    # All-ASCII-alpha guard: rejects 3-letter palindromes like `lol`,
+    # `mom`, `pop`, `eye`, `did`, `awa`. Mixed-script (e.g. `OωO`,
+    # `ಥ﹏ಥ` — `ω` is alpha but non-ASCII so `.isascii()` is False)
+    # and any string with a non-letter char (`T-T`, `Q_Q`) pass
+    # through. The canonical anime/uwu shapes that ARE all-ASCII-
+    # alpha (`OwO`, `UwU`) are explicitly allowed by the
+    # `_UWU_FACES` set checked above.
+    if s.isascii() and s.isalpha():
         return False
     if first == last:
         return True
@@ -375,9 +505,42 @@ def is_kaomoji_candidate(s: str, *, max_len: int = _KAOMOJI_MAX_LEN) -> bool:
         return False
     if _LETTER_RUN_RE.search(s):
         return False
-    if s[0] in KAOMOJI_START_CHARS:
+    # Path A: leader char + content-bearing.
+    # The content check is Path-A-only — Path B has its own
+    # structural shape rules that already exclude letter-only spans.
+    if s[0] in KAOMOJI_START_CHARS and _has_kaomoji_content(s):
         return True
     if _looks_like_bare_kaomoji(s):
+        return True
+    return False
+
+
+def _has_kaomoji_content(s: str) -> bool:
+    """Round-7 false-alarm filter: candidate must contain at least
+    one character that's neither an ASCII letter, ASCII digit, nor
+    bracket-shape glyph (the depth-walker's `_OPEN_BRACKETS` /
+    `_CLOSE_BRACKETS`). The intent is to reject Path A spans like
+    ``[a]``, ``(b)``, ``(test)`` that pass the leader-char check on
+    structural shape alone but contain no actual kaomoji-coded glyphs.
+
+    A real kaomoji always has at least one "content" character — a
+    non-letter ASCII symbol (``_ - . : ~ = ^ | / \\``), an ASCII
+    digit (``0_0``, ``9_9``), or a non-ASCII glyph (``◕``, ``≧``,
+    ``ω``, ``T﹏T``). Spans with no such content are bracketed
+    text, not faces.
+
+    Note: digits (``0``, ``9``) are *content* under this rule —
+    ``(0_0)`` passes because ``_`` is content even ignoring the
+    digits, and bare ``0_0`` passes through Path B. The carve-out
+    is for letters and brackets specifically.
+    """
+    for c in s:
+        if not c.isascii():
+            return True
+        if c.isalpha():
+            continue
+        if c in _OPEN_BRACKETS or c in _CLOSE_BRACKETS:
+            continue
         return True
     return False
 
@@ -626,6 +789,11 @@ _ARM_OUTSIDE = (
     "✦✩✪"        # round 5: star variant decorator right
     "♩"          # round 5: quarter-note decorator right
     "※"          # round 5: editorial decorator right
+    "つ"         # round 8: offering-arm right — `(face)つ` / `(つface)つ`
+                  # is the "take this" / offering-hands gesture; the
+                  # full-width tsu sits outside the close paren.
+                  # Pairs with the round-8 `_ARM_INSIDE_LEAD` addition
+                  # so both arms strip to the bare face.
 )
 # Arm/hand/decoration modifiers that appear OUTSIDE the opening paren.
 # Mirror set to ``_ARM_OUTSIDE`` for the lead halves of the same
@@ -692,8 +860,12 @@ _ARM_OUTSIDE_LEAD = (
 #   (っ˘▽˘ς)  (っ´ω`c)  (*•̀‿•́*)
 _ARM_INSIDE_TRAIL = "ςc*"
 # Arm/hand modifiers that appear just INSIDE the opening paren (leading):
-#   (っ╥﹏╥)  (*•̀‿•́*)
-_ARM_INSIDE_LEAD = "っ*"
+#   (っ╥﹏╥)  (*•̀‿•́*)  (つ◕‿◕)つ
+# Round-8: ``つ`` (full-width tsu) for the offering-hands gesture.
+# The shape is `(つ<face>)つ` — both ends carry the offering arm,
+# inside the open paren AND outside the close paren. Strips to the
+# bare face like the other paired-arm shapes.
+_ARM_INSIDE_LEAD = "っ*つ"
 
 # ``(?<=\))`` lookbehind: trail-arm strips only fire when the run
 # they'd consume is immediately preceded by ``)``. Required by the

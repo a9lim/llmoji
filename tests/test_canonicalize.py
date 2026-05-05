@@ -128,6 +128,38 @@ from llmoji.taxonomy import (
         # v2.0 round 5: Oriya cradle pose. Whitespace-fallback surfaces
         # the whole token (no inner bracket pair to walk).
         ("୧(˃ᗨ˂)୨ cradle",                "୧(˃ᗨ˂)୨"),
+        # v2.0 round 7: bare kaomoji surface via the whitespace-split
+        # branch + Path B validation.
+        (">ω< squee",                     ">ω<"),
+        ("^ω^ happy",                     "^ω^"),
+        ("OwO curious",                    "OwO"),
+        ("\\o/ celebration",               "\\o/"),
+        ("=^.^= cat purrs",                "=^.^="),
+        ("ㅠㅠ crying so hard",             "ㅠㅠ"),
+        (">:( angry",                      ">:("),
+        ("<3 love",                        "<3"),
+        ("o_O huh",                        "o_O"),
+        ("@_@ dizzy from the spin",        "@_@"),
+        ("?_? what is happening",          "?_?"),
+        # Common emotional registers (preserved leader chars).
+        ("(╯°□°）╯︵ ┻━┻ flips table",       "(╯°□°）"),
+        ("(￣▽￣)ノ casual wave",            "(￣▽￣)"),
+        ("(´；ω；`) sad face",              "(´；ω；`)"),
+        ("（｡>﹏<｡） wincing",                "（｡>﹏<｡）"),
+        ("(╥﹏╥) anguish",                  "(╥﹏╥)"),
+        ("(≧◡≦) blissful",                 "(≧◡≦)"),
+        ("(ㆆ_ㆆ) tired stare",              "(ㆆ_ㆆ)"),
+        ("(¬‿¬) smug",                     "(¬‿¬)"),
+        # Lenny face — preserved leader, depth-walk surfaces whole span.
+        ("( ͡° ͜ʖ ͡°) lenny",                "( ͡° ͜ʖ ͡°)"),
+        # Disapproval Lenny.
+        ("ಠ_ಠ disapproval",                "ಠ_ಠ"),
+        # Strong feels.
+        ("(ノಠ益ಠ)ノ strong rage",            "(ノಠ益ಠ)"),
+        # Round 8: offering-arm shapes surface intact (canonicalize
+        # strips the arms; extract preserves the raw form).
+        ("(つ◕‿◕)つ take this",              "(つ◕‿◕)"),
+        ("（つ´∀｀）つ take this fullwidth",   "（つ´∀｀）"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -148,6 +180,73 @@ def test_extract_positive(text: str, expected: str) -> None:
         "(\\*´∀｀\\*) hello",
         # Oversize balanced span → rejected.
         "(" + "a" * 50 + ") text",
+        # Plain English / common chat openers — must not match.
+        "Hello there!",
+        "Hi everyone",
+        "Hey what's up",
+        "Yes I agree",
+        "Sure thing",
+        "Got it, thanks",
+        "Done.",
+        "OK no problem",
+        "Thanks for the help",
+        "Wait a moment",
+        "Yeah probably",
+        "Cool beans",
+        "Right, makes sense",
+        "Alright then",
+        "Maybe later",
+        "Let me think",
+        "I'll get back to you",
+        "I'm not sure",
+        "We should refactor this",
+        "She said it works",
+        "The function returns",
+        # Numbers / version strings / punctuation runs.
+        "123 numbers",
+        "3.14 pi",
+        "v2.0.1 release",
+        "!!! warning",
+        "??? confused prose",
+        "... ellipsis",
+        "--- separator",
+        # Code / path-like prose.
+        "/usr/local/bin path",
+        "git@github.com:user/repo",
+        "function foo() returns",
+        "const x = 5",
+        "import re module",
+        # Markdown-shaped artifacts.
+        "**bold text**",
+        "_italic_ marker",
+        "`code` span",
+        "[link](url) here",
+        "# heading line",
+        # Single-glyph or too-short — length filter.
+        "a",
+        "(",
+        ":",
+        # Emoji (single codepoint, not a kaomoji).
+        "😀 grinning",
+        "✨ sparkle prefix",
+        # Pure mouth-glyph runs (Path B "first in interior" reject).
+        "___ underscore run",
+        "... ellipsis prose",
+        "=== separator equals",
+        "::: tripled colons",
+        # Backslash-anywhere-but-position-0 (markdown-escape artifact).
+        "(\\*bold\\*) markdown",
+        "test \\n escape",
+        # Long whitespace-split first-word that fails 4-letter-run.
+        "Hello world this is prose",
+        "Function calls everywhere",
+        # Bare-kaomoji-shape but with letters in interior (not all
+        # mouth) — should reject.
+        "abc not a face",
+        "T@T mismatched mouth",  # @ not mouth
+        # Pure-sigil text that isn't a kaomoji.
+        "%%% percent run",
+        "&&& ampersand run",
     ],
 )
 def test_extract_rejects(text: str) -> None:
@@ -421,6 +520,17 @@ def test_extract_unbalanced_bracket_fallback(
         # Lead-only and trail-only Oriya arms strip independently.
         ("୧(˃ᗨ˂)",                "(˃ᗨ˂)",              "round5-oriya-lead-only"),
         ("(˃ᗨ˂)୨",                "(˃ᗨ˂)",              "round5-oriya-trail-only"),
+        # === v2.0 round 8 — offering-arm `つ` strip ===
+        # Inside-lead `(つ` + outside-trail `)つ` shape (the canonical
+        # offering / "take this" gesture). Both arms strip to bare face.
+        ("(つ◕‿◕)つ",             "(◕‿◕)",              "round8-tsu-offer"),
+        # Fullwidth-paren version. After fullwidth → ASCII fold (rule B)
+        # the bracket walker sees `(つ´∀`)つ`; both arms strip.
+        ("（つ´∀｀）つ",            "(´∀`)",              "round8-tsu-offer-fw"),
+        # Lead-only `つ` (offering one-handed).
+        ("(つ◕‿◕)",               "(◕‿◕)",              "round8-tsu-lead-only"),
+        # Trail-only `つ` (offering after the face).
+        ("(◕‿◕)つ",                "(◕‿◕)",              "round8-tsu-trail-only"),
     ],
     ids=lambda v: v if isinstance(v, str) and len(v) < 30 else None,
 )
@@ -560,6 +670,176 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
                                             # False positive we accept; the
                                             # Stage-B synthesizer drops
                                             # noise faces that don't pool.
+        # v2.0 round 7 — ω as mouth (Greek lowercase omega, the
+        # canonical "cute / cat mouth").
+        (">ω<",                    True),
+        ("^ω^",                    True),
+        ("OωO",                    True),
+        ("=ω=",                    True),
+        # v2.0 round 7 — o/O/w/W as mouths.
+        ("^o^",                    True),   # happy / excited
+        ("*O*",                    True),
+        ("^w^",                    True),   # cat smile / uwu
+        ("OwO",                    True),
+        ("UwU",                    True),
+        (">w<",                    True),
+        # v2.0 round 7 — slash paired-eyes (celebration / facepalm).
+        ("\\o/",                   True),   # arms-up celebration
+        ("\\_/",                   True),   # facepalm-base
+        ("\\../",                  True),   # extended interior
+        # v2.0 round 7 — case-mismatch paired (confusion).
+        ("o_O",                    True),
+        ("O_o",                    True),
+        ("o.O",                    True),
+        # v2.0 round 7 — symbol eyes (already worked via round-6 +
+        # the patched "first not in interior" rule; locked in here).
+        ("@_@",                    True),   # dizzy
+        ("?_?",                    True),   # confused
+        ("+_+",                    True),   # passed-out / X-eyes
+        ("$_$",                    True),   # money eyes
+        ("#_#",                    True),
+        ("!_!",                    True),
+        ("•_•",                    True),
+        ("°_°",                    True),
+        ("._.",                    True),
+        ("x_x",                    True),
+        ("X_X",                    True),
+        ("ʘ_ʘ",                    True),
+        ("ಠ_ಠ",                    True),   # look of disapproval
+        # v2.0 round 7 — 2-char Western with `<` (heart family).
+        ("<3",                     True),   # heart
+        ("<D",                     True),
+        ("<O",                     True),
+        # v2.0 round 7 — eyebrow-prefix Western (angry / devious).
+        (">:(",                    True),
+        (">:)",                    True),
+        (">:D",                    True),
+        (">:O",                    True),
+        (">:-(",                   True),
+        (">:-D",                   True),
+        ("<:(",                    True),   # less common but symmetric
+        # v2.0 round 7 — XD-style extension to other mouths.
+        ("xP",                     True),
+        ("XP",                     True),
+        ("x3",                     True),
+        ("X3",                     True),
+        ("xp",                     True),
+        ("Xp",                     True),
+        # v2.0 round 7 — cat-wrap `=...=`.
+        ("=^.^=",                  True),
+        ("=^_^=",                  True),
+        ("=ω.ω=",                  True),
+        ("=*.*=",                  True),
+        ("=>.<=",                  True),   # cat-wrap with paired eyes inside
+        # v2.0 round 7 — Korean closed-eye doubles (crying).
+        ("ㅠㅠ",                    True),
+        ("ㅜㅜ",                    True),
+        # Round-7 false positives we still reject:
+        ("===",                    False),  # all-mouth (= is mouth)
+        ("==",                     False),  # 2-char repeated mouth
+        ("ωωω",                    False),  # all-ω, no distinct eyes
+        # Round-7 anime/uwu explicit allow (entirely-alpha shapes
+        # with `w` or `v` mouth that escape the all-alpha guard via
+        # the explicit `_UWU_FACES` set).
+        ("OwO",                    True),
+        ("UwU",                    True),
+        ("OvO",                    True),
+        ("uwu",                    True),
+        # 3-letter palindromes that LOOK like a face but are prose.
+        # The all-alpha guard in the symmetric branch rejects these.
+        ("lol",                    False),
+        ("mom",                    False),
+        ("pop",                    False),
+        ("eye",                    False),
+        ("did",                    False),
+        ("nun",                    False),
+        ("dad",                    False),
+        ("sos",                    False),
+        ("awa",                    False),
+        ("ewe",                    False),
+        ("iwi",                    False),
+        # Comprehensive negative sweep — common prose / chat openers /
+        # punctuation that the validator must NOT mistake for a face.
+        ("hi",                     False),
+        ("hey",                    False),
+        ("yes",                    False),
+        ("yep",                    False),
+        ("lol",                    False),
+        ("brb",                    False),
+        ("imo",                    False),
+        ("idk",                    False),
+        ("the",                    False),
+        ("for",                    False),
+        ("not",                    False),
+        ("but",                    False),
+        ("and",                    False),
+        ("ok",                     False),
+        ("um",                     False),
+        ("oh",                     False),
+        ("ah",                     False),
+        ("eh",                     False),
+        # Pure whitespace / punctuation / single-glyph (but length 2+).
+        ("!!",                     False),
+        ("??",                     False),
+        ("..",                     False),
+        (",,",                     False),
+        ("--",                     False),
+        ("==",                     False),
+        ("//",                     False),
+        ("~~",                     False),
+        ("**",                     False),
+        ("&&",                     False),
+        ("||",                     False),
+        # Numerics and version-like strings.
+        ("12",                     False),
+        ("3.14",                   False),
+        ("v2.0",                   False),
+        ("100%",                   False),
+        # Code / path-like fragments.
+        ("foo()",                  False),
+        ("a=b",                    False),
+        # 4+-letter-run prose (filtered by the structural rule).
+        ("Hello",                  False),
+        ("Done!",                  False),
+        ("What",                   False),
+        ("(test)",                 False),
+        # Markdown bold / italic / heading-like markers.
+        ("**a**",                  False),
+        ("__a__",                  False),
+        ("[a]",                    False),
+        # Cat-wrap variants that should reject — not actually a face.
+        ("=a=",                    False),  # interior `a` is letter, not mouth
+        ("=Hi=",                   False),  # interior letters
+        ("=__=",                   True),   # interior all-mouth, eyes `=`
+                                            # not in interior. Actually a real
+                                            # tired/dead face.
+        # Eyebrow-prefix Western that fails because the inner Western
+        # itself fails.
+        (">abc",                   False),
+        (">XYZ",                   False),
+        (">>>",                    False),  # all-`>`, no Western inside —
+                                            # `_is_western_emoticon` rejects
+                                            # the same-char-as-eye mouth run.
+        (">>",                     False),  # 2-char `>>` rejected too.
+        ("<<",                     False),
+        # Path-A bracket-letter false-alarm spans that the round-7
+        # `_has_kaomoji_content` check rejects.
+        ("[a]",                    False),
+        ("(b)",                    False),
+        ("(test)",                 False),
+        ("[abc]",                  False),  # also fails 4-letter run? no, 3
+                                            # letters — content check catches
+        # But content-bearing bracket spans pass.
+        ("(0_0)",                  True),   # digit eyes + `_` mouth content
+        ("(:)",                    True),   # `:` content
+        ("(a-a)",                  True),   # `-` content
+        # Korean variants beyond ㅠㅠ/ㅜㅜ are NOT in the closed-eye
+        # doubles set — surface only those two, reject others.
+        ("ㅎㅎ",                    False),  # Korean "haha" — out of scope
+        ("ㄴㄴ",                    False),  # "no no" — out of scope
+        # Emoji single-codepoints (length 1 → length filter rejects).
+        ("😀",                     False),
+        ("🥺",                     False),
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:

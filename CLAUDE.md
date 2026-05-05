@@ -125,14 +125,29 @@ and update the HF dataset card to match.
     extensions, box-drawing, corner brackets, music notes, hearts,
     stars, alt-bear, flowers, heart/star variants, flex/strong-feel,
     tortoise-shell, reference mark, Oriya cradle). Round 6 added
-    Path B `_looks_like_bare_kaomoji` for bare faces with no
-    leader (`*_*`, `T-T`, `^_^`, `>_<`, `:)`, `XD`).
+    Path B `_looks_like_bare_kaomoji`. Round 7 broadened Path B with
+    `ω` / `oOwW` mouth chars (catches `>ω<`, `^o^`, `OwO`, `\o/`),
+    `<>` Western eyes (catches `<3`, `>:(`), eyebrow-prefix Western
+    (`>:(`, `<:(`), cat-wrap `=...=` (`=^.^=`), Korean closed-eye
+    doubles (`ㅠㅠ`, `ㅜㅜ`), and the `XD`-style extension to
+    `[xX][DPpOo3]` (catches `xP`, `X3`). Round 8 added `つ` to the
+    arm-strip sets so the offering-hands gesture `(つface)つ`
+    canonicalizes to the bare face.
+  - Round-7 false-alarm guards: an all-ASCII-alpha reject in the
+    symmetric branch (rejects `lol` / `mom` / `pop` / `awa` /
+    palindrome prose), an explicit `_UWU_FACES` allow-set so
+    canonical anime shapes (`OwO`, `UwU`) survive the guard, a
+    same-char-as-eye reject in Western (rejects `>>` / `<<` / `==`),
+    and a `_has_kaomoji_content` check on Path A that requires at
+    least one non-letter non-bracket char (rejects `[a]`, `(b)`,
+    `(test)`).
   - `is_kaomoji_candidate` validator contract: length 2..32, no
     backslash at position ≥1 (position 0 is the wing-hand pattern),
-    no run of 4+ ASCII letters, AND (Path A OR Path B). Bracket
-    balance is *not* enforced — real corpus output is sometimes
-    unbalanced; the length cap + 4-letter-run + backslash filters
-    carry the prose-rejection role.
+    no run of 4+ ASCII letters, AND (Path A leader + content-bearing
+    OR Path B shape). Bracket balance is *not* enforced — real
+    corpus output is sometimes unbalanced; the length cap +
+    4-letter-run + backslash + content filters carry the
+    prose-rejection role.
   - `canonicalize_kaomoji` rules A–P + the 2.0 paired-arm strip
     sweep (`_ARM_OUTSIDE` / `_ARM_OUTSIDE_LEAD` cover wing-hand,
     hugging arms, sparkle, shocked sigma, horn-fingers, kissing,
@@ -141,7 +156,8 @@ and update the HF dataset card to match.
     shrug, corner-bracket / standing-pose / music / heart / star
     decorators, plus round-5 flower / heart-variant / star-variant /
     quarter-note / flex / strong-feel / tortoise-shell /
-    reference-mark / Oriya cradle decorators).
+    reference-mark / Oriya cradle decorators, plus round-8 `つ`
+    offering-hands on both arm sets).
   - `extract` / `KaomojiMatch` (span-only — affect labels are
     research-side at `llmoji_study.taxonomy_labels`).
   - Bear faces `ʕ•ᴥ•ʔ` / `ʢ◉ᴥ◉ʡ` are special: their bracket pairs go

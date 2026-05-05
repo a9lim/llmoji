@@ -44,26 +44,68 @@ function codepoints(s: string): string[] {
   return Array.from(s);
 }
 
-// Bare-kaomoji mouth-glyph regex (round-6 Path B). Mirrors
-// llmoji.taxonomy._BARE_KAOMOJI_MOUTH_RE — used to validate the
-// interior of an EYE-MOUTH-EYE bare kaomoji. Restricted to canonical
-// kaomoji mouth glyphs (ASCII connectors, dashes, CJK presentation
-// forms, geometric shapes); explicitly excludes ASCII letters so
-// prose doesn't validate.
-const BARE_KAOMOJI_MOUTH_RE = /^[_\-.;:~=^|/\\·•°‐-―‥…′-‷‿⁀、。　・ー･＿？︰-﹏▰-◿]+$/u;
+// Bare-kaomoji mouth-glyph regex (round-6 + round-7 Path B). Mirrors
+// llmoji.taxonomy._BARE_KAOMOJI_MOUTH_RE. Round-7 added `ω` (Greek
+// omega — the canonical "cute / cat mouth"), `oOwW` (ASCII letter
+// mouths for `^o^`, `OwO`, `\o/`, etc.).
+const BARE_KAOMOJI_MOUTH_RE = /^[_\-.;:~=^|/\\oOwW·•°ω‐-―‥…′-‷‿⁀、。　・ー･＿？︰-﹏▰-◿]+$/u;
 
 // Visually-paired eye glyphs for non-symmetric bare kaomoji like
-// `>_<`, `)_(`, `]_[`. These are eye shapes, NOT bracket delimiters
-// (the OPEN_BRACKETS depth-walker doesn't fire on them).
+// `>_<`, `)_(`, `]_[`. Round-7 added the slash pair (`\_/`, `\o/`)
+// and the case-mismatch pair (`o_O`, `O_o`).
 const BARE_KAOMOJI_PAIRED_EYES: ReadonlySet<string> = new Set([
   "><", "<>", ")(", "()", "][", "[]", "}{", "{}",
+  "\\/", "/\\",
+  "oO", "Oo",
 ]);
 
-// Port of llmoji.taxonomy._looks_like_bare_kaomoji. Catches faces
-// that don't start with a KAOMOJI_START_CHARS leader: symmetric
-// EYE-MOUTH-EYE (`^_^`, `T-T`, `Q_Q`, `*_*`), paired-eye (`>_<`,
-// `)_(`), Western emoticons (`:)`, `:-D`, `;)`), and 2-char closed-
-// eye doubles (`^^`, `vv`, `uu`) plus `XD` style.
+// Western emoticon eyes (round-7 expansion). The base set is `:;=8`;
+// round 7 adds `<>` so `<3` parses as 2-char Western (heart) and so
+// the eyebrow-prefix branch can recognize `>` and `<` as standalone
+// eyes that COULD start a Western face.
+const WESTERN_EYES = ":;=8<>";
+const WESTERN_MOUTHS = ")(DPpOo3<>/\\|*[]";
+const WESTERN_NOSES = "-^o'";
+
+// Round-7 helper: standard Western emoticon shape. Lifted out of
+// looksLikeBareKaomoji so the new eyebrow-prefix branch and the
+// cat-wrap recursion can reuse it. Rejects same-char-as-eye mouth
+// runs (`>>`, `<<`, `==`) — these structurally pass because `>`,
+// `<`, `=` are in both eye and mouth sets but aren't real faces.
+function isWesternEmoticon(s: string): boolean {
+  const chars = codepoints(s);
+  const n = chars.length;
+  if (!(n >= 2 && n <= 4)) return false;
+  if (!WESTERN_EYES.includes(chars[0])) return false;
+  let rest = chars.slice(1);
+  if (rest.length > 0 && WESTERN_NOSES.includes(rest[0])) {
+    rest = rest.slice(1);
+  }
+  if (rest.length === 0 || !rest.every((c) => WESTERN_MOUTHS.includes(c))) {
+    return false;
+  }
+  if (rest.every((c) => c === chars[0])) return false;
+  return true;
+}
+
+// Round-7 Korean closed-eye doubles (crying).
+const KOREAN_CLOSED_EYE_DOUBLES: ReadonlySet<string> = new Set(["ㅠㅠ", "ㅜㅜ"]);
+
+// Round-7 explicit-allow set for the canonical anime/uwu shapes
+// (`OwO`, `UwU`, etc.). All-ASCII-alpha shapes that would otherwise
+// reject under the all-alpha guard in the symmetric branch.
+const UWU_FACES: ReadonlySet<string> = new Set([
+  "OwO", "OWO", "owo",
+  "UwU", "UWU", "uwu",
+  "OvO", "OVO", "ovo",
+  "UvU", "UVU", "uvu",
+]);
+
+// Port of llmoji.taxonomy._looks_like_bare_kaomoji. Six shape
+// branches: symmetric / paired EYE-MOUTH-EYE, standard Western,
+// eyebrow-prefix Western (round-7), cat-wrap `=...=` (round-7),
+// 2-char closed-eye doubles (incl. round-7 Korean ㅠㅠ/ㅜㅜ), and
+// 2-char laugh `[xX][DPpOo3]`.
 function looksLikeBareKaomoji(s: string): boolean {
   const chars = codepoints(s);
   const n = chars.length;
@@ -72,24 +114,40 @@ function looksLikeBareKaomoji(s: string): boolean {
   // 2-char patterns.
   if (n === 2) {
     if (chars[0] === chars[1] && "^vu".includes(chars[0])) return true;
-    if (s.toUpperCase() === "XD") return true;
-    if (":;=8".includes(chars[0]) && ")(DPpOo3<>/\\|*[]".includes(chars[1])) {
+    if (KOREAN_CLOSED_EYE_DOUBLES.has(s)) return true;
+    // XD-family: `[xX][DPpOo3]` — round-7 generalizes XD/xD to also
+    // accept XP/x3/Xp/etc.
+    if ("xX".includes(chars[0]) && "DPpOo3".includes(chars[1])) return true;
+    // 2-char Western. Reject same-char (`>>`, `<<`, `==`) — these
+    // pass structurally but aren't real faces.
+    if (
+      WESTERN_EYES.includes(chars[0]) &&
+      WESTERN_MOUTHS.includes(chars[1]) &&
+      chars[0] !== chars[1]
+    ) {
       return true;
     }
     return false;
   }
 
-  // Western emoticon: 3-4 chars, starting with `:`, `;`, `=`, or `8`,
-  // optional 1-char nose, then 1-2 mouth chars.
-  if (n <= 4 && ":;=8".includes(chars[0])) {
-    let rest = chars.slice(1);
-    if (rest.length > 0 && "-^o'".includes(rest[0])) {
-      rest = rest.slice(1);
-    }
-    if (rest.length > 0 && rest.every((c) => ")(DPpOo3<>/\\|*[]".includes(c))) {
-      return true;
-    }
+  // Round-7 cat-wrap: `=EYE-MOUTH-EYE=`. Recurses one level.
+  if (n >= 5 && chars[0] === "=" && chars[n - 1] === "=") {
+    if (looksLikeBareKaomoji(chars.slice(1, -1).join(""))) return true;
   }
+
+  // Standard Western (3-4 chars).
+  if (isWesternEmoticon(s)) return true;
+
+  // Round-7 eyebrow-prefix Western: `>` or `<` prefix on a standard
+  // Western emoticon (e.g. `>:(`, `>:D`, `<:(`).
+  if (n >= 3 && "><".includes(chars[0]) && isWesternEmoticon(chars.slice(1).join(""))) {
+    return true;
+  }
+
+  // Round-7 explicit anime/uwu shapes (`OwO`, `UwU`, etc.) —
+  // all-alpha but kaomoji-coded. Allowed before the all-alpha guard
+  // below so they don't get rejected.
+  if (UWU_FACES.has(s)) return true;
 
   // Symmetric / paired-eye EYE-MOUTH-EYE.
   const interior = chars.slice(1, -1).join("");
@@ -97,11 +155,29 @@ function looksLikeBareKaomoji(s: string): boolean {
   if (!BARE_KAOMOJI_MOUTH_RE.test(interior)) return false;
   const first = chars[0];
   const last = chars[n - 1];
-  // First must NOT be a mouth char (rejects strings of pure mouth
-  // glyphs without distinct eyes, e.g. `___`, `...`).
-  if (BARE_KAOMOJI_MOUTH_RE.test(first)) return false;
+  // First must not appear in interior (rejects pure-mouth sequences
+  // without distinct eyes: `___`, `...`, `---`).
+  if (interior.includes(first)) return false;
+  // All-ASCII-alpha guard: rejects 3-letter palindromes (`lol`,
+  // `mom`, `awa`). Mixed-script (`OωO`, `ಥ﹏ಥ`) and any string with
+  // a non-letter char passes through.
+  if (/^[A-Za-z]+$/.test(s)) return false;
   if (first === last) return true;
   if (BARE_KAOMOJI_PAIRED_EYES.has(first + last)) return true;
+  return false;
+}
+
+// Round-7 content-bearing check (Path-A tightener). Rejects bracket-
+// letter-only spans like `[a]`, `(b)`, `(test)` that pass the leader
+// check on shape alone but contain no kaomoji-coded glyphs. Path B
+// has its own structural rules and bypasses this check.
+function hasKaomojiContent(s: string): boolean {
+  for (const c of codepoints(s)) {
+    if (c.charCodeAt(0) > 127) return true;  // non-ASCII
+    if (/[A-Za-z]/.test(c)) continue;
+    if (OPEN_BRACKETS.includes(c) || CLOSE_BRACKETS.includes(c)) continue;
+    return true;
+  }
   return false;
 }
 
@@ -120,7 +196,8 @@ function isKaomojiCandidate(s: string): boolean {
   if (chars.length < 2 || chars.length > KAOMOJI_MAX_LEN) return false;
   if (chars.slice(1).includes("\\")) return false;
   if (LETTER_RUN_RE.test(s)) return false;
-  if (KAOMOJI_START_CHARS.has(chars[0])) return true;
+  // Path A: leader char + content-bearing.
+  if (KAOMOJI_START_CHARS.has(chars[0]) && hasKaomojiContent(s)) return true;
   if (looksLikeBareKaomoji(s)) return true;
   return false;
 }
