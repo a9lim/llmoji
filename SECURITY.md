@@ -17,16 +17,6 @@ Only the latest minor version on PyPI receives security and privacy fixes. If yo
 
 Versions of llmoji before 1.2.0 would have leaked your HuggingFace username on submission. 1.2.0 patches this. Please upgrade (`pip install --upgrade llmoji`).
 
-## Detection notice for upgraders (2.0.0)
-
-Not a security or privacy issue, but a recovery one. v2.0.0 broadens kaomoji detection significantly. The leading-glyph set picks up wing-hand `\(^o^)/`, hugging arms `⊂(...)⊃`, sparkle `✧(...)✧`, shocked sigma `Σ(°△°|||)`, kissing `ε(◕‿◕)з`, raised hands `ƪ(˘⌣˘)ʃ`, the bear face `ʕ•ᴥ•ʔ`, paired-arm leaders like `٩(...)۶`, `ᕕ(...)ᕗ`, or `໒(...)७`, the iconic shrug `¯\_(ツ)_/¯`, and box-drawing pose pairs. Pre-2.0 live hooks rejected most of these at the start-character filter; if you've been running an older version, your journal is missing them.
-
-Run `llmoji install --hard --yes && llmoji import --yes` after upgrading (or `--soft` instead of `--hard`, see the README for the placement choice). The reinstall re-renders the bash case-pattern with the new leading-glyph set. The import walks every detected harness's native transcripts (Claude Code rollouts, Codex sessions, Hermes sessions) and dedup-merges any newly-recognized rows back into the journals. Re-runs are idempotent.
-
-## Install notice for upgraders (2.0.0)
-
-Also new in 2.0.0: `llmoji install` now requires exactly one of `--soft` or `--hard`. The flags pick the placement of the leading-kaomoji reminder (per-turn nudge hook for `--hard`; an append to the harness's persistent system-prompt doc for `--soft`). The journal-write hook is installed under both modes, so kaomoji capture is unaffected by the choice. Please see the README for the per-harness soft-doc paths and a longer note on which placement to pick.
-
 ## Privacy model
 
 llmoji is a privacy-sensitive tool. The package ships aggregates from your machine to a shared corpus so privacy is important here.
@@ -36,7 +26,6 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 - **Raw `user_text` or `assistant_text`** at `~/.<harness>/kaomoji-journal.jsonl`. These hold the raw data for every kaomoji-bearing turn. They never leave your machine.
 - **Per-cell synthesizer cache** at `~/.llmoji/cache/per_cell.jsonl`. Each row holds a structured adjective bag (`primary_affect` + `stance_modality_function`) drawn from the locked LEXICON, keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. The bag itself contains no free-form text and no journal content — only adjectives from the corpus vocabulary — so the cache is materially less leak-prone than v1's per-turn paraphrase cache. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe (and removes the orphaned legacy v1 `per_instance.jsonl` if still on disk after upgrading from 1.x).
 - **Submission token** at `~/.llmoji/.salt`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
-- **The soft-doc append**, when you run `llmoji install --soft`. The append lands under a `# Kaomoji` heading at the end of the harness's persistent system-prompt doc (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.hermes/SOUL.md`, `~/.config/opencode/AGENTS.md`, or `~/.openclaw/workspace/SOUL.md` per harness). The text is one of two locked wordings (the one-sentence default or the v7 introspection paragraph; see `--long`). Nothing personal goes in the append, and nothing about the append leaves your machine. Please review the file after `install --soft` if you want to confirm what was added; `llmoji uninstall` removes the block by exact string match.
 
 ### What ships when you `upload`
 
@@ -60,7 +49,7 @@ Please review every `~/.llmoji/bundle/<source-model>.jsonl` before running `uplo
 
 ### Hooks are read-only
 
-The bash hooks shipped with each provider append one row to a journal. They never block the turn, modify the reply, or call out to the network. The same is true under `--hard`'s per-turn nudge hook: it returns a small JSON envelope with the kaomoji-leading reminder as additional context, then exits. Under `--soft`, no per-turn hook is installed at all; the reminder lives in the system-prompt doc and is read by the harness on session start, the same way the doc's other contents are.
+The bash hooks shipped with each provider append one row to a journal. They never block the turn, modify the reply, or call out to the network. 
 
 ## Model and API trust
 
