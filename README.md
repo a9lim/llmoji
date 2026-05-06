@@ -86,7 +86,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
   --model llama3.1
 ```
 
-`analyze` caches per-instance descriptions at `~/.llmoji/cache/per_instance.jsonl` keyed by content hash plus the synthesis model id, backend, and base URL. `llmoji cache clear` wipes it.
+`analyze` caches per-cell adjective bags at `~/.llmoji/cache/per_cell.jsonl` keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. Re-runs that change which rows fall in a cell's sample miss cleanly while stable cells hit. `llmoji cache clear` wipes it (and the legacy v1 `per_instance.jsonl` if still on disk after upgrading from 1.x).
 
 ---
 
@@ -144,9 +144,11 @@ Why pick soft over hard? The per-turn nudge frames the kaomoji as a thing the pr
 
 ### Analysis
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each entry a source model wrote, the chosen synthesizer model describes that specific instance. Then, it aggregates the descriptions for each unique kaomoji per model and writes an overall meaning. This summarized output is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each `(source_model, canonical_kaomoji)` cell, it samples up to 4 representative rows and calls the synthesizer once with all 4 instances visible. The synthesizer returns a structured adjective bag drawn from a locked 48-word lexicon: 1-3 from the Russell-circumplex anchors (HP / LP / HN-D / HN-S / LN / NB) plus 3-5 from extension axes (functional, stance, modality, confidence). This bag is the only thing that ships in the bundle.
 
-The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates everything in a single `analyze` run, so the descriptions across source models are comparable.
+The lexicon is locked under `lexicon_version` in the manifest so cross-corpus aggregation can refuse to mix versions if the vocabulary ever rotates. v2's single-stage shape replaces the v1.x two-stage prose pipeline that produced free-form descriptions per cell — those clustered as noise in PCA because most of their token mass was structural template ("this kaomoji conveys X paired with Y"). Pure adjective bags carry signal-per-token instead.
+
+The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates everything in a single `analyze` run, so the bags across source models are comparable.
 
 | Backend     | API                                          | Default model                  |
 |-------------|----------------------------------------------|--------------------------------|
@@ -166,18 +168,18 @@ The synthesizer is one of three backends, chosen via `--backend`. The same synth
   gpt-5.5.jsonl
 ```
 
-- **`manifest.json`**: package version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
-- **`<source-model>.jsonl`**: one row per kaomoji as that model used it, with the synthesized meaning. The filename stem is the model id .
+- **`manifest.json`**: package version, lexicon version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
+- **`<source-model>.jsonl`**: one row per kaomoji as that model used it, shaped `{kaomoji, count, synthesis: {primary_affect: [...], stance_modality_function: [...]}}`. Both adjective lists draw from disjoint enum subsets of the locked lexicon. The filename stem is the model id.
 
 ---
 
 ## Privacy
 
-| Tier                                       | Where                                | Shipped on `upload`? |
-|--------------------------------------------|--------------------------------------|----------------------|
-| Raw user and assistant text                | `~/.<harness>/kaomoji-journal.jsonl` | Never                |
-| Per-instance synthesizer paraphrase        | `~/.llmoji/cache/per_instance.jsonl` | Never                |
-| Synthesized summaries and counts per model | `~/.llmoji/bundle/`                  | Yes                  |
+| Tier                                          | Where                                | Shipped on `upload`? |
+|-----------------------------------------------|--------------------------------------|----------------------|
+| Raw user and assistant text                   | `~/.<harness>/kaomoji-journal.jsonl` | Never                |
+| Per-cell adjective-bag cache (locked lexicon) | `~/.llmoji/cache/per_cell.jsonl`     | Never                |
+| Synthesized adjective bags + counts per model | `~/.llmoji/bundle/`                  | Yes                  |
 
 Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
@@ -206,7 +208,7 @@ Subagent traffic on hermes is not currently filtered; the upstream payload doesn
 
 opencode auto-loads any `.ts` file in the plugins dir; file presence is the registration. openclaw additionally needs `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess` set in `~/.openclaw/config.json`; `install` flips this for you. Under `--soft`, the rendered plugin file omits the per-turn nudge code so the doc append is the only place the reminder lives.
 
-`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files), the settings entry, and the soft-doc block if one was appended. `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-instance cache are preserved; wipe those with `llmoji cache clear`.
+`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files), the settings entry, and the soft-doc block if one was appended. `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-cell synth cache are preserved; wipe the cache with `llmoji cache clear`.
 
 ---
 

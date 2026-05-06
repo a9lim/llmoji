@@ -34,7 +34,7 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 ### What stays on your machine
 
 - **Raw `user_text` or `assistant_text`** at `~/.<harness>/kaomoji-journal.jsonl`. These hold the raw data for every kaomoji-bearing turn. They never leave your machine.
-- **Per-instance synthesizer cache** at `~/.llmoji/cache/per_instance.jsonl`. Each row is a synthesizer-paraphrased description of one turn, keyed by content hash plus the synthesizer model id, backend, and (for `--backend local`) base URL. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe.
+- **Per-cell synthesizer cache** at `~/.llmoji/cache/per_cell.jsonl`. Each row holds a structured adjective bag (`primary_affect` + `stance_modality_function`) drawn from the locked LEXICON, keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. The bag itself contains no free-form text and no journal content — only adjectives from the corpus vocabulary — so the cache is materially less leak-prone than v1's per-turn paraphrase cache. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe (and removes the orphaned legacy v1 `per_instance.jsonl` if still on disk after upgrading from 1.x).
 - **Submission token** at `~/.llmoji/.salt`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
 - **The soft-doc append**, when you run `llmoji install --soft`. The append lands under a `# Kaomoji` heading at the end of the harness's persistent system-prompt doc (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.hermes/SOUL.md`, `~/.config/opencode/AGENTS.md`, or `~/.openclaw/workspace/SOUL.md` per harness). The text is one of two locked wordings (the one-sentence default or the v7 introspection paragraph; see `--long`). Nothing personal goes in the append, and nothing about the append leaves your machine. Please review the file after `install --soft` if you want to confirm what was added; `llmoji uninstall` removes the block by exact string match.
 
@@ -42,14 +42,14 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 
 The bundle is human-readable JSON, laid out flat: one top-level manifest plus one `.jsonl` per source model, no subdirectories.
 
-- **`manifest.json`**: package version, the synthesis backend and model id used, per-source-model row counts, total synthesized rows, list of providers seen, generation timestamp, any included `--notes`, and a salted-hash submitter id.
-- **`<source-model>.jsonl`**: one row per canonical kaomoji as that model used it, with the synthesized meaning. 
+- **`manifest.json`**: package version, lexicon version, the synthesis backend and model id used, per-source-model row counts, total synthesized rows, list of providers seen, generation timestamp, any included `--notes`, and a salted-hash submitter id.
+- **`<source-model>.jsonl`**: one row per canonical kaomoji as that model used it, shaped `{kaomoji, count, synthesis: {primary_affect: [...], stance_modality_function: [...]}}`. Both arrays draw exclusively from the locked LEXICON enum, so no free-form text and no journal content lands in a bundle row.
 
 The submitter id is a 32-hex-char (128-bit) salted hash of the per-machine token plus the package version. We do not collect HuggingFace usernames or any account-bound identifier.
 
 ### Singleton kaomoji caveat
 
-For frequent kaomoji, the per-face summary pools many instances and so abstracts over many contexts. For a kaomoji that appears once, the synthesized line IS effectively a paraphrase of that one turn. Mitigations:
+In v1.x the per-face summary was free-form prose, and for a kaomoji that appeared once, the synthesized line was effectively a paraphrase of that one turn — a small singleton-leak surface. v2 removed this surface entirely: the row carries only adjectives from a 48-word locked vocabulary, so a singleton kaomoji's row is a bag like `{primary_affect: ["frustrated"], stance_modality_function: ["wry", "self-correcting", "tender"]}` rather than a paraphrase of the underlying turn. Even so, please continue to review the bundle before uploading:
 
 - `analyze` prints a per-face preview before declaring done.
 - `upload` re-prompts before committing.

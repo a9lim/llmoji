@@ -18,7 +18,7 @@ import json
 import sys
 
 from llmoji import paths
-from llmoji._util import iter_bundle_data_files
+from llmoji._util import flatten_synthesis, iter_bundle_data_files
 
 
 def main() -> int:
@@ -35,6 +35,7 @@ def main() -> int:
     manifest = json.loads(manifest_path.read_text())
     print(f"bundle: {bundle}")
     print(f"  llmoji version:    {manifest.get('llmoji_version', '?')}")
+    print(f"  lexicon version:   {manifest.get('lexicon_version', '?')}")
     print(f"  synthesis backend: {manifest.get('synthesis_backend', '?')}")
     print(f"  synthesis model:   {manifest.get('synthesis_model_id', '?')}")
     print(f"  generated at:      {manifest.get('generated_at', '?')}")
@@ -58,16 +59,22 @@ def main() -> int:
         print("no source-model .jsonl files — bundle is empty.")
         return 2
 
-    print("descriptions (the only prose that ships):")
+    print("synthesis bags (the only content that ships):")
     print()
     for data_file, rows in data:
         print(f"  ── {data_file.name}  ({len(rows)} faces) ──")
         for row in rows:
             kao = row.get("kaomoji", "?")
             count = row.get("count", "?")
-            desc = row.get("synthesis_description", "")
+            synth = row.get("synthesis") or {}
+            bag = flatten_synthesis(synth) if synth else (
+                # Pre-v2 bundles carried free-form prose under
+                # `synthesis_description`. Render that verbatim if
+                # we're inspecting a legacy bundle.
+                row.get("synthesis_description", "")
+            )
             print(f"    {kao}   ({count} occurrences)")
-            print(f"        {desc}")
+            print(f"        {bag}")
         print()
 
     return 0

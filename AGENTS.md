@@ -209,7 +209,7 @@ and update the HF dataset card to match.
     but stay OUT of arm-strip — the whole bear is the kaomoji, no
     inner `(...)` to fall back to. Same for corner-bracket-only
     standalone faces (`「・_・」`, `〔・_・〕`).
-- **`llmoji.synth_prompts`**: `LEXICON` (46-entry locked
+- **`llmoji.synth_prompts`**: `LEXICON` (48-entry locked
   vocabulary — circumplex anchors tagged with HP / LP / HN-D /
   HN-S / LN / NB primary quadrant + extension axes tagged
   `functional` / `stance` / `modality` / `confidence`),
