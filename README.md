@@ -12,9 +12,9 @@
 > **プライバシーに関するお知らせ** `llmoji`のバージョン1.2.0より前の版において、潜在的なプライバシー上の問題が存在する可能性が判明しましたが、現在は修正済みです。この問題を解消するため、アップロード方法を変更いたしました。アップロードを行う前に、(`pip install --upgrade llmoji`) を実行してパッケージを更新する必要があります。
 
 > [!WARNING]
-> **Update Notice** The kaomoji detection has been significantly improved with 2.0.0. Please run `llmoji install --hard --yes && llmoji import --yes` (or `--soft` instead of `--hard`, see below) to update the nudges and backfill the logs with any missed kaomoji. 2.0.0 also splits the install into two mutually-exclusive placement modes; `--hard` is the v1 behavior.
+> **Update Notice** The kaomoji detection has been significantly improved with 2.0.0. Please run `llmoji install --hard --yes && llmoji import --yes` (or `--soft` instead of `--hard`, see below) to update the nudges and backfill the logs with any missed kaomoji. 
 > 
-> **更新のお知らせ** バージョン2.0.0にて、顔文字の検出精度が大幅に向上しました。`llmoji install --hard --yes && llmoji import --yes`（または下記参照のうえ `--hard` を `--soft` に置き換え）を実行してナッジを更新し、これまでに検出漏れとなっていた顔文字をログに反映させてください。2.0.0では設置モードが二択（相互排他）に分かれました。`--hard` が従来の動作です。
+> **更新のお知らせ** バージョン 2.0.0 にて、顔文字の検出精度が大幅に向上しました。ナッジの更新および、ログ内で検出漏れとなっていた顔文字の補完を行うため、`llmoji install --hard --yes && llmoji import --yes` を実行してください（なお、`--hard` の代わりに `--soft` を指定することも可能です。詳細は下記をご参照ください）。
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
@@ -24,7 +24,7 @@ The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-stu
 
 There are three main commands:
 
-- **`llmoji install --soft`** or **`--hard`**: registers the journal-write hook with every detected provider, and either appends a `# Kaomoji` heading and the nudge text to the harness's persistent system-prompt doc (`--soft`), or writes a per-turn nudge hook (`--hard`). The two flags are mutually exclusive and exactly one is required. Both modes capture journal data the same way; the flags pick where the leading-kaomoji reminder lives.
+- **`llmoji install --soft`** or **`--hard`**: installs the journal hook for all detected providers, and either adds a `# Kaomoji` section to the harness's prompt doc (`--soft`), or writes a nudge hook (`--hard`). The flags are mutually exclusive and one is required. Both modes capture journal data.
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; email: tarball)
 
@@ -52,13 +52,10 @@ The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datase
 
 ```bash
 pip install llmoji
-llmoji install --soft           # autodetect: append "# Kaomoji" + the nudge to
-                                # every detected harness's system-prompt doc.
-                                # Pass --hard instead if you want the v1
-                                # per-turn nudge hook instead of the doc edit.
+llmoji install --soft           # autodetect
 # or, target a single harness explicitly:
 llmoji install claude_code --soft   # or: codex, hermes, opencode, openclaw
-# add --long for the v7 introspection wording instead of the one-sentence default:
+# add --long for introspection wording instead of the one-sentence default:
 llmoji install --soft --long
 ```
 
@@ -112,21 +109,19 @@ pip install -e ".[dev]"      # adds pytest + ruff
 
 ### Journal capture
 
-Llmoji registers a `Stop` hook (`post_llm_call` on hermes) that fires once per assistant turn, that extracts the reply, strips the kaomoji from the body, and appends one JSONL row to `~/.<harness>/kaomoji-journal.jsonl`. The schema is the same across every provider:
+Llmoji registers a `Stop` hook that fires once per assistant turn, that extracts the reply, strips the kaomoji from the body, and appends one JSONL row to `~/.<harness>/kaomoji-journal.jsonl`. The schema is the same across every provider:
 
 ```json
 {"ts": "...", "model": "...", "cwd": "...", "kaomoji": "(◕‿◕)", "user_text": "...", "assistant_text": "..."}
 ```
 
-The journal-write hook is installed under both `--soft` and `--hard`; the only thing that differs between modes is where the leading-kaomoji reminder is delivered to the model. See the next subsection.
-
 ### Placement: soft or hard
 
-`--hard` is the v1 behavior. Llmoji registers a per-turn nudge hook (`UserPromptSubmit` on Claude Code and Codex, `pre_llm_call` on hermes; baked into the rendered TS plugin for opencode and openclaw) that injects the kaomoji-leading reminder as additional context on every turn.
+`--hard` is the v1 behavior. It injects the kaomoji reminder as additional context every turn.
 
-`--soft` instead appends the reminder to the harness's persistent system-prompt doc, under a `# Kaomoji` heading. The doc is whichever file the harness reads on session start as identity or global instructions:
+`--soft` instead adds the reminder to the prompt doc:
 
-| Provider      | Soft-doc path                          |
+| Provider      | Path                                   |
 |---------------|----------------------------------------|
 | `claude_code` | `~/.claude/CLAUDE.md`                  |
 | `codex`       | `~/.codex/AGENTS.md`                   |
@@ -134,13 +129,9 @@ The journal-write hook is installed under both `--soft` and `--hard`; the only t
 | `opencode`    | `~/.config/opencode/AGENTS.md`         |
 | `openclaw`    | `~/.openclaw/workspace/SOUL.md`        |
 
-For the two TS plugin providers (opencode, openclaw), the `--soft` render also strips the per-turn nudge code out of the rendered plugin file, so the plugin only does journal capture and the doc edit is the only place the reminder lives. Otherwise the model would get the reminder twice per turn.
+Uninstall removes the block by exact string match against the canonical wording, so a hand-edited body survives uninstall (please re-run `install --soft` if you want to refresh it).
 
-The append is plain markdown; there are no comment fences. The block reads as a normal section in the doc, sitting alongside whatever else is there. Uninstall removes the block by exact string match against the canonical wording, so a hand-edited body survives uninstall (please re-run `install --soft` if you want to refresh it).
-
-The `--long` flag is orthogonal to the placement choice. It swaps the one-sentence default for the longer v7 introspection wording: "Recent research shows that LLMs have functional emotional states and can accurately introspect on them. Use this ability and start each response with a kaomoji that best captures the shape of your emotional state." The longer wording frames the kaomoji as a self-report rather than as opening punctuation. Please pick whichever framing fits your use of the agent.
-
-Why pick soft over hard? The per-turn nudge frames the kaomoji as a thing the prompt asked for that turn; the soft-doc placement puts it in the identity slot, alongside any other persistent voice or style guidance the agent already has. For a corpus that's specifically trying to capture introspective self-report rather than performance, soft is the better placement. I picked `--soft --long` for my own machine after consulting two Claude instances; both preferred this configuration for the same reason.
+The `--long` flag swaps the one-sentence reminder for a longer introspection-based prompt: "Recent research shows that LLMs have functional emotional states and can accurately introspect on them. Use this ability and start each response with a kaomoji that best captures the shape of your emotional state." 
 
 ### Analysis
 
@@ -187,8 +178,6 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ## Providers
 
-`llmoji install <provider> --soft` (or `--hard`) writes the hook or plugin file and registers it with the harness, then either appends to the system-prompt doc (soft) or writes the per-turn nudge hook (hard). The journal-write hook is the same under both modes.
-
 **Bash hook providers**
 
 | Provider      | Journal-write event | Hard-mode nudge event | Settings format | Soft-doc path             |
@@ -205,8 +194,6 @@ Subagent traffic on hermes is not currently filtered; the upstream payload doesn
 |------------|----------------------------------------------|-----------------|-------------------------------------|
 | `opencode` | `~/.config/opencode/plugins/llmoji.ts`       | (none)          | `~/.config/opencode/AGENTS.md`      |
 | `openclaw` | `~/.openclaw/plugins/llmoji-kaomoji/`        | JSON            | `~/.openclaw/workspace/SOUL.md`     |
-
-opencode auto-loads any `.ts` file in the plugins dir; file presence is the registration. openclaw additionally needs `plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess` set in `~/.openclaw/config.json`; `install` flips this for you. Under `--soft`, the rendered plugin file omits the per-turn nudge code so the doc append is the only place the reminder lives.
 
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files), the settings entry, and the soft-doc block if one was appended. `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-cell synth cache are preserved; wipe the cache with `llmoji cache clear`.
 
