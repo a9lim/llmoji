@@ -181,32 +181,40 @@ LEXICON_VERSION: int = 1
 # :data:`LEXICON_VERSION`), don't paper over it with a free-form
 # escape hatch.
 
+# NOTE: Anthropic's structured-output JSON-schema validator only
+# supports ``minItems`` with values 0 or 1, and rejects ``maxItems``
+# entirely (verified via 400-response on a real call + their public
+# docs). OpenAI's strict mode has the same restriction. So the count
+# targets (1-3 for primary_affect, 3-5 for stance_modality_function)
+# live in the array descriptions instead — capable models follow
+# them reliably; if trial output shows count violations we'll add
+# post-call validation, but the lightweight path is correct first.
+
 SYNTHESIS_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {
         "primary_affect": {
             "type": "array",
             "description": (
-                "1-3 of the listed adjectives"
+                "Pick 1-3 of the listed adjectives that best "
+                "capture the core affect."
             ),
             "items": {
                 "type": "string",
                 "enum": list(CIRCUMPLEX_ANCHORS),
             },
-            "minItems": 1,
-            "maxItems": 3,
         },
         "stance_modality_function": {
             "type": "array",
             "description": (
-                "3-5 of the listed adjectives"
+                "Pick 3-5 of the listed adjectives capturing "
+                "stance, modality, meta-cognitive function, or "
+                "confidence level."
             ),
             "items": {
                 "type": "string",
                 "enum": list(EXTENSION_AXES),
             },
-            "minItems": 3,
-            "maxItems": 5,
         },
     },
     "required": ["primary_affect", "stance_modality_function"],
