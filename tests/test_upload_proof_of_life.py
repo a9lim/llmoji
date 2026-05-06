@@ -40,7 +40,10 @@ def _seed_bundle(bundle_dir: Path) -> None:
     (bundle_dir / "test-model.jsonl").write_text(
         json.dumps({
             "kaomoji": "(◕‿◕)", "count": 1,
-            "synthesis_description": "test"
+            "synthesis": {
+                "primary_affect": ["cheerful"],
+                "stance_modality_function": ["warm", "sincere"],
+            },
         }) + "\n"
     )
 

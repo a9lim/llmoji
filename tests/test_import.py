@@ -342,3 +342,195 @@ def test_cli_import_dispatches_to_import_provider(
     assert "saw 10" in out
     assert "would append 4" in out
     assert "skipped 6" in out
+
+
+# ---------------------------------------------------------------------------
+# CLI autodetect path — no-arg ``llmoji import``
+# ---------------------------------------------------------------------------
+
+
+def _always_present(_self: object) -> bool:
+    _ = _self
+    return True
+
+
+def _never_present(_self: object) -> bool:
+    _ = _self
+    return False
+
+
+def test_import_no_args_zero_detected_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No detected importable harnesses → exit 2 with a message naming
+    the parent dirs we looked at."""
+    from llmoji import cli
+    from llmoji.providers import HookInstaller
+
+    monkeypatch.setattr(HookInstaller, "is_present", _never_present)
+
+    parser = cli._build_parser()
+    args = parser.parse_args(["import"])
+    rc = cli._cmd_import(args)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no importable harnesses detected" in err
+
+
+def test_import_no_args_with_yes_imports_all_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--yes`` skips the prompt; every detected importable provider
+    runs through ``import_provider``."""
+    from llmoji import cli
+    from llmoji.backfill import IMPORTABLE_PROVIDERS
+    from llmoji.providers import PROVIDERS, HookInstaller
+
+    # Patch the base + every concrete provider class so subclasses
+    # with their own ``is_present`` override don't bypass the patch.
+    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    for _cls in PROVIDERS.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
+
+    imported: list[tuple[str, bool]] = []
+
+    def fake_import_one(
+        name: str, *, since: str | None, dry_run: bool,
+    ) -> tuple[bool, str | None]:
+        _ = since  # captured by signature; not used in this assertion
+        imported.append((name, dry_run))
+        return True, None
+
+    monkeypatch.setattr(cli, "_import_one", fake_import_one)
+
+    parser = cli._build_parser()
+    args = parser.parse_args(["import", "--yes"])
+    rc = cli._cmd_import(args)
+
+    assert rc == 0
+    # Every IMPORTABLE_PROVIDERS entry ran (and ONLY those — no
+    # opencode / openclaw which can't be replayed).
+    assert {name for name, _ in imported} == set(IMPORTABLE_PROVIDERS)
+    # dry_run defaulted to False.
+    assert all(dr is False for _, dr in imported)
+
+
+def test_import_no_args_passes_since_and_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--since`` and ``--dry-run`` propagate to every per-provider
+    call in the autodetect batch."""
+    from llmoji import cli
+    from llmoji.providers import PROVIDERS, HookInstaller
+
+    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    for _cls in PROVIDERS.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
+
+    seen: list[dict[str, object]] = []
+
+    def fake_import_one(
+        name: str, *, since: str | None, dry_run: bool,
+    ) -> tuple[bool, str | None]:
+        seen.append({"name": name, "since": since, "dry_run": dry_run})
+        return True, None
+
+    monkeypatch.setattr(cli, "_import_one", fake_import_one)
+
+    parser = cli._build_parser()
+    args = parser.parse_args([
+        "import", "--yes", "--dry-run", "--since", "2026-01-01T00:00:00Z",
+    ])
+    rc = cli._cmd_import(args)
+
+    assert rc == 0
+    assert seen, "no providers were imported"
+    for entry in seen:
+        assert entry["since"] == "2026-01-01T00:00:00Z"
+        assert entry["dry_run"] is True
+
+
+def test_import_no_args_partial_failure_returns_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A single provider failing doesn't abort the rest of the batch.
+    Exit 1 reports the failure(s) on stderr."""
+    from llmoji import cli
+    from llmoji.providers import PROVIDERS, HookInstaller
+
+    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    for _cls in PROVIDERS.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
+
+    def fake_import_one(
+        name: str, *, since: str | None, dry_run: bool,
+    ) -> tuple[bool, str | None]:
+        _ = since, dry_run  # signature-only; failure dispatch is by name
+        if name == "codex":
+            return False, "RuntimeError: simulated"
+        return True, None
+
+    monkeypatch.setattr(cli, "_import_one", fake_import_one)
+
+    parser = cli._build_parser()
+    args = parser.parse_args(["import", "--yes"])
+    rc = cli._cmd_import(args)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "codex" in err
+    assert "simulated" in err
+
+
+def test_import_no_args_prompt_n_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``--yes``, answering 'n' to the prompt aborts before any
+    import runs."""
+    from llmoji import cli
+    from llmoji.providers import PROVIDERS, HookInstaller
+
+    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
+    for _cls in PROVIDERS.values():
+        monkeypatch.setattr(_cls, "is_present", _always_present)
+
+    imported: list[str] = []
+
+    def fake_import_one(
+        name: str, *, since: str | None, dry_run: bool,
+    ) -> tuple[bool, str | None]:
+        _ = since, dry_run  # signature-only
+        imported.append(name)
+        return True, None
+
+    monkeypatch.setattr(cli, "_import_one", fake_import_one)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+
+    parser = cli._build_parser()
+    args = parser.parse_args(["import"])
+    rc = cli._cmd_import(args)
+
+    assert rc == 1
+    assert imported == []
+
+
+def test_import_rejects_non_importable_providers_at_argparse(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``llmoji import opencode`` is rejected at argparse time —
+    ``opencode`` and ``openclaw`` are installable but not importable
+    (no replayable transcript shape on disk). Tightening ``choices=``
+    to ``IMPORTABLE_PROVIDERS`` means the user gets a clear argparse
+    error instead of a runtime ``ValueError`` from
+    ``import_provider``."""
+    from llmoji import cli
+
+    parser = cli._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["import", "opencode"])
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "opencode" in err

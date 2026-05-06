@@ -41,7 +41,24 @@ def _message_text(msg: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
+def _iter_chat_messages_conversation(
+    conv: dict[str, Any],
+    *,
+    source: str,
+    model: str | None,
+) -> Iterator[ScrapeRow]:
+    """Walk a single conversation's ``chat_messages`` list and yield
+    one :class:`ScrapeRow` per kaomoji-led assistant message.
+
+    Shared between :func:`iter_claude_export` (one ``conversations.json``
+    holding all conversations as a list, no per-message model info)
+    and :func:`llmoji.sources.claude_export_alt.iter_claude_export_alt`
+    (one ``.json`` per conversation, with ``model`` carried at
+    conversation top-level). Both formats use the same per-message
+    shape — ``sender``, ``parent_message_uuid``, ``content[]`` blocks
+    — so the per-message walk is identical; only the file-discovery
+    layer differs.
+    """
     msgs = conv.get("chat_messages") or []
     if not msgs:
         return
@@ -75,8 +92,8 @@ def _iter_conversation(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
             text_extractor=_message_text,
         )
         yield ScrapeRow(
-            source="claude-ai-export",
-            model=None,
+            source=source,
+            model=model,
             timestamp=str(m.get("created_at") or ""),
             cwd=None,
             assistant_text=body,
@@ -140,4 +157,6 @@ def iter_claude_export(
             candidates.append((uuid, conv, _conv_content_score(conv)))
 
     for conv in dedup_by_id_keep_richest(candidates).values():
-        yield from _iter_conversation(conv)
+        yield from _iter_chat_messages_conversation(
+            conv, source="claude-ai-export", model=None,
+        )

@@ -27,7 +27,22 @@ def cache_dir() -> Path:
     return llmoji_home() / "cache"
 
 
+def cache_per_cell_path() -> Path:
+    """Per-(source_model, canonical_kaomoji) synthesis cache, v2.
+
+    One row per cell — the v2 single-stage pipeline has no
+    per-instance step, so the per-cell granularity matches the
+    actual unit of synthesis. Key shape includes ``sample_set_hash``
+    so corpus growth that changes a cell's sampled rows misses the
+    cache cleanly.
+    """
+    return cache_dir() / "per_cell.jsonl"
+
+
 def cache_per_instance_path() -> Path:
+    """Legacy v1 per-instance cache path. Orphaned by v2 — kept here
+    only so the first v2 ``analyze`` run can detect it and surface
+    a one-line cleanup notice (``llmoji cache clear`` wipes both)."""
     return cache_dir() / "per_instance.jsonl"
 
 

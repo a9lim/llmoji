@@ -37,6 +37,11 @@ class ClaudeCodeProvider(JsonSettingsHookInstaller):
     hooks_dir = Path.home() / ".claude" / "hooks"
     settings_path = Path.home() / ".claude" / "settings.json"
     journal_path = Path.home() / ".claude" / "kaomoji-journal.jsonl"
+    # Claude Code's persistent global memory file. Auto-loaded into
+    # every session's system prompt by Claude Code itself (see
+    # https://docs.claude.com/en/docs/claude-code/memory). ``llmoji
+    # install --soft`` writes a marker-fenced block here.
+    system_prompt_doc_path = Path.home() / ".claude" / "CLAUDE.md"
     hook_template = "claude_code.sh.tmpl"
     # The validate partial is inlined inside a per-entry while-loop
     # in the rendered hook (one iteration per text-bearing assistant

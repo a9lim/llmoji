@@ -7,6 +7,11 @@
 # Substituted by Python at render time:
 #   ${KAOMOJI_START_CASE}   bash case-glob built from
 #                           llmoji.taxonomy.KAOMOJI_START_CHARS
+#   ${PYTHON_INTERPRETER}   absolute path to the Python interpreter
+#                           that installed the hook (sys.executable
+#                           at install time). Used for the Path B
+#                           fallback so the hook runs against the same
+#                           taxonomy.py the user has installed.
 #   ${SKIP_ACTION}          per-provider statement that gracefully
 #                           bails out of the hook (e.g. ``exit 0`` or
 #                           ``echo '{}'; exit 0`` for hermes)
@@ -14,19 +19,61 @@
 #   $KAOMOJI           the validated leading prefix (only valid when
 #                      the script reaches the end of this partial)
 #
-# Mirrors llmoji.taxonomy.is_kaomoji_candidate: ≥2 bytes, ≤32 bytes,
-# first char in KAOMOJI_START_CHARS, no ASCII backslash. The bracket
-# balance check the Python validator does is left to consumers (the
-# Python-side iter_journal validator runs again on read).
+# Mirrors llmoji.taxonomy.is_kaomoji_candidate: ≥2 chars, ≤32 chars,
+# no ASCII backslash (after position 0), no run of 4+ ASCII letters,
+# AND first char in KAOMOJI_START_CHARS (Path A) OR the candidate
+# matches _looks_like_bare_kaomoji (Path B, round-6 shape match).
+# Bracket balance is not enforced here; the Python-side iter_journal
+# validator runs again on read.
+#
+# Path A is handled in pure bash (fast). Path B is deferred to Python
+# only when Path A misses — the cost is one python subprocess per
+# non-leader-char first word, paid only on rare bare-kaomoji
+# candidates. Eliminates drift between bash and Python by keeping
+# the bare-kaomoji shape rules in one source of truth.
 FIRST_LINE=$(printf '%s' "$ASSISTANT_TEXT" | awk 'NF{print; exit}')
+# Two-stage extraction:
+#   Stage 1 — strip from the first ASCII letter onward. Preserves
+#     bracket-leading kaomoji that contain internal whitespace
+#     (``(ง •̀_•́)``, ``(｡˃ ᵕ ˂)``) which a naive whitespace-split
+#     would clip at the first interior space.
+#   Stage 2 — fall back to whitespace-split when stage 1 collapses
+#     to empty. That happens when position 0 is itself an ASCII
+#     letter (round-6 Path B bare kaomoji like ``T-T``, ``XD``,
+#     ``Q_Q``); the strip-at-first-letter rule kills those before
+#     they reach the validator.
+# Either way we cap to 32 chars to match _KAOMOJI_MAX_LEN.
 KAOMOJI=$(printf '%s' "$FIRST_LINE" | sed -E -e 's/^[[:space:]]+//' -e 's/[A-Za-z].*$//' -e 's/[[:space:]]+$//')
-if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ] || [ "${#KAOMOJI}" -gt 32 ]; then
+if [ -z "$KAOMOJI" ]; then
+  KAOMOJI=$(printf '%s' "$FIRST_LINE" | sed -E -e 's/^[[:space:]]+//' -e 's/[[:space:]].*$//')
+fi
+KAOMOJI=${KAOMOJI:0:32}
+if [ -z "$KAOMOJI" ] || [ "${#KAOMOJI}" -lt 2 ]; then
   ${SKIP_ACTION}
 fi
+# Backslash filter: backslash anywhere except position 0 is a
+# markdown-escape artifact. Position 0 is the wing-hand pattern
+# (\(^o^)/). Implemented as: reject if KAOMOJI[1:] contains a backslash.
+case "${KAOMOJI:1}" in
+  *\\*) ${SKIP_ACTION} ;;
+esac
+# 4-letter-run filter: reject if any 4 consecutive ASCII letters
+# appear (prose). The Python validator uses re.search(r"[A-Za-z]{4}");
+# we mirror with a POSIX-glob case match — no fork, works on bash 3.2+.
+case "$KAOMOJI" in
+  *[A-Za-z][A-Za-z][A-Za-z][A-Za-z]*) ${SKIP_ACTION} ;;
+esac
+# Path A: leader char ∈ KAOMOJI_START_CHARS. Pure-bash hot path.
 case "$KAOMOJI" in
   $KAOMOJI_START_CASE) ;;
-  *) ${SKIP_ACTION} ;;
-esac
-case "$KAOMOJI" in
-  *\\*) ${SKIP_ACTION} ;;
+  *)
+    # Path B fallback: defer to Python's _looks_like_bare_kaomoji.
+    # Python startup is paid only when Path A misses (rare under the
+    # leading-kaomoji nudge). Uses the same interpreter that installed
+    # the hook so the bare-kaomoji shape rules stay in lockstep with
+    # the Python validator without renderer-side drift.
+    if ! '${PYTHON_INTERPRETER}' -c 'import sys; from llmoji.taxonomy import _looks_like_bare_kaomoji as f; sys.exit(0 if f(sys.argv[1]) else 1)' "$KAOMOJI" 2>/dev/null; then
+      ${SKIP_ACTION}
+    fi
+    ;;
 esac

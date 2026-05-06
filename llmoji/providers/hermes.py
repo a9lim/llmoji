@@ -171,6 +171,16 @@ class HermesProvider(HookInstaller):
     hooks_dir = Path.home() / ".hermes" / "agent-hooks"
     settings_path = Path.home() / ".hermes" / "config.yaml"
     journal_path = Path.home() / ".hermes" / "kaomoji-journal.jsonl"
+    # Hermes's identity / voice file — slot #1 of the system prompt
+    # (per https://hermes-agent.nousresearch.com/docs/user-guide/
+    # features/personality), the documented home for tone /
+    # communication style guidance. The kaomoji-leading reminder is
+    # voice-coded so SOUL.md is the right slot (vs AGENTS.md, which
+    # is reserved for procedure / project rules). Hermes seeds a
+    # starter SOUL.md on first run if one doesn't exist; ``llmoji
+    # install --soft`` writes a marker-fenced block at EOF so it
+    # composes with whatever identity prose the user has already.
+    system_prompt_doc_path = Path.home() / ".hermes" / "SOUL.md"
     hook_template = "hermes.sh.tmpl"
     hook_filename = "post-llm-call.sh"
     main_event = "post_llm_call"
@@ -208,16 +218,18 @@ class HermesProvider(HookInstaller):
 
     # --- public surface ---
 
-    def _edits(self) -> list[tuple[str, Path]]:
+    def _edits(
+        self, *, include_nudge: bool = True,
+    ) -> list[tuple[str, Path]]:
         edits: list[tuple[str, Path]] = [(self.main_event, self.hook_path)]
-        if self.has_nudge:
+        if include_nudge and self.has_nudge:
             assert self.nudge_hook_path is not None
             edits.append((self.nudge_event, self.nudge_hook_path))
         return edits
 
-    def _register(self) -> None:
+    def _register(self, *, include_nudge: bool = True) -> None:
         text, doc = self._read_and_parse()
-        new_text = self._apply_register(text, doc)
+        new_text = self._apply_register(text, doc, include_nudge=include_nudge)
         if new_text != text:
             atomic_write_text(self.settings_path, new_text)
 
@@ -308,9 +320,11 @@ class HermesProvider(HookInstaller):
 
     # --- register flow ---
 
-    def _apply_register(self, text: str, doc: CommentedMap) -> str:
+    def _apply_register(
+        self, text: str, doc: CommentedMap, *, include_nudge: bool = True,
+    ) -> str:
         hooks = doc.get("hooks")
-        edits = self._edits()
+        edits = self._edits(include_nudge=include_nudge)
 
         if hooks is None or _is_placeholder_hooks(hooks):
             return self._install_fresh_block(text, doc, hooks, edits)

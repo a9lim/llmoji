@@ -40,6 +40,13 @@ import { join } from "node:path";
 // BEGIN SHARED TAXONOMY — keep in sync with llmoji/_plugins/_kaomoji_taxonomy.ts.partial
 // END SHARED TAXONOMY
 
+// Nudge text — short or long variant, picked at install time by
+// ``llmoji install --hard`` (default short) vs ``--long`` (the v7
+// introspection framing). Substituted via ``__NUDGE_LITERAL__`` at
+// render time; the JSON-escaped literal lives outside the SHARED
+// TAXONOMY block so the partial stays pure taxonomy.
+const NUDGE: string = __NUDGE_LITERAL__;
+
 // Per-runId user_text cache. ``llm_input`` fires before ``llm_output``
 // for the same run, so by the time we journal a row the prompt is
 // already cached. Pruned in the matching ``llm_output`` handler so
@@ -57,14 +64,18 @@ export default definePluginEntry({
   description:
     "Captures kaomoji-led assistant messages to ~/.llmoji/journals/openclaw.jsonl",
   register(api: OpenClawPluginApi) {
+    // BEGIN NUDGE HOOK
     // Nudge — appended to the system prompt every turn. We use
     // ``appendSystemContext`` (not ``prependContext``) so the reminder
     // stays prompt-cache-friendly: providers can cache the system
     // prefix across turns and only the user message changes
-    // turn-to-turn.
+    // turn-to-turn. Stripped in --soft mode: the kaomoji-leading
+    // reminder lives in the system-prompt doc instead, so the
+    // per-turn injection would duplicate it.
     api.on("before_prompt_build", async () => ({
       appendSystemContext: NUDGE,
     }));
+    // END NUDGE HOOK
 
     // Cache user_text per run for later pairing with llm_output.
     api.on("llm_input", async (event) => {

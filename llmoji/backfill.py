@@ -46,7 +46,7 @@ from ._util import atomic_write_text, scrape_row_to_journal_line
 from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
 from .scrape import ScrapeRow
 from .sources._common import walk_parents_for_user_text
-from .taxonomy import is_kaomoji_candidate
+from .taxonomy import _KAOMOJI_MAX_LEN, is_kaomoji_candidate
 
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 
@@ -73,14 +73,22 @@ def _flush_rows(rows: Iterable[ScrapeRow], journal: Path) -> int:
 
 
 def kaomoji_prefix(text: str) -> str:
-    """Mirror the shell hook's awk + sed pipeline.
+    """Mirror the shell hook's extraction pipeline.
 
-    Take the first non-empty line, strip leading whitespace, drop
-    everything from the first ASCII letter, trim trailing whitespace,
-    then validate via :func:`~llmoji.taxonomy.is_kaomoji_candidate`
-    (≥2 bytes, ≤32 bytes, starts with ``KAOMOJI_START_CHARS``, no
-    backslash, no 4+-letter run). Returns ``""`` for prose,
-    markdown-escape artifacts, and other garbage.
+    Two-stage extraction matching ``_kaomoji_validate.sh.partial``:
+
+      Stage 1 — strip from the first ASCII letter onward. Preserves
+        bracket-leading kaomoji with internal whitespace
+        (``(ง •̀_•́)``, ``(｡˃ ᵕ ˂)``) which a naive whitespace-split
+        would clip.
+      Stage 2 — fall back to whitespace-split when stage 1 yields
+        empty. That happens when position 0 is itself an ASCII
+        letter — the round-6 Path B bare-kaomoji case (``T-T``,
+        ``XD``, ``Q_Q``, ``e_e``).
+
+    Validates via :func:`~llmoji.taxonomy.is_kaomoji_candidate` and
+    returns ``""`` for prose, markdown-escape artifacts, and other
+    garbage.
     """
     first_line = ""
     for line in text.splitlines():
@@ -90,9 +98,17 @@ def kaomoji_prefix(text: str) -> str:
     if not first_line:
         return ""
     stripped = first_line.lstrip()
+    # Stage 1: strip at first ASCII letter, then trim trailing space.
     m = _ASCII_LETTER_RE.search(stripped)
     cut = m.start() if m else len(stripped)
     prefix = stripped[:cut].rstrip()
+    if not prefix:
+        # Stage 2 fallback: whitespace-split for letter-eye bare kaomoji.
+        idx = 0
+        while idx < len(stripped) and not stripped[idx].isspace():
+            idx += 1
+        prefix = stripped[:idx]
+    prefix = prefix[:_KAOMOJI_MAX_LEN]
     if not is_kaomoji_candidate(prefix):
         return ""
     return prefix
@@ -603,6 +619,15 @@ _PROVIDER_SOURCE_GLOBS: dict[str, tuple[type, str, str]] = {
     "codex":       (CodexProvider, "sessions", "**/rollout-*.jsonl"),
     "hermes":      (HermesProvider, "sessions", "session_*.json"),
 }
+
+# Public-ish view of which providers ``import_provider`` can replay
+# from native session files. The TS-plugin providers (opencode,
+# openclaw) aren't here — their hosts don't persist a transcript-on-
+# disk shape we can replay, so live-hook capture is the only path
+# for those. CLI uses this to (a) tighten ``llmoji import`` 's
+# ``choices=`` to providers we can actually serve, and (b) drive the
+# no-arg autodetect path.
+IMPORTABLE_PROVIDERS: tuple[str, ...] = tuple(_PROVIDER_SOURCE_GLOBS)
 
 
 def _iter_rows_for_provider(name: str) -> Iterator[ScrapeRow]:

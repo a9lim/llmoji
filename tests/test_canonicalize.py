@@ -44,6 +44,135 @@ from llmoji.taxonomy import (
         # Bracket-span fallback for an unknown paren form (real
         # kaomoji-shape — used to be label=0/"other" in the legacy API).
         ("(｡o_O｡) strange",              "(｡o_O｡)"),
+        # v2.0: wing-hand pattern. Backslash at position 0 + closing
+        # ``)/`` is the celebratory wing form. Surfaces via the
+        # whitespace-fallback branch (no internal spaces).
+        ("\\(^o^)/ awesome!",             "\\(^o^)/"),
+        ("\\(≧▽≦)/ YESSS",                "\\(≧▽≦)/"),
+        # v2.0: sparkle-decorated. Leading ``✧`` + trailing
+        # decoration; whitespace-fallback grabs the whole token.
+        ("✧*｡(ˊᗜˋ*)*｡✧ wow",              "✧*｡(ˊᗜˋ*)*｡✧"),
+        # v2.0 sweep: bear face. ``ʕ``/``ʔ`` are paired brackets
+        # in the depth-walker (added to _OPEN/_CLOSE_BRACKETS).
+        ("ʕ•ᴥ•ʔ hey",                     "ʕ•ᴥ•ʔ"),
+        # v2.0 sweep: shocked sigma. Single-arm leader ``Σ`` —
+        # whitespace-fallback grabs the whole span.
+        ("Σ(°△°|||) shock!",              "Σ(°△°|||)"),
+        # v2.0 sweep: horn-fingers (lowercase + capital psi pairs).
+        ("ψ(`Д´)ψ angry",                 "ψ(`Д´)ψ"),
+        ("Ψ(`Д´)Ψ furious",               "Ψ(`Д´)Ψ"),
+        # v2.0 sweep: kissing pair (ε + з).
+        ("ε(◕‿◕)з kiss",                  "ε(◕‿◕)з"),
+        # v2.0 sweep: raised hands (ƪ + ʃ).
+        ("ƪ(˘⌣˘)ʃ yay",                   "ƪ(˘⌣˘)ʃ"),
+        # v2.0 sweep: heavy-line wing-hand variant.
+        ("╲(◕‿◕)╱ celebrate",             "╲(◕‿◕)╱"),
+        # v2.0 sweep: hug-pair with mirrored close ⊃.
+        ("⊂(◕‿◕)⊃ hug",                   "⊂(◕‿◕)⊃"),
+        # v2.0 sweep: cheering pair ٩…۶.
+        ("٩(◕‿◕)۶ woot",                  "٩(◕‿◕)۶"),
+        # v2.0 sweep: cradling pair ໒…७.
+        ("໒(◕‿◕)७ aww",                   "໒(◕‿◕)७"),
+        # v2.0 round 4: Japanese corner-bracket wrappers. Depth-walker
+        # surfaces the whole `「(...)」` span via the new
+        # _OPEN_BRACKETS/_CLOSE_BRACKETS pairs.
+        ("「(゜～゜)」 quoted",             "「(゜～゜)」"),
+        ("『(◕‿◕)』 brackets",             "『(◕‿◕)』"),
+        ("【(◕‿◕)】 lenticular",           "【(◕‿◕)】"),
+        ("〈(◕‿◕)〉 angle",                "〈(◕‿◕)〉"),
+        ("《(◕‿◕)》 double-angle",         "《(◕‿◕)》"),
+        # v2.0 round 4: corner-bracket-only wrapper (no inner paren).
+        # Depth walker still closes cleanly on the matching `」`.
+        ("「・_・」 face-only",             "「・_・」"),
+        # v2.0 round 4: box-drawing standing-pose. Leader `└` lets
+        # the validator accept the candidate; whitespace-fallback
+        # surfaces the whole token.
+        ("└(°▽°)┘ standing",              "└(°▽°)┘"),
+        # v2.0 round 4: music-note decorator.
+        ("♪(´▽｀) singing",                "♪(´▽｀)"),
+        ("♫(◕‿◕)♫ tune",                  "♫(◕‿◕)♫"),
+        # v2.0 round 4: heart decorator.
+        ("♥(◕‿◕)♥ love",                  "♥(◕‿◕)♥"),
+        ("♡(◠‿◠) soft",                   "♡(◠‿◠)"),
+        ("❤(◕‿◕)❤ heavy",                 "❤(◕‿◕)❤"),
+        # v2.0 round 4: star decorator.
+        ("★(◕‿◕)★ excite",                "★(◕‿◕)★"),
+        ("☆(◕‿◕)☆ outline",               "☆(◕‿◕)☆"),
+        # v2.0 round 4: alternate bear-bracket pair (ʢ...ʡ).
+        ("ʢ◉ᴥ◉ʡ alt-bear",                "ʢ◉ᴥ◉ʡ"),
+        # v2.0 round 5: flower decorators.
+        ("✿(◕‿◕)✿ flower-black",          "✿(◕‿◕)✿"),
+        ("❀(◕‿◕)❀ flower-white",          "❀(◕‿◕)❀"),
+        # v2.0 round 5: heart variants.
+        ("❣(◕‿◕)❣ emphatic",              "❣(◕‿◕)❣"),
+        ("❥(◕‿◕)❥ rotated",               "❥(◕‿◕)❥"),
+        # v2.0 round 5: star variants (filled-4pt / outlined / circled).
+        ("✦(◕‿◕)✦ four-pt",                "✦(◕‿◕)✦"),
+        ("✩(◕‿◕)✩ outlined",               "✩(◕‿◕)✩"),
+        ("✪(◕‿◕)✪ circled",                "✪(◕‿◕)✪"),
+        # v2.0 round 5: quarter-note decorator.
+        ("♩(◕‿◕)♩ quarter",                "♩(◕‿◕)♩"),
+        # v2.0 round 5: flex / strong-feel pose. Whitespace-fallback
+        # surfaces the whole token (no inner brackets to depth-walk).
+        ("ᕦ(ò_óˇ)ᕤ flex",                 "ᕦ(ò_óˇ)ᕤ"),
+        ("ᕙ(`▿´)ᕗ strong",                 "ᕙ(`▿´)ᕗ"),
+        # v2.0 round 5: tortoise-shell editorial bracket. Depth walker
+        # surfaces the `〔...〕` span via the new bracket pair.
+        ("〔(◕‿◕)〕 editorial",             "〔(◕‿◕)〕"),
+        # v2.0 round 5: tortoise-shell standalone (no inner paren).
+        # Same lookbehind-no-op behavior as the round-4
+        # `「・_・」` standalone case.
+        ("〔・_・〕 face-only",              "〔・_・〕"),
+        # v2.0 round 5: reference mark editorial decorator.
+        ("※(◕‿◕)※ refmark",               "※(◕‿◕)※"),
+        # v2.0 round 5: Oriya cradle pose. Whitespace-fallback surfaces
+        # the whole token (no inner bracket pair to walk).
+        ("୧(˃ᗨ˂)୨ cradle",                "୧(˃ᗨ˂)୨"),
+        # v2.0 round 7: bare kaomoji surface via the whitespace-split
+        # branch + Path B validation.
+        (">ω< squee",                     ">ω<"),
+        ("^ω^ happy",                     "^ω^"),
+        ("OwO curious",                    "OwO"),
+        ("\\o/ celebration",               "\\o/"),
+        ("=^.^= cat purrs",                "=^.^="),
+        ("ㅠㅠ crying so hard",             "ㅠㅠ"),
+        (">:( angry",                      ">:("),
+        ("<3 love",                        "<3"),
+        ("o_O huh",                        "o_O"),
+        ("@_@ dizzy from the spin",        "@_@"),
+        ("?_? what is happening",          "?_?"),
+        # Common emotional registers (preserved leader chars).
+        ("(╯°□°）╯︵ ┻━┻ flips table",       "(╯°□°）"),
+        ("(￣▽￣)ノ casual wave",            "(￣▽￣)"),
+        ("(´；ω；`) sad face",              "(´；ω；`)"),
+        ("（｡>﹏<｡） wincing",                "（｡>﹏<｡）"),
+        ("(╥﹏╥) anguish",                  "(╥﹏╥)"),
+        ("(≧◡≦) blissful",                 "(≧◡≦)"),
+        ("(ㆆ_ㆆ) tired stare",              "(ㆆ_ㆆ)"),
+        ("(¬‿¬) smug",                     "(¬‿¬)"),
+        # Lenny face — preserved leader, depth-walk surfaces whole span.
+        ("( ͡° ͜ʖ ͡°) lenny",                "( ͡° ͜ʖ ͡°)"),
+        # Disapproval Lenny.
+        ("ಠ_ಠ disapproval",                "ಠ_ಠ"),
+        # Strong feels.
+        ("(ノಠ益ಠ)ノ strong rage",            "(ノಠ益ಠ)"),
+        # Round 8: offering-arm shapes surface intact (canonicalize
+        # strips the arms; extract preserves the raw form).
+        ("(つ◕‿◕)つ take this",              "(つ◕‿◕)"),
+        ("（つ´∀｀）つ take this fullwidth",   "（つ´∀｀）"),
+        # Round 9: voiced offering-arm `づ` mirrors `つ`; bracket walker
+        # surfaces the paren-balanced span, the trailing `づ` is for
+        # the canonicalizer.
+        ("(づ◕‿◕)づ take this voiced",       "(づ◕‿◕)"),
+        # Round 9: bare wave-dash mouth (Path B). `T〜T` is a sleepy /
+        # sad bare kaomoji; whitespace-split grabs the whole token and
+        # Path B's mouth set has to recognize the raw `〜` (the typo-sub
+        # `〜→~` fold runs in canonicalize, AFTER extract).
+        ("T〜T sleepy",                       "T〜T"),
+        # Round 9: bare katakana-small-wa mouth (Path B). Path A
+        # already handled `(^ヮ^)` via leader; round-9 closes the bare
+        # form by adding `ヮ` to the mouth class.
+        ("^ヮ^ excited",                      "^ヮ^"),
     ],
 )
 def test_extract_positive(text: str, expected: str) -> None:
@@ -64,6 +193,73 @@ def test_extract_positive(text: str, expected: str) -> None:
         "(\\*´∀｀\\*) hello",
         # Oversize balanced span → rejected.
         "(" + "a" * 50 + ") text",
+        # Plain English / common chat openers — must not match.
+        "Hello there!",
+        "Hi everyone",
+        "Hey what's up",
+        "Yes I agree",
+        "Sure thing",
+        "Got it, thanks",
+        "Done.",
+        "OK no problem",
+        "Thanks for the help",
+        "Wait a moment",
+        "Yeah probably",
+        "Cool beans",
+        "Right, makes sense",
+        "Alright then",
+        "Maybe later",
+        "Let me think",
+        "I'll get back to you",
+        "I'm not sure",
+        "We should refactor this",
+        "She said it works",
+        "The function returns",
+        # Numbers / version strings / punctuation runs.
+        "123 numbers",
+        "3.14 pi",
+        "v2.0.1 release",
+        "!!! warning",
+        "??? confused prose",
+        "... ellipsis",
+        "--- separator",
+        # Code / path-like prose.
+        "/usr/local/bin path",
+        "git@github.com:user/repo",
+        "function foo() returns",
+        "const x = 5",
+        "import re module",
+        # Markdown-shaped artifacts.
+        "**bold text**",
+        "_italic_ marker",
+        "`code` span",
+        "[link](url) here",
+        "# heading line",
+        # Single-glyph or too-short — length filter.
+        "a",
+        "(",
+        ":",
+        # Emoji (single codepoint, not a kaomoji).
+        "😀 grinning",
+        "✨ sparkle prefix",
+        # Pure mouth-glyph runs (Path B "first in interior" reject).
+        "___ underscore run",
+        "... ellipsis prose",
+        "=== separator equals",
+        "::: tripled colons",
+        # Backslash-anywhere-but-position-0 (markdown-escape artifact).
+        "(\\*bold\\*) markdown",
+        "test \\n escape",
+        # Long whitespace-split first-word that fails 4-letter-run.
+        "Hello world this is prose",
+        "Function calls everywhere",
+        # Bare-kaomoji-shape but with letters in interior (not all
+        # mouth) — should reject.
+        "abc not a face",
+        "T@T mismatched mouth",  # @ not mouth
+        # Pure-sigil text that isn't a kaomoji.
+        "%%% percent run",
+        "&&& ampersand run",
     ],
 )
 def test_extract_rejects(text: str) -> None:
@@ -125,9 +321,11 @@ def test_extract_unbalanced_bracket_fallback(
         ("(っ╥﹏╥)っ",          "(╥﹏╥)",            "F"),
         # Rule G: combining stroke overlays
         ("(๑˃̵‿˂̵)",          "(๑˃‿˂)",           "G"),
-        # Rule H + B-speculative: curly quotes + fullwidth tilde
-        ("┐(‘～`;)┌",         "┐('~`;)┌",         "H"),
-        ("┐('～`;)┌",         "┐('~`;)┌",         "H"),
+        # Rule H + B-speculative: curly quotes + fullwidth tilde.
+        # v2.0 also strips the ``┐``/``┌`` box-drawing shrug arms
+        # (round-3 sweep — was preserved in v1; bumping collapses).
+        ("┐(‘～`;)┌",         "('~`;)",            "H"),
+        ("┐('～`;)┌",         "('~`;)",            "H"),
         # Rule I: bullet → middle-dot
         ("(´•ω•`)",           "(´・ω・`)",         "I"),
         # Rule J: bracket-corner-circle → halfwidth ideographic full stop
@@ -140,13 +338,72 @@ def test_extract_unbalanced_bracket_fallback(
         ("(´-ω-`)",           "(´-ω-`)",          "K-preserve"),
         # Rule L: asterisk-arm folds
         ("(*•̀‿•́*)",         "(・̀‿・́)",          "L"),
+        # v2.0 — Rule M (outside-leading wing/hug/sparkle): strip ``\``,
+        # ``⊂``, ``✧`` greedy at start before ``(``.
+        ("\\(^o^)/",          "(^o^)",             "M-wing"),
+        ("\\(≧▽≦)/",          "(≧▽≦)",             "M-wing"),
+        ("⊂(˘ω˘)⊂",          "(˘ω˘)",             "M-hug"),
+        ("✧(ˊᗜˋ)✧",          "(ˊᗜˋ)",             "M-sparkle"),
+        # v2.0 — outside-trailing wing-right and hugging-arm-right:
+        # ``/`` after ``)`` and ``⊂`` after ``)`` join existing
+        # ``ﻭっ`` outside-trail set.
+        ("(´∀`)/",            "(´∀`)",             "M-wing-right-only"),
+        ("(˘ω˘)⊂",            "(˘ω˘)",             "M-hug-right-only"),
+        # v2.0 sweep — outside-trailing mirror-close hugging arm.
+        ("⊂(◕‿◕)⊃",          "(◕‿◕)",             "M-hug-pair"),
+        # v2.0 sweep — bear face. Whole bear preserved (no inner
+        # paren to fall back to); `•` folds to `・` via rule I.
+        ("ʕ•ᴥ•ʔ",             "ʕ・ᴥ・ʔ",            "bear"),
+        # v2.0 sweep — shocked sigma. Single-arm leader stripped.
+        ("Σ(°△°|||)",         "(°△°|||)",          "M-sigma"),
+        # v2.0 sweep — horn-fingers (Cyrillic Д→д via rule D).
+        ("ψ(`Д´)ψ",           "(`д´)",             "M-psi"),
+        ("Ψ(`Д´)Ψ",           "(`д´)",             "M-Psi"),
+        # v2.0 sweep — kissing pair (ε + з).
+        ("ε(◕‿◕)з",          "(◕‿◕)",             "M-kiss"),
+        # v2.0 sweep — raised hands (⌣→‿ via smile-mouth synonym).
+        ("ƪ(˘⌣˘)ʃ",          "(˘‿˘)",             "M-raised"),
+        # v2.0 sweep — heavy-line wings.
+        ("╲(◕‿◕)╱",          "(◕‿◕)",             "M-slashes"),
+        # v2.0 sweep — paired arms of v1 leaders. Cheering, running,
+        # cradling — finally canonicalize symmetrically.
+        ("٩(◕‿◕)۶",          "(◕‿◕)",             "M-cheer"),
+        ("ᕕ(ᐛ)ᕗ",            "(ᐛ)",                "M-running"),
+        ("໒(◕‿◕)७",          "(◕‿◕)",             "M-cradle"),
+        # v2.0 round 3 — box-drawing pose pairs collapse to face.
+        ("╰(´∀｀)╯",           "(´∀`)",             "M-arms-up"),
+        ("╭(´∀｀)╮",           "(´∀`)",             "M-curl"),
+        ("┐(´д｀)┌",           "(´д`)",             "M-shrug"),
+        # Inverted shrug pattern (╮ as lead, ╭ as trail). v2.0
+        # symmetric strip handles both orientations.
+        ("╮(´д｀)╭",           "(´д`)",             "M-shrug-inv"),
+        # Inverted box-drawing shrug with `┌` lead, `┐` trail.
+        ("┌(´д｀)┐",           "(´д`)",             "M-shrug-inv-box"),
+        # v2.0 round 3 — the iconic shrug. ¯ \ _ strip on the lead,
+        # _ / ¯ on the trail, leaving the bare ``(ツ)`` face.
+        ("¯\\_(ツ)_/¯",         "(ツ)",               "M-shrug-tsu"),
+        # Table-flip: the ``╯`` AT THE END is the rage-arm and
+        # strips, but the ``╯`` INSIDE is the rage-cheek and stays.
+        # Anchored regex is what makes this clean.
+        ("(╯°□°)╯",            "(╯°□°)",            "M-rage-arm"),
+        # Preservation: ``_`` inside the face is not stripped (the
+        # outside-arm regex is anchored at start/end and only fires
+        # before ``(`` or after ``)``).
+        ("(◕_◕)",              "(◕_◕)",             "M-preserve-mouth"),
         # Rules M / N: smile-mouth equivalence class → ‿
         ("(◔◡◔)",             "(◕‿◕)",            "M"),
         ("(ᵔ◡ᵔ)",             "(ᵔ‿ᵔ)",            "N"),
         ("(´｡・ᵕ・｡`)",       "(´｡・‿・｡`)",       "N"),
-        # Rule O: fullwidth grave → ASCII grave
-        ("ヽ(´ー｀)ノ",         "ヽ(´ー`)ノ",        "O"),
-        ("ヽ(´ー`)ノ",         "ヽ(´ー`)ノ",        "O"),
+        # Rule O: fullwidth grave → ASCII grave. v2.0 also strips
+        # the ``ヽ``/``ノ`` raised-hand arms (was preserved in v1 —
+        # the rule O test pinned the pose; bumping to v2.0 collapses
+        # it for symmetry with the rest of the paired-arm sweep).
+        ("ヽ(´ー｀)ノ",         "(´ー`)",            "O"),
+        ("ヽ(´ー`)ノ",         "(´ー`)",            "O"),
+        # Halfwidth katakana ﾉ also strips.
+        ("ヽ(´ー`)ﾉ",          "(´ー`)",            "O"),
+        # Voiced iteration mark ヾ strips (left raised-hand variant).
+        ("ヾ(◕‿◕)ノ",          "(◕‿◕)",            "O"),
         # B extension: ideographic full stop folds to halfwidth too
         ("(´。・ᵕ・。`)",      "(´｡・‿・｡`)",       "B-ext"),
         # Directional-fill eye class → ◕
@@ -170,6 +427,153 @@ def test_extract_unbalanced_bracket_fallback(
         ("(๑˃̴‿˂̿)",          "(๑˃‿˂)",           "G"),
         # No-op: already canonical
         ("(◠‿◠)",             "(◠‿◠)",            "no-op"),
+        # === v2.0 round 4 — corner-bracket wrapper strip ===
+        # Paren-wrapped face inside corner brackets: brackets strip
+        # to bare face. (Lookbehind `(?<=\))` on the trail regex
+        # ensures the `」` only strips because `)` precedes it.)
+        # `～` (FULLWIDTH TILDE) folds to `~` via rule B during the
+        # translate pass, so the expected canonical has ASCII `~`.
+        ("「(゜～゜)」",         "(゜~゜)",          "round4-corner"),
+        ("『(◕‿◕)』",          "(◕‿◕)",            "round4-corner"),
+        ("【(◕‿◕)】",          "(◕‿◕)",            "round4-corner"),
+        ("〈(◕‿◕)〉",          "(◕‿◕)",            "round4-corner"),
+        ("《(◕‿◕)》",          "(◕‿◕)",            "round4-corner"),
+        # Corner-bracket-only wrapper (no inner paren): preserved.
+        # The lookbehind on the trail strip prevents asymmetric
+        # truncation to `「・_・` — `「` is in lead-strip but the
+        # `(?=\()` lookahead fails (no inner paren), and `」` is in
+        # trail-strip but the `(?<=\))` lookbehind fails (preceded
+        # by `・` not `)`). Both regexes correctly no-op.
+        ("「・_・」",            "「・_・」",          "round4-corner-standalone"),
+        # === v2.0 round 4 — box-drawing standing pose ===
+        # Lead `└` strips before `(`, trail `┘` strips after `)` via
+        # the lookbehind. `▽` is preserved as the mouth glyph (the
+        # canonicalizer doesn't fold triangles).
+        ("└(°▽°)┘",            "(°▽°)",             "round4-stand"),
+        # Inverted form (`┘` lead, `└` trail) — symmetric strip.
+        ("┘(°▽°)└",            "(°▽°)",             "round4-stand-inv"),
+        # Lead-only and trail-only single arms strip independently.
+        ("└(°▽°)",              "(°▽°)",             "round4-stand-lead-only"),
+        ("(°▽°)┘",              "(°▽°)",             "round4-stand-trail-only"),
+        # === v2.0 round 4 — music decorator ===
+        ("♪(´▽｀)♪",            "(´▽`)",             "round4-music"),
+        ("♫(◕‿◕)♫",            "(◕‿◕)",             "round4-music"),
+        ("♬(◕‿◕)",             "(◕‿◕)",             "round4-music-lead-only"),
+        ("(◕‿◕)♪",             "(◕‿◕)",             "round4-music-trail-only"),
+        # === v2.0 round 4 — heart decorator ===
+        ("♥(◕‿◕)♥",            "(◕‿◕)",             "round4-heart"),
+        ("♡(◠‿◠)♡",            "(◠‿◠)",             "round4-heart-outline"),
+        ("❤(◕‿◕)❤",            "(◕‿◕)",             "round4-heart-heavy"),
+        # In-paren heart-eyes preserved (the lead/trail anchors
+        # only fire OUTSIDE the parens, so `(♥‿♥)` stays distinct
+        # from `(◕‿◕)` even with `♥` in the strip set).
+        ("(♥‿♥)",               "(♥‿♥)",             "round4-heart-eyes"),
+        ("(♡‿♡)",               "(♡‿♡)",             "round4-heart-eyes"),
+        # === v2.0 round 4 — star decorator ===
+        ("★(◕‿◕)★",            "(◕‿◕)",             "round4-star"),
+        ("☆(◕‿◕)☆",            "(◕‿◕)",             "round4-star-outline"),
+        # === v2.0 round 4 — alternate bear preserved as wrapper ===
+        # ʢ/ʡ behave like ʕ/ʔ: the whole bear is the kaomoji.
+        ("ʢ◉ᴥ◉ʡ",               "ʢ⊙ᴥ⊙ʡ",             "round4-alt-bear"),
+        # === v2.0 round 5 — flower decorator strip ===
+        # `✿`/`❀` strip on both lead and trail (paired-decorator
+        # pattern). In-paren flowers preserved as cheek decorations.
+        ("✿(◕‿◕)✿",            "(◕‿◕)",             "round5-flower-black"),
+        ("❀(◕‿◕)❀",            "(◕‿◕)",             "round5-flower-white"),
+        # Lead-only and trail-only single flowers strip independently.
+        ("✿(◕‿◕)",              "(◕‿◕)",             "round5-flower-lead-only"),
+        ("(◕‿◕)❀",              "(◕‿◕)",             "round5-flower-trail-only"),
+        # Black/white florettes preserved distinct (no fold).
+        ("✿(◕‿◕)❀",            "(◕‿◕)",             "round5-flower-mixed"),
+        # In-paren flower-as-cheek-decoration preserved (lead/trail
+        # anchors only fire OUTSIDE the parens, like round-4 hearts).
+        ("(✿◕‿◕)",              "(✿◕‿◕)",            "round5-flower-cheek"),
+        ("(◕‿◕❀)",              "(◕‿◕❀)",            "round5-flower-cheek"),
+        # === v2.0 round 5 — heart variant strip ===
+        # `❣` heavy-heart-with-exclamation, `❥` rotated-heart-bullet.
+        # Both kept distinct from the round-4 ♥/♡/❤ family.
+        ("❣(◕‿◕)❣",            "(◕‿◕)",             "round5-heart-emphatic"),
+        ("❥(◕‿◕)❥",            "(◕‿◕)",             "round5-heart-rotated"),
+        # In-paren heart-variant-as-eye preserved (mirrors the round-4
+        # `(♥‿♥)` heart-eye preservation).
+        ("(❣‿❣)",                "(❣‿❣)",             "round5-heart-eye"),
+        # === v2.0 round 5 — star variant strip ===
+        ("✦(◕‿◕)✦",            "(◕‿◕)",             "round5-star-4pt"),
+        ("✩(◕‿◕)✩",            "(◕‿◕)",             "round5-star-outlined"),
+        ("✪(◕‿◕)✪",            "(◕‿◕)",             "round5-star-circled"),
+        # === v2.0 round 5 — quarter-note decorator ===
+        ("♩(◕‿◕)♩",            "(◕‿◕)",             "round5-music-quarter"),
+        # === v2.0 round 5 — flex / strong-feel pose ===
+        # `ᕦ`/`ᕤ` collapse to bare face. Mouth `_` between middle-dot
+        # eyes is NOT in this case (eyes are accented Latin) so rule K
+        # doesn't fire; `_` stays as the mouth glyph it represents.
+        ("ᕦ(ò_óˇ)ᕤ",            "(ò_óˇ)",             "round5-flex"),
+        # `ᕙ`/`ᕗ` strong-feel pose — `ᕗ` was already in v1 trail set,
+        # round 5 promotes `ᕙ` to lead and the strip becomes symmetric.
+        ("ᕙ(`▿´)ᕗ",              "(`▿´)",              "round5-strong-feel"),
+        # Lead-only and trail-only flex arms strip independently.
+        ("ᕦ(ò_óˇ)",              "(ò_óˇ)",             "round5-flex-lead-only"),
+        ("(ò_óˇ)ᕤ",              "(ò_óˇ)",             "round5-flex-trail-only"),
+        # === v2.0 round 5 — tortoise-shell wrapper strip ===
+        # Paren-wrapped face inside `〔...〕`: brackets strip to bare
+        # face, mirroring the round-4 corner-bracket handling.
+        ("〔(◕‿◕)〕",            "(◕‿◕)",             "round5-tortoise"),
+        # Tortoise-shell standalone (no inner paren) preserved by the
+        # lookbehind/lookahead anchors, same logic as `「・_・」`.
+        ("〔・_・〕",              "〔・_・〕",          "round5-tortoise-standalone"),
+        # === v2.0 round 5 — reference-mark editorial decorator ===
+        # `※` is symmetric — same glyph on lead and trail.
+        ("※(◕‿◕)※",             "(◕‿◕)",             "round5-refmark"),
+        ("※(◕‿◕)",               "(◕‿◕)",             "round5-refmark-lead-only"),
+        ("(◕‿◕)※",               "(◕‿◕)",             "round5-refmark-trail-only"),
+        # === v2.0 round 5 — Oriya cradle pose ===
+        # `୧`/`୨` collapse to bare face (Oriya digits 1/2 used as
+        # cradling arms).
+        ("୧(˃ᗨ˂)୨",              "(˃ᗨ˂)",              "round5-oriya-cradle"),
+        # Lead-only and trail-only Oriya arms strip independently.
+        ("୧(˃ᗨ˂)",                "(˃ᗨ˂)",              "round5-oriya-lead-only"),
+        ("(˃ᗨ˂)୨",                "(˃ᗨ˂)",              "round5-oriya-trail-only"),
+        # === v2.0 round 8 — offering-arm `つ` strip ===
+        # Inside-lead `(つ` + outside-trail `)つ` shape (the canonical
+        # offering / "take this" gesture). Both arms strip to bare face.
+        ("(つ◕‿◕)つ",             "(◕‿◕)",              "round8-tsu-offer"),
+        # Fullwidth-paren version. After fullwidth → ASCII fold (rule B)
+        # the bracket walker sees `(つ´∀`)つ`; both arms strip.
+        ("（つ´∀｀）つ",            "(´∀`)",              "round8-tsu-offer-fw"),
+        # Lead-only `つ` (offering one-handed).
+        ("(つ◕‿◕)",               "(◕‿◕)",              "round8-tsu-lead-only"),
+        # Trail-only `つ` (offering after the face).
+        ("(◕‿◕)つ",                "(◕‿◕)",              "round8-tsu-trail-only"),
+        # === v2.0 round 9 — voiced offering-arm `づ` strip ===
+        # Voiced cousin of round-8 `つ`. Same paired-arm shape, both
+        # halves strip to the bare face.
+        ("(づ◕‿◕)づ",             "(◕‿◕)",              "round9-zu-offer"),
+        ("(づ◕‿◕)",               "(◕‿◕)",              "round9-zu-lead-only"),
+        ("(◕‿◕)づ",                "(◕‿◕)",              "round9-zu-trail-only"),
+        # Round 8 + 9 mixed (lead voiced, trail unvoiced — improbable
+        # but the strip is shape-anchored, so it still collapses).
+        ("(づ◕‿◕)つ",             "(◕‿◕)",              "round9-zu-tsu-mix"),
+        # === v2.0 round 9 — wave-dash → ASCII tilde fold ===
+        # `〜` (U+301C WAVE DASH) and `~` (ASCII TILDE) are the same
+        # sleepy / wavy register; both forms canonicalize identically.
+        ("(´〜｀)",                 "(´~`)",              "round9-wavedash"),
+        ("(〜ω〜)",                 "(~ω~)",              "round9-wavedash-eyes"),
+        # === v2.0 round 9 — fullwidth square brackets → ASCII ===
+        # `［／］` fold to `[`/`]` mirrors the rest of the FF0x/FF1x
+        # block. `[` is a v1.0 leader char — bracket-walked forms now
+        # canonicalize identically across half/full-width paren shapes.
+        ("［◕_◕］",                 "[◕_◕]",             "round9-fw-square"),
+        # === v2.0 round 9 — fullwidth vertical line → ASCII ===
+        # `｜` cheek-line in shocked-sigma collapses to ASCII `|`,
+        # matching the unstyled `Σ(°△°|||)` shape.
+        ("(°△°｜｜｜)",              "(°△°|||)",          "round9-fw-bar"),
+        # === v2.0 round 9 — variation selectors stripped ===
+        # U+FE0F (VS-16, emoji presentation) on a `♥` is presentation
+        # hint only; bare `♥` and `♥` + VS-16 are the same expression.
+        # Test uses `️` literal so the codepoint is unambiguous.
+        ("(♥️‿♥️)",     "(♥‿♥)",              "round9-vs16"),
+        # U+FE0E (VS-15, text presentation) — same fold.
+        ("(♥︎‿♥︎)",     "(♥‿♥)",              "round9-vs15"),
     ],
     ids=lambda v: v if isinstance(v, str) and len(v) < 30 else None,
 )
@@ -201,7 +605,13 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
     [
         ("(｡◕‿◕｡)",          True),
         ("hi",                False),
-        # Markdown-escape backslash artifact.
+        # v2.0: backslash at position 0 is the wing-hand pattern,
+        # accepted. Backslash at position >= 1 is markdown-escape
+        # artifact, still rejected (e.g. ``(\\*´∀｀\\*)``).
+        ("\\(^o^)/",          True),
+        ("\\(≧▽≦)/",          True),
+        # Markdown-escape backslash artifact (still rejected — `\`
+        # appears at position >= 1).
         ("(\\*´∀｀\\*)",       False),
         # 4+-letter run inside parens — prose, not a kaomoji.
         ("(Backgrounddebug)", False),
@@ -211,6 +621,278 @@ def test_canonicalize_preserves_semantically_distinct_eyes() -> None:
         ("(unclosed",         False),
         # Oversize span — not a real kaomoji.
         ("(" + "a" * 100 + ")", False),
+        # v2.0 sweep — bear face accepted (ʕ in start_chars).
+        ("ʕ•ᴥ•ʔ",              True),
+        # v2.0 sweep — shocked sigma accepted.
+        ("Σ(°△°|||)",          True),
+        # v2.0 sweep — horn-fingers accepted.
+        ("ψ(`Д´)ψ",            True),
+        # v2.0 sweep — raised hands accepted.
+        ("ƪ(˘⌣˘)ʃ",           True),
+        # v2.0 sweep — heavy-line wing accepted.
+        ("╲(◕‿◕)╱",           True),
+        # ASCII letter `m` is NOT a leader — bowing apology
+        # ``m(_ _)m`` rejected at the validator (prose-risk
+        # exclusion; see KAOMOJI_START_CHARS rationale).
+        ("m(_ _)m",            False),
+        # v2.0 round 4 — corner-bracket wrappers accepted.
+        ("「(゜～゜)」",         True),
+        ("『(◕‿◕)』",          True),
+        ("【(◕‿◕)】",          True),
+        ("〈(◕‿◕)〉",          True),
+        ("《(◕‿◕)》",          True),
+        # v2.0 round 4 — corner-bracket-only standalone face.
+        ("「・_・」",            True),
+        # v2.0 round 4 — box-drawing standing-pose accepted.
+        ("└(°▽°)┘",            True),
+        # v2.0 round 4 — music / heart / star decorators accepted.
+        ("♪(´▽｀)",             True),
+        ("♥(◕‿◕)♥",            True),
+        ("★(◕‿◕)★",            True),
+        # v2.0 round 4 — alternate bear-bracket pair accepted.
+        ("ʢ◉ᴥ◉ʡ",               True),
+        # ASCII `~` and `*` still NOT leaders — prose-risk
+        # exclusion (Markdown bold/italic and tilde-run-on).
+        ("~(˘▽˘~)",             False),
+        ("*(◕‿◕)*",             False),
+        # v2.0 round 5 — flower decorators accepted.
+        ("✿(◕‿◕)✿",            True),
+        ("❀(◕‿◕)❀",            True),
+        # v2.0 round 5 — heart variants accepted.
+        ("❣(◕‿◕)❣",            True),
+        ("❥(◕‿◕)❥",            True),
+        # v2.0 round 5 — star variants accepted.
+        ("✦(◕‿◕)✦",            True),
+        ("✩(◕‿◕)✩",            True),
+        ("✪(◕‿◕)✪",            True),
+        # v2.0 round 5 — quarter-note decorator accepted.
+        ("♩(◕‿◕)♩",            True),
+        # v2.0 round 5 — flex / strong-feel pose accepted.
+        ("ᕦ(ò_óˇ)ᕤ",            True),
+        ("ᕙ(`▿´)ᕗ",             True),
+        # v2.0 round 5 — tortoise-shell wrapper accepted.
+        ("〔(◕‿◕)〕",            True),
+        # v2.0 round 5 — tortoise-shell standalone accepted.
+        ("〔・_・〕",              True),
+        # v2.0 round 5 — reference-mark decorator accepted.
+        ("※(◕‿◕)※",             True),
+        # v2.0 round 5 — Oriya cradle pose accepted.
+        ("୧(˃ᗨ˂)୨",              True),
+        # v2.0 round 6 — Path B bare kaomoji (no leader char, but
+        # match the EYE-MOUTH-EYE / Western-emoticon shapes).
+        ("*_*",                    True),   # symmetric paired
+        ("^_^",                    True),   # symmetric (^ as eye)
+        ("T-T",                    True),   # symmetric letter-eye
+        ("Q_Q",                    True),
+        (";_;",                    True),
+        ("o_o",                    True),
+        ("0_0",                    True),
+        ("ಥ_ಥ",                    True),   # symmetric Unicode-eye
+        ("T﹏T",                    True),   # CJK presentation form mouth
+        (">_<",                    True),   # paired bracket-eye
+        (">.<",                    True),
+        (")_(",                    True),
+        ("XD",                     True),   # 2-char laugh
+        ("xD",                     True),
+        ("^^",                     True),   # 2-char closed eyes
+        (":)",                     True),   # Western 2-char
+        (":(",                     True),
+        (":D",                     True),
+        (":-)",                    True),   # Western with nose
+        (";-)",                    True),
+        (":-D",                    True),
+        # Round-6 false positives we explicitly reject:
+        ("___",                    False),  # all-mouth, no distinct eyes
+        ("...",                    False),  # all-mouth
+        ("---",                    False),
+        ("OK",                     False),  # 2-char prose
+        ("Hi",                     False),  # 2-char prose
+        ("It's",                   False),  # apostrophe contraction
+        ("I-I",                    True),   # actually catches — `I` is
+                                            # capital letter, `-` is mouth.
+                                            # False positive we accept; the
+                                            # Stage-B synthesizer drops
+                                            # noise faces that don't pool.
+        # v2.0 round 7 — ω as mouth (Greek lowercase omega, the
+        # canonical "cute / cat mouth").
+        (">ω<",                    True),
+        ("^ω^",                    True),
+        ("OωO",                    True),
+        ("=ω=",                    True),
+        # v2.0 round 7 — o/O/w/W as mouths.
+        ("^o^",                    True),   # happy / excited
+        ("*O*",                    True),
+        ("^w^",                    True),   # cat smile / uwu
+        ("OwO",                    True),
+        ("UwU",                    True),
+        (">w<",                    True),
+        # v2.0 round 7 — slash paired-eyes (celebration / facepalm).
+        ("\\o/",                   True),   # arms-up celebration
+        ("\\_/",                   True),   # facepalm-base
+        ("\\../",                  True),   # extended interior
+        # v2.0 round 7 — case-mismatch paired (confusion).
+        ("o_O",                    True),
+        ("O_o",                    True),
+        ("o.O",                    True),
+        # v2.0 round 7 — symbol eyes (already worked via round-6 +
+        # the patched "first not in interior" rule; locked in here).
+        ("@_@",                    True),   # dizzy
+        ("?_?",                    True),   # confused
+        ("+_+",                    True),   # passed-out / X-eyes
+        ("$_$",                    True),   # money eyes
+        ("#_#",                    True),
+        ("!_!",                    True),
+        ("•_•",                    True),
+        ("°_°",                    True),
+        ("._.",                    True),
+        ("x_x",                    True),
+        ("X_X",                    True),
+        ("ʘ_ʘ",                    True),
+        ("ಠ_ಠ",                    True),   # look of disapproval
+        # v2.0 round 7 — 2-char Western with `<` (heart family).
+        ("<3",                     True),   # heart
+        ("<D",                     True),
+        ("<O",                     True),
+        # v2.0 round 7 — eyebrow-prefix Western (angry / devious).
+        (">:(",                    True),
+        (">:)",                    True),
+        (">:D",                    True),
+        (">:O",                    True),
+        (">:-(",                   True),
+        (">:-D",                   True),
+        ("<:(",                    True),   # less common but symmetric
+        # v2.0 round 7 — XD-style extension to other mouths.
+        ("xP",                     True),
+        ("XP",                     True),
+        ("x3",                     True),
+        ("X3",                     True),
+        ("xp",                     True),
+        ("Xp",                     True),
+        # v2.0 round 7 — cat-wrap `=...=`.
+        ("=^.^=",                  True),
+        ("=^_^=",                  True),
+        ("=ω.ω=",                  True),
+        ("=*.*=",                  True),
+        ("=>.<=",                  True),   # cat-wrap with paired eyes inside
+        # v2.0 round 7 — Korean closed-eye doubles (crying).
+        ("ㅠㅠ",                    True),
+        ("ㅜㅜ",                    True),
+        # v2.0 round 9 — `ヮ` (KATAKANA SMALL WA) as bare-Path-B mouth.
+        ("^ヮ^",                    True),
+        ("OヮO",                    True),
+        ("=ヮ=",                    True),
+        # v2.0 round 9 — `〜` (WAVE DASH) as bare-Path-B mouth. The
+        # candidate is validated BEFORE canonicalization runs the
+        # `〜→~` typo-sub fold, so the raw form has to pass.
+        ("T〜T",                    True),
+        ("^〜^",                    True),
+        ("=〜=",                    True),
+        # Round-7 false positives we still reject:
+        ("===",                    False),  # all-mouth (= is mouth)
+        ("==",                     False),  # 2-char repeated mouth
+        ("ωωω",                    False),  # all-ω, no distinct eyes
+        # Round-7 anime/uwu explicit allow (entirely-alpha shapes
+        # with `w` or `v` mouth that escape the all-alpha guard via
+        # the explicit `_UWU_FACES` set).
+        ("OwO",                    True),
+        ("UwU",                    True),
+        ("OvO",                    True),
+        ("uwu",                    True),
+        # 3-letter palindromes that LOOK like a face but are prose.
+        # The all-alpha guard in the symmetric branch rejects these.
+        ("lol",                    False),
+        ("mom",                    False),
+        ("pop",                    False),
+        ("eye",                    False),
+        ("did",                    False),
+        ("nun",                    False),
+        ("dad",                    False),
+        ("sos",                    False),
+        ("awa",                    False),
+        ("ewe",                    False),
+        ("iwi",                    False),
+        # Comprehensive negative sweep — common prose / chat openers /
+        # punctuation that the validator must NOT mistake for a face.
+        ("hi",                     False),
+        ("hey",                    False),
+        ("yes",                    False),
+        ("yep",                    False),
+        ("lol",                    False),
+        ("brb",                    False),
+        ("imo",                    False),
+        ("idk",                    False),
+        ("the",                    False),
+        ("for",                    False),
+        ("not",                    False),
+        ("but",                    False),
+        ("and",                    False),
+        ("ok",                     False),
+        ("um",                     False),
+        ("oh",                     False),
+        ("ah",                     False),
+        ("eh",                     False),
+        # Pure whitespace / punctuation / single-glyph (but length 2+).
+        ("!!",                     False),
+        ("??",                     False),
+        ("..",                     False),
+        (",,",                     False),
+        ("--",                     False),
+        ("==",                     False),
+        ("//",                     False),
+        ("~~",                     False),
+        ("**",                     False),
+        ("&&",                     False),
+        ("||",                     False),
+        # Numerics and version-like strings.
+        ("12",                     False),
+        ("3.14",                   False),
+        ("v2.0",                   False),
+        ("100%",                   False),
+        # Code / path-like fragments.
+        ("foo()",                  False),
+        ("a=b",                    False),
+        # 4+-letter-run prose (filtered by the structural rule).
+        ("Hello",                  False),
+        ("Done!",                  False),
+        ("What",                   False),
+        ("(test)",                 False),
+        # Markdown bold / italic / heading-like markers.
+        ("**a**",                  False),
+        ("__a__",                  False),
+        ("[a]",                    False),
+        # Cat-wrap variants that should reject — not actually a face.
+        ("=a=",                    False),  # interior `a` is letter, not mouth
+        ("=Hi=",                   False),  # interior letters
+        ("=__=",                   True),   # interior all-mouth, eyes `=`
+                                            # not in interior. Actually a real
+                                            # tired/dead face.
+        # Eyebrow-prefix Western that fails because the inner Western
+        # itself fails.
+        (">abc",                   False),
+        (">XYZ",                   False),
+        (">>>",                    False),  # all-`>`, no Western inside —
+                                            # `_is_western_emoticon` rejects
+                                            # the same-char-as-eye mouth run.
+        (">>",                     False),  # 2-char `>>` rejected too.
+        ("<<",                     False),
+        # Path-A bracket-letter false-alarm spans that the round-7
+        # `_has_kaomoji_content` check rejects.
+        ("[a]",                    False),
+        ("(b)",                    False),
+        ("(test)",                 False),
+        ("[abc]",                  False),  # also fails 4-letter run? no, 3
+                                            # letters — content check catches
+        # But content-bearing bracket spans pass.
+        ("(0_0)",                  True),   # digit eyes + `_` mouth content
+        ("(:)",                    True),   # `:` content
+        ("(a-a)",                  True),   # `-` content
+        # Korean variants beyond ㅠㅠ/ㅜㅜ are NOT in the closed-eye
+        # doubles set — surface only those two, reject others.
+        ("ㅎㅎ",                    False),  # Korean "haha" — out of scope
+        ("ㄴㄴ",                    False),  # "no no" — out of scope
+        # Emoji single-codepoints (length 1 → length filter rejects).
+        ("😀",                     False),
+        ("🥺",                     False),
     ],
 )
 def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
@@ -219,6 +901,22 @@ def test_is_kaomoji_candidate(candidate: str, expected: bool) -> None:
 
 def test_kaomoji_start_chars_includes_common_leaders() -> None:
     """Smoke-check that the leading-glyph set covers the canonical
-    bracket leaders. The full set is the v1.0 lock."""
+    bracket leaders + the v2.0 sweep additions. The full set is the
+    v2.0 lock."""
     for c in "([（｛":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 1 — wing/hug/sparkle:
+    for c in "\\⊂✧":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 2 — Greek + Latin extension + box-drawing diagonals:
+    for c in "ΣψΨεƪʕ╱╲":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 4 — corner brackets, standing-pose, music/hearts/
+    # stars, alternate bear-bracket open:
+    for c in "「『【〈《└┘♪♫♬♥♡❤★☆ʢ":
+        assert c in KAOMOJI_START_CHARS, c
+    # v2.0 round 5 — flowers, heart variants, star variants, quarter
+    # note, flex/strong-feel pose lead arms, tortoise-shell open
+    # bracket, reference mark, Oriya cradle pose left arm:
+    for c in "✿❀❣❥✦✩✪♩ᕦᕙ〔※୧":
         assert c in KAOMOJI_START_CHARS, c

@@ -10,6 +10,12 @@ parsing one concrete file format:
   - :mod:`llmoji.sources.claude_export` — Claude.ai data-export
     ``conversations.json``. Static archive format, not a hook
     output.
+  - :mod:`llmoji.sources.claude_export_alt` — Claude.ai
+    per-conversation export shape: one ``<title>.json`` per
+    conversation in a single directory plus an
+    ``export_summary.json`` sibling. Same per-message schema as
+    :mod:`~llmoji.sources.claude_export` but carries a top-level
+    ``model`` field; the per-message walk is shared.
   - :mod:`llmoji.sources.chatgpt_export` — OpenAI ChatGPT data-export
     ``conversations.json``. Same filename as Claude's, different
     schema (a tree of message nodes keyed by id, with

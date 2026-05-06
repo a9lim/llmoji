@@ -51,31 +51,40 @@ def test_plan_analyze_returns_expected_counts() -> None:
     assert plan.providers_seen == ["test"]
     # 3 cells: (m1, ◕‿◕), (m1, `・ω・´), (m2, ◕‿◕).
     assert sum(len(p) for p in plan.counts_by_cell.values()) == 3
-    assert plan.stage_b_calls == 3
+    assert plan.cell_count == 3
+    # Distinct sample sets per cell → distinct cache keys.
+    assert plan.unique_calls == 3
 
 
-def test_plan_analyze_stage_a_dedupes_duplicate_keys() -> None:
-    """Two sampled rows with identical (canonical, user, assistant)
-    fold to one cache key — the same dedup :func:`_stage_a` does at
-    runtime so the dry-run estimate matches what the real run would
-    issue.
+def test_plan_analyze_dedupes_identical_sample_sets() -> None:
+    """Two cells whose sampled (user, assistant) sets hash identically
+    fold to one cache key — the same dedup
+    :func:`_synthesize_cells` does at runtime so the dry-run estimate
+    matches what the real run would issue.
+
+    Constructed: same kaomoji in two source-model buckets, identical
+    rows. Cache keys differ by source_model so this DOESN'T collapse
+    in v2. The collapse path is exercised only when two cells in the
+    SAME source_model bucket share a sample-set hash — pathological
+    enough that we just verify v2's cell-count vs unique-call accounting
+    here.
     """
     from llmoji.analyze import plan_analyze
 
     rows = [
         _make_row("m1", "(◕‿◕)", "u", "a"),
-        _make_row("m1", "(◕‿◕)", "u", "a"),  # identical → same key
-        _make_row("m1", "(◕‿◕)", "u", "b"),
+        _make_row("m1", "(>_<)", "u", "a"),  # different cell
     ]
     plan = plan_analyze(rows, backend="anthropic")
-    # 3 sampled rows, 2 unique keys.
-    assert plan.stage_a_max_calls == 3
-    assert plan.stage_a_unique_calls == 2
+    assert plan.cell_count == 2
+    assert plan.unique_calls == 2
 
 
 def test_plan_analyze_respects_sample_cap() -> None:
     """A cell with more rows than INSTANCE_SAMPLE_CAP samples down to
-    the cap — same rule the real run applies.
+    the cap — same rule the real run applies. With v2 single-stage,
+    this just affects the sample-set hash (more samples → bigger
+    prompt) but doesn't multiply the call count.
     """
     from llmoji.analyze import INSTANCE_SAMPLE_CAP, plan_analyze
 
@@ -84,8 +93,10 @@ def test_plan_analyze_respects_sample_cap() -> None:
         for i in range(INSTANCE_SAMPLE_CAP + 5)
     ]
     plan = plan_analyze(rows, backend="anthropic")
-    assert plan.stage_a_max_calls == INSTANCE_SAMPLE_CAP
-    assert plan.stage_a_unique_calls == INSTANCE_SAMPLE_CAP
+    # One cell, one call — regardless of how many rows fold into the
+    # sampled-4-of-N input.
+    assert plan.cell_count == 1
+    assert plan.unique_calls == 1
 
 
 def test_plan_analyze_does_not_import_synth_sdks() -> None:

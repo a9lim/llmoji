@@ -11,7 +11,8 @@ Subcommands:
   analyze                 scrape + canonicalize + Haiku synthesize,
                           write bundle to ~/.llmoji/bundle/
   upload --target {hf,email}  tar bundle, submit
-  cache clear             delete the per-instance Haiku cache
+  cache clear             delete the per-cell synth cache (and any
+                          orphaned legacy v1 per-instance cache)
 
 The package keeps its on-disk state under ``$LLMOJI_HOME``
 (default ``~/.llmoji``). The user's only ship-able artifact is the
@@ -35,10 +36,12 @@ from .providers import PROVIDERS, HookInstaller, ProviderStatus, get_provider
 from .scrape import ScrapeRow
 from .sources.chatgpt_export import iter_chatgpt_export
 from .sources.claude_export import iter_claude_export
+from .sources.claude_export_alt import iter_claude_export_alt
 from .sources.gemini_export import iter_gemini_export
 from .sources.journal import iter_journal
 from .sources.openhands_export import iter_openhands_export
 from .synth import cache_size
+from .synth_prompts import LONG_NUDGE_MESSAGE, SHORT_NUDGE_MESSAGE
 from .taxonomy import canonicalize_kaomoji
 
 
@@ -47,34 +50,70 @@ from .taxonomy import canonicalize_kaomoji
 # ---------------------------------------------------------------------------
 
 
-def _print_install_summary(p: HookInstaller, s: ProviderStatus) -> None:
-    """One block of post-install output per provider."""
-    print(f"installed {p.name}.")
+def _print_install_summary(
+    p: HookInstaller,
+    s: ProviderStatus,
+    *,
+    soft: bool,
+) -> None:
+    """One block of post-install output per provider.
+
+    ``soft`` flips the placement label between "soft" (doc append)
+    and "hard" (per-turn nudge hook). The journal-write hook is
+    installed under both modes, so its path is reported in both.
+    """
+    mode_str = "soft" if soft else "hard"
+    print(f"installed {p.name} ({mode_str}).")
     print(f"  hook:     {s.hook_path}")
-    if s.nudge_hook_path is not None:
+    if soft:
+        print(f"  doc:      {s.system_prompt_doc_path}")
+    elif s.nudge_hook_path is not None:
         print(f"  nudge:    {s.nudge_hook_path}")
     print(f"  settings: {s.settings_path}")
     print(f"  journal:  {s.journal_path}")
 
 
-def _install_one(name: str) -> tuple[bool, str | None]:
+def _install_one(
+    name: str, *, soft: bool, long: bool,
+) -> tuple[bool, str | None]:
     """Install a single provider by name. Returns
     ``(succeeded, error_message)``. Used by the autodetect path so
     one corrupt config doesn't take down the rest of the batch.
+
+    ``soft`` picks the placement: True → soft-doc append (no nudge
+    hook); False → hard nudge hook. The journal-write hook is
+    installed under both modes — that's the data-capture invariant.
+    ``long`` swaps the nudge text from ``SHORT_NUDGE_MESSAGE`` (the
+    v1 wording) to ``LONG_NUDGE_MESSAGE`` (the v7 introspection
+    framing).
     """
     p = get_provider(name)
+    # Per-instance attr override — the class default stays SHORT, so
+    # other concurrent provider instances aren't affected.
+    if long:
+        p.nudge_message = LONG_NUDGE_MESSAGE
+    else:
+        p.nudge_message = SHORT_NUDGE_MESSAGE
     try:
-        p.install()
+        if soft:
+            p.install_soft()
+        else:
+            p.install_hard()
     except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
         return False, f"{type(e).__name__}: {e}"
-    _print_install_summary(p, p.status())
+    _print_install_summary(p, p.status(), soft=soft)
     return True, None
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
+    # argparse's mutually_exclusive_group(required=True) on --soft /
+    # --hard already enforces "exactly one" at parse time, so no
+    # re-validation needed here.
+    install_kwargs = {"soft": args.soft, "long": args.long}
+
     # Explicit provider: legacy single-target path.
     if args.provider is not None:
-        ok, err = _install_one(args.provider)
+        ok, err = _install_one(args.provider, **install_kwargs)
         if not ok:
             print(f"install failed for {args.provider}: {err}", file=sys.stderr)
             return 1
@@ -93,12 +132,14 @@ def _cmd_install(args: argparse.Namespace) -> int:
                 for name in PROVIDERS
             )
             + "). install a supported harness, or pass an explicit "
-            "provider name (e.g. `llmoji install claude_code`).",
+            "provider name (e.g. `llmoji install claude_code --hard`).",
             file=sys.stderr,
         )
         return 2
 
-    print("detected harnesses:")
+    mode_label = "soft" if args.soft else "hard"
+    long_suffix = " (long prompt)" if args.long else ""
+    print(f"detected harnesses, will install [{mode_label}]{long_suffix}:")
     for name in detected:
         print(f"  - {name}  ({get_provider(name).settings_path.parent})")
     if not args.yes:
@@ -116,7 +157,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     # Partial success: one corrupt config doesn't kill the rest.
     failures: list[tuple[str, str]] = []
     for name in detected:
-        ok, err = _install_one(name)
+        ok, err = _install_one(name, **install_kwargs)
         if not ok:
             failures.append((name, err or ""))
         print()
@@ -129,10 +170,87 @@ def _cmd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_uninstall(args: argparse.Namespace) -> int:
-    p = get_provider(args.provider)
-    p.uninstall()
+def _uninstall_one(name: str) -> tuple[bool, str | None]:
+    """Uninstall a single provider by name. Returns
+    ``(succeeded, error_message)``. Mirrors ``_install_one``'s
+    contract so the autodetect path can keep going on per-provider
+    failure (e.g. corrupt settings on one provider shouldn't block
+    cleanup of others).
+    """
+    p = get_provider(name)
+    try:
+        p.uninstall()
+    except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
+        return False, f"{type(e).__name__}: {e}"
     print(f"uninstalled {p.name}. journal at {p.journal_path} preserved.")
+    return True, None
+
+
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    # Explicit provider: legacy single-target path.
+    if args.provider is not None:
+        ok, err = _uninstall_one(args.provider)
+        if not ok:
+            print(
+                f"uninstall failed for {args.provider}: {err}",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    # Autodetect path: mirror ``llmoji install``. Enumerate every
+    # registered provider whose harness home dir exists on disk and
+    # uninstall each. ``HookInstaller.uninstall`` is idempotent — a
+    # provider that was never installed (no settings entries, no hook
+    # files on disk) is a clean no-op, so we don't need a separate
+    # "is actually installed" filter; matching install's filter
+    # surface keeps the two commands' UX uniform.
+    detected = [
+        name for name in PROVIDERS if get_provider(name).is_present()
+    ]
+    if not detected:
+        print(
+            "no harnesses detected (looked for "
+            + ", ".join(
+                f"{name} ({get_provider(name).settings_path.parent})"
+                for name in PROVIDERS
+            )
+            + "). pass an explicit provider name (e.g. "
+            "`llmoji uninstall claude_code`) if your harness home dir "
+            "lives somewhere unusual.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print("detected harnesses:")
+    for name in detected:
+        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+    if not args.yes:
+        try:
+            ans = input(
+                f"uninstall llmoji hooks from {len(detected)} harness(es)? "
+                f"[y/N] "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    print()
+
+    # Partial success: one corrupt config doesn't kill the rest.
+    failures: list[tuple[str, str]] = []
+    for name in detected:
+        ok, err = _uninstall_one(name)
+        if not ok:
+            failures.append((name, err or ""))
+        print()
+    if failures:
+        print(f"{len(failures)} of {len(detected)} provider(s) failed:",
+              file=sys.stderr)
+        for name, err in failures:
+            print(f"  - {name}: {err}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -163,21 +281,59 @@ def _validate_journal_row(row: object) -> str | None:
 
 def _provider_health_summary(s: ProviderStatus) -> tuple[str, list[str]]:
     """Return ``(marker, issues)`` where ``marker`` is one of ✓ ⚠ ✗
-    · — corresponding to healthy / stale / broken / not-installed —
-    and ``issues`` is a list of one-liner strings to print under the
-    provider header. Empty list when healthy or not installed.
+    ○ · — corresponding to hard-installed / soft-stale / settings-
+    corrupt / soft-only-healthy / not-installed — and ``issues`` is
+    a list of one-liner strings to print under the provider header.
+    Empty list when healthy or not installed.
+
+    Soft mode installs the journal-write hook + the doc heading
+    block; nudge hook stays absent. So a clean soft install reads
+    as ``main_installed=True``, ``nudge_installed=False``,
+    ``soft_installed=True`` — with the rolled-up ``installed`` flag
+    False (it AND-folds the nudge presence). The ``○`` marker
+    covers that case so it doesn't read as a half-broken hard
+    install.
     """
     issues: list[str] = []
-    if not s.installed:
+    if not s.installed and not s.soft_installed and not s.main_installed:
+        # Nothing of ours is on disk. ``soft_doc_current=False`` here
+        # surfaces an orphan ``# Kaomoji`` heading the user (or an
+        # earlier version) left behind — flag it without claiming we
+        # installed.
+        if not s.soft_doc_current:
+            issues.append(
+                "soft-doc heading present but body doesn't match a "
+                "canonical wording — re-run install --soft to refresh"
+            )
+            return "⚠", issues
         return "·", issues
+    if s.soft_installed and not s.installed:
+        # Soft mode is the dominant install — hard nudge intentionally
+        # absent. Health is the AND of journal hook + doc-current.
+        if s.settings_parse_error is not None:
+            issues.append(f"settings unparseable: {s.settings_parse_error}")
+        if not s.main_hook_current:
+            issues.append("journal hook content stale (re-run install --soft)")
+        if not s.soft_doc_current:
+            issues.append("soft-doc block stale (re-run install --soft)")
+        if issues:
+            marker = "✗" if s.settings_parse_error is not None else "⚠"
+        else:
+            marker = "○"
+        return marker, issues
+    # Hard install path (or partial — main installed, nudge expected).
     if s.settings_parse_error is not None:
         issues.append(f"settings unparseable: {s.settings_parse_error}")
     if not s.main_hook_current:
-        issues.append("main hook content stale (re-run install)")
+        issues.append("main hook content stale (re-run install --hard)")
     if s.nudge_hook_path is not None and not s.nudge_hook_current:
-        issues.append("nudge hook content stale (re-run install)")
+        issues.append("nudge hook content stale (re-run install --hard)")
+    if not s.soft_doc_current:
+        issues.append(
+            "soft-doc heading orphan — re-run install --soft if you meant "
+            "to switch placement, or strip by hand"
+        )
     if issues:
-        # Settings-corrupt is a hard break; stale is a warn.
         marker = "✗" if s.settings_parse_error is not None else "⚠"
     else:
         marker = "✓"
@@ -272,8 +428,10 @@ def _print_status_human(
     print("providers:")
     for s in snapshots:
         marker, issues = _provider_health_summary(s)
-        if not s.installed:
+        if not s.installed and not s.soft_installed:
             kw = "not installed"
+        elif not s.installed and s.soft_installed:
+            kw = "soft only"
         elif issues:
             # Keep the install verb, surface issues separately so the
             # signal "we're set up but something's off" is honest.
@@ -299,16 +457,29 @@ def _print_status_human(
         if s.settings_parse_error is not None:
             settings_suffix = f"  (unparseable: {s.settings_parse_error})"
         print(f"        settings:{s.settings_path}{settings_suffix}")
+        if s.system_prompt_doc_path is not None:
+            if s.soft_installed:
+                soft_suffix = "" if s.soft_doc_current else "  (stale content)"
+            else:
+                soft_suffix = "  (no soft block)"
+            print(f"        soft:    {s.system_prompt_doc_path}{soft_suffix}")
         print(f"        journal: {s.journal_path}")
         for issue in issues:
             print(f"        ⚠ {issue}")
 
-    cache_path = paths.cache_per_instance_path()
+    cache_path = paths.cache_per_cell_path()
     n_bytes = cache_size(cache_path)
     print()
     print(
-        f"per-instance synth cache: {human_bytes(n_bytes)} at {cache_path}"
+        f"per-cell synth cache: {human_bytes(n_bytes)} at {cache_path}"
     )
+    legacy_cache = paths.cache_per_instance_path()
+    if legacy_cache.exists():
+        print(
+            f"  (legacy v1 per-instance cache also present: "
+            f"{human_bytes(cache_size(legacy_cache))} at {legacy_cache}; "
+            f"`llmoji cache clear` removes both)"
+        )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
         files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
@@ -365,7 +536,8 @@ def _print_status_json(
     *,
     top_n: int,
 ) -> None:
-    cache_path = paths.cache_per_instance_path()
+    cache_path = paths.cache_per_cell_path()
+    legacy_cache_path = paths.cache_per_instance_path()
     bundle_dir = paths.bundle_dir()
     bundle_files: list[dict[str, Any]] = []
     if bundle_dir.exists():
@@ -395,12 +567,23 @@ def _print_status_json(
                 "journal_path": str(s.journal_path),
                 "journal_exists": s.journal_exists,
                 "journal_bytes": s.journal_bytes,
+                "system_prompt_doc_path": (
+                    str(s.system_prompt_doc_path)
+                    if s.system_prompt_doc_path is not None else None
+                ),
+                "soft_installed": s.soft_installed,
+                "soft_doc_current": s.soft_doc_current,
             }
             for s in snapshots
         ],
         "cache": {
             "path": str(cache_path),
             "bytes": cache_size(cache_path),
+            "legacy_path": str(legacy_cache_path),
+            "legacy_bytes": (
+                cache_size(legacy_cache_path)
+                if legacy_cache_path.exists() else 0
+            ),
         },
         "bundle": {
             "path": str(bundle_dir),
@@ -475,6 +658,13 @@ def _parse_claude_ai(args: argparse.Namespace) -> int:
     )
 
 
+def _parse_claude_ai_alternate(args: argparse.Namespace) -> int:
+    return _write_journal_rows(
+        iter_claude_export_alt([Path(p) for p in args.paths]),
+        "claude_ai_alt_export.jsonl",
+    )
+
+
 def _parse_chatgpt(args: argparse.Namespace) -> int:
     return _write_journal_rows(
         iter_chatgpt_export([Path(p) for p in args.paths]),
@@ -500,6 +690,7 @@ def _parse_openhands(args: argparse.Namespace) -> int:
 # entry. The CLI dispatches off ``--provider`` against this dict.
 _PARSERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "claude.ai": _parse_claude_ai,
+    "claude.ai-alternate": _parse_claude_ai_alternate,
     "chatgpt": _parse_chatgpt,
     "gemini": _parse_gemini,
     "openhands": _parse_openhands,
@@ -561,13 +752,11 @@ def _print_analyze_plan(plan: Any) -> None:
         print("source model row counts:")
         for sm, n in ranked:
             print(f"  {n:>6}  {sm}")
-    n_cells = sum(len(p) for p in plan.counts_by_cell.values())
     print(
-        f"\nstage A: up to {plan.stage_a_max_calls} sampled rows "
-        f"across {n_cells} cell(s); {plan.stage_a_unique_calls} "
-        f"unique cache key(s) → that's the cold-cache call count."
+        f"\nsynthesize: {plan.cell_count} cell(s) → "
+        f"{plan.unique_calls} cold-cache structured-output call(s) "
+        f"after sample-set dedup."
     )
-    print(f"stage B: {plan.stage_b_calls} cell(s) → {plan.stage_b_calls} call(s)")
     print(
         f"\nestimated tokens (approx, char/4 heuristic): "
         f"input {plan.estimated_input_tokens:,} / "
@@ -647,9 +836,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     print(
         f"analyze done: {result.canonical_unique} canonical kaomoji from "
         f"{result.total_rows} rows; "
-        f"{result.stage_a_calls_made} new synth calls, "
-        f"{result.stage_a_calls_cached} cached, "
-        f"{result.stage_b_calls_made} syntheses."
+        f"{result.calls_made} new synth call(s), "
+        f"{result.calls_cached} cache hit(s)."
     )
     print(f"bundle: {result.bundle_dir}")
     return 0
@@ -660,39 +848,115 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _import_one(
+    name: str, *, since: str | None, dry_run: bool,
+) -> tuple[bool, str | None]:
+    """Wrap ``import_provider`` so the autodetect path can keep going
+    on per-provider failure. Mirrors ``_install_one``'s contract:
+    returns ``(succeeded, error_message)`` and prints the per-provider
+    summary on success.
+    """
+    from .backfill import import_provider
+
+    try:
+        result = import_provider(name, since=since, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 — surfaced to the CLI verbatim
+        return False, f"{type(e).__name__}: {e}"
+
+    label = "would append" if dry_run else "appended"
+    skipped = result.rows_seen - result.rows_novel
+    print(
+        f"{name}: saw {result.rows_seen} row(s); {label} "
+        f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
+    )
+    if dry_run:
+        print("(dry run — journal not modified)")
+    elif result.rows_novel:
+        print(
+            f"journal: {get_provider(name).journal_path}\n"
+            f"run `llmoji analyze` to fold them into the next bundle."
+        )
+    return True, None
+
+
 def _cmd_import(args: argparse.Namespace) -> int:
-    """``llmoji import <provider>`` — dedup-aware merge of historical
+    """``llmoji import [<provider>]`` — dedup-aware merge of historical
     session/transcript files into the live journal. Internal module
     is :mod:`llmoji.backfill`; ``import`` is the user-facing verb
     because "replay session files into the journal" is the dominant
     mental model and ``backfill`` collides namewise with what users
     might expect to be "redo the analyze pass."
-    """
-    from .backfill import import_provider
 
-    try:
-        result = import_provider(
-            args.provider,
-            since=args.since,
-            dry_run=args.dry_run,
+    No-arg path mirrors ``llmoji install``'s autodetect: enumerate
+    every importable provider whose harness home dir exists on disk,
+    prompt unless ``--yes``, run each. Partial success OK — a single
+    provider failing doesn't take down the rest of the batch.
+    """
+    from .backfill import IMPORTABLE_PROVIDERS
+
+    # Explicit provider: legacy single-target path.
+    if args.provider is not None:
+        ok, err = _import_one(
+            args.provider, since=args.since, dry_run=args.dry_run,
         )
-    except ValueError as e:
-        print(f"import failed: {e}", file=sys.stderr)
+        if not ok:
+            print(f"import failed for {args.provider}: {err}", file=sys.stderr)
+            return 2
+        return 0
+
+    # Autodetect path: importable providers (claude_code, codex,
+    # hermes) whose harness home dir exists. TS-plugin providers
+    # (opencode, openclaw) don't expose a replayable on-disk
+    # transcript shape and so are excluded — see
+    # ``backfill.IMPORTABLE_PROVIDERS``.
+    detected = [
+        name for name in IMPORTABLE_PROVIDERS
+        if get_provider(name).is_present()
+    ]
+    if not detected:
+        print(
+            "no importable harnesses detected (looked for "
+            + ", ".join(
+                f"{name} ({get_provider(name).settings_path.parent})"
+                for name in IMPORTABLE_PROVIDERS
+            )
+            + "). install a supported harness, or pass an explicit "
+            "provider name (e.g. `llmoji import claude_code`).",
+            file=sys.stderr,
+        )
         return 2
 
-    label = "would append" if args.dry_run else "appended"
-    skipped = result.rows_seen - result.rows_novel
-    print(
-        f"{args.provider}: saw {result.rows_seen} row(s); {label} "
-        f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
-    )
-    if args.dry_run:
-        print("(dry run — journal not modified)")
-    elif result.rows_novel:
-        print(
-            f"journal: {get_provider(args.provider).journal_path}\n"
-            f"run `llmoji analyze` to fold them into the next bundle."
+    print("detected harnesses:")
+    for name in detected:
+        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+    if not args.yes:
+        try:
+            ans = input(
+                f"import session history from {len(detected)} "
+                f"harness(es)? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("aborted.")
+            return 1
+    print()
+
+    # Partial success: one provider failing doesn't kill the rest.
+    failures: list[tuple[str, str]] = []
+    for name in detected:
+        ok, err = _import_one(
+            name, since=args.since, dry_run=args.dry_run,
         )
+        if not ok:
+            failures.append((name, err or ""))
+        print()
+    if failures:
+        print(f"{len(failures)} of {len(detected)} provider(s) failed:",
+              file=sys.stderr)
+        for name, err in failures:
+            print(f"  - {name}: {err}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -763,7 +1027,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "install",
-        help="install a provider's hook (no arg → autodetect all)",
+        help=(
+            "install a provider's journal-write hook + nudge "
+            "placement (no arg → autodetect all). Requires "
+            "exactly one of --soft / --hard."
+        ),
     )
     sp.add_argument(
         "provider", nargs="?", default=None, choices=sorted(PROVIDERS),
@@ -772,14 +1040,63 @@ def _build_parser() -> argparse.ArgumentParser:
             "home directory exists under $HOME"
         ),
     )
+    mode_group = sp.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "--soft", action="store_true",
+        help=(
+            "install the journal-write hook AND append the kaomoji-"
+            "leading reminder to the harness's persistent system-"
+            "prompt doc (CLAUDE.md / AGENTS.md / SOUL.md per "
+            "harness). The nudge lives in the identity slot — no "
+            "per-turn nudge hook."
+        ),
+    )
+    mode_group.add_argument(
+        "--hard", action="store_true",
+        help=(
+            "install the journal-write hook AND a per-turn nudge "
+            "hook that injects the kaomoji-leading reminder as "
+            "additional context every turn. The v1 behavior."
+        ),
+    )
+    sp.add_argument(
+        "--long", action="store_true",
+        help=(
+            "use the long-form v7 introspection prompt instead of "
+            "the one-sentence default. Frames the kaomoji as a "
+            "self-report on a functional emotional state. Orthogonal "
+            "to --soft / --hard — pick one of those for placement, "
+            "this picks the wording."
+        ),
+    )
     sp.add_argument(
         "--yes", action="store_true",
         help="skip the autodetect confirmation prompt (no-op with explicit provider)",
     )
     sp.set_defaults(func=_cmd_install)
 
-    sp = sub.add_parser("uninstall", help="remove a provider's hook")
-    sp.add_argument("provider", choices=sorted(PROVIDERS))
+    sp = sub.add_parser(
+        "uninstall",
+        help=(
+            "remove a provider's hook (idempotent; preserves journal). "
+            "With no provider arg, autodetects every harness present on "
+            "disk and uninstalls from each."
+        ),
+    )
+    sp.add_argument(
+        "provider", nargs="?", default=None, choices=sorted(PROVIDERS),
+        help=(
+            "harness to uninstall from; omit to autodetect every "
+            "harness present on disk"
+        ),
+    )
+    sp.add_argument(
+        "--yes", action="store_true",
+        help=(
+            "skip the autodetect confirmation prompt (no-op for the "
+            "explicit-provider path)"
+        ),
+    )
     sp.set_defaults(func=_cmd_uninstall)
 
     sp = sub.add_parser(
@@ -877,12 +1194,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "import",
         help=(
             "replay a provider's native session/transcript files into "
-            "its journal (dedup-aware merge — re-runnable)"
+            "its journal (dedup-aware merge — re-runnable). With no "
+            "provider arg, autodetects every importable harness whose "
+            "home dir exists and replays each."
         ),
     )
+    # Lazy import so the parser can be built without loading the
+    # backfill module (which pulls in source-format readers).
+    from .backfill import IMPORTABLE_PROVIDERS as _IMPORTABLE_PROVIDERS
     sp.add_argument(
-        "provider", choices=sorted(PROVIDERS),
-        help="harness whose session files to walk",
+        "provider", nargs="?", default=None,
+        choices=sorted(_IMPORTABLE_PROVIDERS),
+        help=(
+            "harness whose session files to walk; omit to autodetect "
+            "every importable harness present on disk"
+        ),
     )
     sp.add_argument(
         "--since", default=None,
@@ -894,6 +1220,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--dry-run", action="store_true",
         help="walk + dedup but don't write the journal",
+    )
+    sp.add_argument(
+        "--yes", action="store_true",
+        help=(
+            "skip the autodetect confirmation prompt (no-op for the "
+            "explicit-provider path)"
+        ),
     )
     sp.set_defaults(func=_cmd_import)
 

@@ -51,6 +51,14 @@ class CodexProvider(JsonSettingsHookInstaller):
     hooks_dir = Path.home() / ".codex" / "hooks"
     settings_path = Path.home() / ".codex" / "hooks.json"
     journal_path = Path.home() / ".codex" / "kaomoji-journal.jsonl"
+    # Codex's global instructions file — read by the CLI on every
+    # session start, layered before any project-local AGENTS.md (see
+    # https://developers.openai.com/codex/guides/agents-md). ``llmoji
+    # install --soft`` writes a marker-fenced block here. Codex also
+    # honors ``AGENTS.override.md`` when present, but we target the
+    # base file because that's the conventional global surface and
+    # the override file is documented as a temporary swap-in.
+    system_prompt_doc_path = Path.home() / ".codex" / "AGENTS.md"
     hook_template = "codex.sh.tmpl"
     # Same per-entry-loop reasoning as ClaudeCodeProvider: the validate
     # partial sits inside a ``while read``-loop iterating every
