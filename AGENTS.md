@@ -26,8 +26,8 @@ story that motivates it).
 ```
 harness hook  →  ~/.<harness>/kaomoji-journal.jsonl   (6-field rows)
               →  llmoji.sources.* readers + taxonomy.canonicalize
-              →  Stage A: per-instance describe (cached)
-              →  Stage B: per-cell synthesize
+              →  per-cell single-stage synthesize (cached, structured
+                 output against the locked SYNTHESIS_SCHEMA)
               →  ~/.llmoji/bundle/  (manifest.json + <model>.jsonl)
               →  llmoji upload --target {hf,email}
 ```
@@ -89,29 +89,63 @@ Three concrete backends, all routed through
   Chat-Completions-shaped endpoints. No default model id; user must
   pass `--model`.
 
-All three defer SDK-client construction to first `.call()` so the
-factory has no env-var dependency at construction time.
+All three defer SDK-client construction to first `.call()` /
+`.call_structured()` so the factory has no env-var dependency at
+construction time. The structured-output paths use each backend's
+native JSON-schema-with-enum support — verified against the
+installed SDK shapes:
 
-### Two-stage synthesis pipeline
+- **Anthropic** — `messages.create(..., output_config={"format":
+  {"type": "json_schema", "schema": SYNTHESIS_SCHEMA}})`. The
+  format object has exactly two fields (`type` and `schema`) per
+  `anthropic.types.json_output_format_param.JSONOutputFormatParam`
+  — no `name` / `strict` / `description`.
+- **OpenAI Responses** — `responses.create(..., text={"format":
+  {"type": "json_schema", "name": "synthesis", "schema":
+  SYNTHESIS_SCHEMA, "strict": True}})`. `name` is required;
+  `strict` enables strict schema adherence.
+- **Local Chat Completions** — tries `chat.completions.create(...,
+  response_format={"type": "json_schema", "json_schema": {"name":
+  ..., "schema": ..., "strict": True}})` first; on
+  `BadRequestError` / `UnprocessableEntityError` falls back to
+  appending `Output strictly as JSON matching this schema:\n
+  {schema}` to the prompt and parsing the unconstrained reply.
 
-- **Stage A (per instance)**: for each `(source_model,
-  canonical_kaomoji)` cell, sample up to `INSTANCE_SAMPLE_CAP` rows
-  (deterministic seed
-  `f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`), mask the
-  kaomoji to `[FACE]`, call the synthesizer with
-  `DESCRIBE_PROMPT_WITH_USER` or `DESCRIBE_PROMPT_NO_USER`. Cache
-  keyed by `sha256(synth_model_id + "\0" + backend + "\0" + base_url
-  + "\0" + canonical + "\0" + user + "\0" + assistant)[:16]` at
-  `~/.llmoji/cache/per_instance.jsonl`. Switching synth model OR
-  backend OR (for `local`) endpoint misses cleanly. Cache-miss API
-  calls dispatch on a small thread pool; the serial walk that builds
-  Stage B's input runs in deterministic order so re-runs feed
-  Stage B identical descriptions.
-- **Stage B (per cell)**: pool Stage A descriptions, synthesize a
-  single 1–2-sentence overall meaning via `SYNTHESIZE_PROMPT`. The
-  Stage B line is the only thing that ships.
+### Single-stage synthesis pipeline
 
-Embedding / axis projection / clustering / figures are research-side.
+For each `(source_model, canonical_kaomoji)` cell, sample up to
+`INSTANCE_SAMPLE_CAP` rows (deterministic seed
+`f"{INSTANCE_SAMPLE_SEED}:{source_model}:{canonical}"`), mask the
+leading kaomoji to `[FACE]`, render the samples into the locked
+`SYNTHESIZE_PROMPT` as numbered `[Sample N]\nUser: ...\nAssistant:
+[FACE] ...` blocks (User: line omitted for empty user_text), and
+call the synthesizer's `call_structured` with `SYNTHESIS_SCHEMA`.
+The single call returns a structured object
+`{primary_affect, stance_modality_function}` drawn purely from
+the locked `LEXICON`.
+
+Cache keyed by `sha256(synth_model_id + "\0" + backend + "\0" +
+base_url + "\0" + source_model + "\0" + canonical + "\0" +
+sample_set_hash)[:16]` at `~/.llmoji/cache/per_cell.jsonl`. The
+`sample_set_hash` is a length-prefixed-framed sha256 of the sorted
+`(user, assistant)` pairs that fed the call, so a re-import that
+changes which 4 rows get sampled cache-misses on affected cells
+while stable cells keep hitting. Switching synth model OR backend
+OR (for `local`) endpoint misses cleanly. Cache-miss API calls
+dispatch on a small thread pool; the deterministic walk order
+makes re-runs produce byte-identical bundle output.
+
+The v1 pipeline was two-stage (per-instance describe at Stage A,
+per-cell prose-from-prose synthesize at Stage B) and produced
+free-form prose that clustered as noise in PCA. v2 collapses both
+into one call that sees all samples for a cell at once, drops
+prose entirely in favor of pure adjective bags from the locked
+LEXICON, and ships ~5× fewer API calls per analyze. The legacy
+`per_instance.jsonl` cache from v1 is orphaned by v2 — first run
+prints a one-line cleanup notice; `llmoji cache clear` wipes both.
+
+Embedding / axis projection / clustering / figures are
+research-side at `llmoji-study`.
 
 ## Cross-corpus invariant surface
 
@@ -175,8 +209,17 @@ and update the HF dataset card to match.
     but stay OUT of arm-strip — the whole bear is the kaomoji, no
     inner `(...)` to fall back to. Same for corner-bracket-only
     standalone faces (`「・_・」`, `〔・_・〕`).
-- **`llmoji.synth_prompts`**: `DESCRIBE_PROMPT_WITH_USER`,
-  `DESCRIBE_PROMPT_NO_USER`, `SYNTHESIZE_PROMPT`,
+- **`llmoji.synth_prompts`**: `LEXICON` (46-entry locked
+  vocabulary — circumplex anchors tagged with HP / LP / HN-D /
+  HN-S / LN / NB primary quadrant + extension axes tagged
+  `functional` / `stance` / `modality` / `confidence`),
+  `LEXICON_VERSION` (bundle-stamped, bumped only on lexicon
+  rotation — independent of package version), `SYNTHESIS_SCHEMA`
+  (the JSON schema the model's structured output is validated
+  against — disjoint enum sets across `primary_affect` and
+  `stance_modality_function`, no free-form, no distinctive
+  phrase), `SYNTHESIZE_PROMPT` (single-stage; takes `{samples}`
+  rendered as numbered `[Sample N]` blocks),
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
   `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot),
   `SHORT_NUDGE_MESSAGE` (v1 one-sentence nudge),
@@ -184,7 +227,10 @@ and update the HF dataset card to match.
   `llmoji-study/preambles/introspection_v7.txt`;
   `tests/test_soft_install.py
   ::test_long_nudge_message_matches_introspection_v7` enforces
-  byte-identity).
+  byte-identity). The LEXICON itself is snapshot-pinned in
+  `tests/test_lexicon_evolution.py`; any rotation requires both
+  the snapshot update and a `LEXICON_VERSION` bump in the same
+  commit.
 - **6-field journal row schema** (on-disk JSONL):
   `{ts, model, cwd, kaomoji, user_text, assistant_text}`. The
   in-memory `llmoji.scrape.ScrapeRow` (7 fields: `source, model,
@@ -228,12 +274,15 @@ and update the HF dataset card to match.
   `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
   `providers_seen` in shipped bundles names these directly.
 - **Bundle schema**:
-  - `manifest.json` keys: `llmoji_version`, `synthesis_model_id`,
-    `synthesis_backend`, `submitter_id`, `generated_at`,
-    `providers_seen`, `model_counts`, `total_synthesized_rows`,
-    `notes`.
-  - one `<sanitized_source_model>.jsonl` per source model, each row
-    `{kaomoji, count, synthesis_description}`.
+  - `manifest.json` keys: `llmoji_version`, `lexicon_version`,
+    `synthesis_model_id`, `synthesis_backend`, `submitter_id`,
+    `generated_at`, `providers_seen`, `model_counts`,
+    `total_synthesized_rows`, `notes`.
+  - one `<sanitized_source_model>.jsonl` per source model, each
+    row `{kaomoji, count, synthesis: {primary_affect:
+    [1..3 from CIRCUMPLEX_ANCHORS], stance_modality_function:
+    [2..4 from EXTENSION_AXES]}}`. The two adjective arrays draw
+    from disjoint enum sets; no free-form, no distinctive phrase.
   - filename stem = `sanitize_model_id_for_path(source_model)`
     (lowercase, `/` → `__`, `:` → `-`).
 
@@ -365,7 +414,7 @@ llmoji/
                          # .salt (per-machine submission token).
                          # NOT an install registry — install state
                          # is read live from each harness's settings.
-    analyze.py           # Stage A + B + bundle write
+    analyze.py           # single-stage synthesize + bundle write
     upload.py            # tar + HF / email targets
     _shared_token.py     # encrypted shared HF credential
                          # (PBKDF2/HMAC-keystream, stdlib only)
@@ -472,9 +521,12 @@ Per-row invariants:
 
 - `user_text` is resolved once per turn — every row from one turn
   carries the same originating prompt.
-- The cache key hashes `(synth_model_id, canonical, user_text,
-  assistant_text)` so different assistant texts within a turn don't
-  collide.
+- The cache key hashes `(synth_model_id, backend, base_url,
+  source_model, canonical, sample_set_hash)` where
+  `sample_set_hash` covers the sorted `(user, assistant)` pairs
+  that fed the per-cell synthesis. Cells whose sample sets shift
+  on re-import (new rows added past `INSTANCE_SAMPLE_CAP`)
+  cache-miss cleanly; stable cells cache-hit.
 - Backfills (`backfill_codex` / `backfill_claude_code` /
   `backfill_hermes`) implement the same per-message walk and stay
   parity-tested via `test_pipeline_parity.py`. Hermes parity uses
@@ -610,9 +662,8 @@ file types.
   `HfApi.upload_folder` as a second line of defense.
 
 `analyze` clears the bundle dir of all files + subdirs before
-writing. The three together mean stale per-instance descriptions,
-hidden-state caches, leftover subfolders, etc. cannot leak through
-`upload`.
+writing. The three together mean stale adjective bags, hidden-state
+caches, leftover subfolders, etc. cannot leak through `upload`.
 
 ### HF upload — per-submission branch + shared encrypted credential
 
@@ -701,21 +752,28 @@ bash hook picks it up via `${INJECTED_PREFIXES_FILTER}`.
 
 [hermes-hooks]: https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks/
 
-### Cache directory is leakier than the bundle
+### Cache directory is locally-private
 
-`~/.llmoji/cache/per_instance.jsonl` holds synthesizer-paraphrased
-descriptions of single user turns, keyed by content hash. Each row
-IS one turn paraphrase, so for a topic-narrow corpus a singleton row
-can leak specifics. Mitigations:
+`~/.llmoji/cache/per_cell.jsonl` holds the structured adjective
+bag for each `(source_model, canonical_kaomoji)` cell, keyed by
+content hash. Each row carries an adjective bag drawn purely
+from the locked LEXICON — no prose, no free-form, no user-text
+content — so the cache itself doesn't leak per-turn specifics
+the way v1's `per_instance.jsonl` could (each v1 row was a
+paraphrase of a single user turn). Mitigations:
 
-- Cache is **never** bundled or shipped. Only the per-canonical-face
-  Stage B synthesis lands in the bundle.
-- `llmoji status` prints cache size + entry count.
-- `llmoji uninstall <provider>` does NOT touch the cache (the user
-  may re-install). `llmoji cache clear` is the explicit wipe.
+- Cache is **never** bundled or shipped. The bundle row carries
+  the same adjective bag, but the cache also carries the
+  `(model, backend, base_url, source_model, sample_set_hash)`
+  metadata that the bundle row drops.
+- `llmoji status` prints cache size.
+- `llmoji uninstall <provider>` does NOT touch the cache (the
+  user may re-install). `llmoji cache clear` is the explicit
+  wipe (and removes the orphaned legacy v1
+  `per_instance.jsonl` if still on disk).
 
-The bundle is the only thing that leaves the machine; the inspection
-gap is the consent boundary.
+The bundle is the only thing that leaves the machine; the
+inspection gap is the consent boundary.
 
 ### Codex `transcript_path` carries the rollout JSONL
 
@@ -772,7 +830,7 @@ Two coupling points:
   flavor (Lua, JS-without-TS) follows the bash-vs-plugin split:
   new sibling base under `providers/base.py` plus templates under a
   new `_<flavor>/` package data dir.
-- Stage-A/B synth calls run on a small thread pool (default 1,
+- Single-stage synth calls run on a small thread pool (default 1,
   `--concurrency` flag or `$LLMOJI_CONCURRENCY` to override). Cache
   writes happen on the main thread inside the `as_completed` loop
   immediately after each future succeeds, so a mid-wave failure
@@ -780,14 +838,17 @@ Two coupling points:
   errors, drain the loop, and raise `AnalyzeError` with a "re-run
   to resume" message. Default 1 because the org-level Haiku rate
   cap (50 req/min) trips intermittently at concurrency=2 on
-  multi-hundred-row backfills; the SDK's `max_retries=8` exponential
-  backoff (set explicitly, vs the SDK default of 2) recovers but
-  burns wallclock. Bump if your tier has headroom. `descs_by_cell`
-  is assembled in deterministic walk order so Stage B sees identical
-  numbered descriptions across runs; the on-disk cache row order is
-  non-deterministic and that's fine because the cache is hash-keyed.
-  `INSTANCE_SAMPLE_CAP` is 4 — same value as Eriskii's original
-  Claude-faces work, kept for cross-corpus comparability.
+  multi-hundred-cell backfills; the SDK's `max_retries=8`
+  exponential backoff (set explicitly, vs the SDK default of 2)
+  recovers but burns wallclock. Bump if your tier has headroom.
+  `synth_by_cell` is assembled in deterministic walk order so
+  re-runs produce byte-identical bundle output; the on-disk cache
+  row order is non-deterministic and that's fine because the
+  cache is hash-keyed. `INSTANCE_SAMPLE_CAP` is 4 — same value as
+  Eriskii's original Claude-faces work, kept for cross-corpus
+  comparability. v2's single-stage shape means one call per cell
+  vs v1's `(N + 1)` per cell, so a re-analyze on the same corpus
+  is roughly 5× cheaper.
 - Public-API freeze: anything in §"Cross-corpus invariant surface"
   is a cross-corpus invariant; bumping wants a hand-edit on the HF
   dataset card and a flag in the PR body. Internal helpers

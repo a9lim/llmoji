@@ -11,7 +11,8 @@ Subcommands:
   analyze                 scrape + canonicalize + Haiku synthesize,
                           write bundle to ~/.llmoji/bundle/
   upload --target {hf,email}  tar bundle, submit
-  cache clear             delete the per-instance Haiku cache
+  cache clear             delete the per-cell synth cache (and any
+                          orphaned legacy v1 per-instance cache)
 
 The package keeps its on-disk state under ``$LLMOJI_HOME``
 (default ``~/.llmoji``). The user's only ship-able artifact is the
@@ -466,12 +467,19 @@ def _print_status_human(
         for issue in issues:
             print(f"        ⚠ {issue}")
 
-    cache_path = paths.cache_per_instance_path()
+    cache_path = paths.cache_per_cell_path()
     n_bytes = cache_size(cache_path)
     print()
     print(
-        f"per-instance synth cache: {human_bytes(n_bytes)} at {cache_path}"
+        f"per-cell synth cache: {human_bytes(n_bytes)} at {cache_path}"
     )
+    legacy_cache = paths.cache_per_instance_path()
+    if legacy_cache.exists():
+        print(
+            f"  (legacy v1 per-instance cache also present: "
+            f"{human_bytes(cache_size(legacy_cache))} at {legacy_cache}; "
+            f"`llmoji cache clear` removes both)"
+        )
     bundle_dir = paths.bundle_dir()
     if bundle_dir.exists() and any(bundle_dir.iterdir()):
         files = sorted(p for p in bundle_dir.iterdir() if p.is_file())
@@ -528,7 +536,8 @@ def _print_status_json(
     *,
     top_n: int,
 ) -> None:
-    cache_path = paths.cache_per_instance_path()
+    cache_path = paths.cache_per_cell_path()
+    legacy_cache_path = paths.cache_per_instance_path()
     bundle_dir = paths.bundle_dir()
     bundle_files: list[dict[str, Any]] = []
     if bundle_dir.exists():
@@ -570,6 +579,11 @@ def _print_status_json(
         "cache": {
             "path": str(cache_path),
             "bytes": cache_size(cache_path),
+            "legacy_path": str(legacy_cache_path),
+            "legacy_bytes": (
+                cache_size(legacy_cache_path)
+                if legacy_cache_path.exists() else 0
+            ),
         },
         "bundle": {
             "path": str(bundle_dir),
@@ -738,13 +752,11 @@ def _print_analyze_plan(plan: Any) -> None:
         print("source model row counts:")
         for sm, n in ranked:
             print(f"  {n:>6}  {sm}")
-    n_cells = sum(len(p) for p in plan.counts_by_cell.values())
     print(
-        f"\nstage A: up to {plan.stage_a_max_calls} sampled rows "
-        f"across {n_cells} cell(s); {plan.stage_a_unique_calls} "
-        f"unique cache key(s) → that's the cold-cache call count."
+        f"\nsynthesize: {plan.cell_count} cell(s) → "
+        f"{plan.unique_calls} cold-cache structured-output call(s) "
+        f"after sample-set dedup."
     )
-    print(f"stage B: {plan.stage_b_calls} cell(s) → {plan.stage_b_calls} call(s)")
     print(
         f"\nestimated tokens (approx, char/4 heuristic): "
         f"input {plan.estimated_input_tokens:,} / "
@@ -824,9 +836,8 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     print(
         f"analyze done: {result.canonical_unique} canonical kaomoji from "
         f"{result.total_rows} rows; "
-        f"{result.stage_a_calls_made} new synth calls, "
-        f"{result.stage_a_calls_cached} cached, "
-        f"{result.stage_b_calls_made} syntheses."
+        f"{result.calls_made} new synth call(s), "
+        f"{result.calls_cached} cache hit(s)."
     )
     print(f"bundle: {result.bundle_dir}")
     return 0

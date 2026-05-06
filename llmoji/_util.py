@@ -116,6 +116,32 @@ def scrape_row_to_journal_line(row: ScrapeRow) -> dict[str, Any]:
     )
 
 
+def flatten_synthesis(synth_obj: dict[str, Any]) -> str:
+    """Render a v2 synthesis object back to a comma-separated
+    adjective string.
+
+    Useful for downstream consumers that still want a single string
+    view of the synthesis (e.g. ``llmoji-study/scripts/harness/
+    60_corpus_pull.py`` keeps a flat ``description: str`` field
+    alongside the structured ``synthesis: {...}`` so the existing
+    sentence-transformer embedding code in ``claude_faces.py``
+    keeps working without changes), and for the bundle preview
+    inside :func:`llmoji.analyze._print_preview`.
+
+    Order: ``primary_affect`` first (circumplex anchors lead the
+    bag), then ``stance_modality_function`` (extension axes). Empty
+    synthesis (defensive — shouldn't happen at runtime) → empty
+    string.
+    """
+    if not synth_obj:
+        return ""
+    primary = synth_obj.get("primary_affect") or []
+    extension = synth_obj.get("stance_modality_function") or []
+    if not isinstance(primary, list) or not isinstance(extension, list):
+        return ""
+    return ", ".join(list(primary) + list(extension))
+
+
 def iter_bundle_data_files(
     bundle_dir: Path,
 ) -> Iterator[tuple[Path, list[dict[str, Any]]]]:

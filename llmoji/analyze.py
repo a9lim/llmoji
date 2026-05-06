@@ -1,4 +1,4 @@
-"""Two-stage analysis pipeline for the bundle.
+"""Single-stage analysis pipeline for the bundle (v2).
 
 End-user pipeline (no GPU, no embedding, no axes):
 
@@ -11,24 +11,30 @@ End-user pipeline (no GPU, no embedding, no axes):
      static-export rows don't carry a model id), fall back to the
      row's ``source`` name so the data still surfaces in the
      bundle.
-  2. Stage A (per-instance description): for each row, run
-     :func:`llmoji.synth.mask_kaomoji` and call the chosen backend
-     via the :class:`~llmoji.synth.Synthesizer` instance with
-     :data:`llmoji.synth_prompts.DESCRIBE_PROMPT_*`. Cache by
-     content-hash + synth model id + backend so re-runs of
-     ``analyze`` skip rows already described — for cost, and so a
-     re-run feeds Stage B identical descriptions in the same order
-     regardless of cache state. (Synthesizer prose itself is
-     model-dependent and may not be byte-stable on a fresh call,
-     but the cache pins it for any given input.)
-  3. Stage B (per-cell synthesis): pool Stage A descriptions for
-     each ``(source_model, canonical_kaomoji)`` cell; call
-     :func:`llmoji.synth.synthesize_descriptions` with
-     :data:`llmoji.synth_prompts.SYNTHESIZE_PROMPT`.
-  4. Emit a manifest + one ``<sanitized_source_model>.jsonl``
+  2. Per cell, sample up to :data:`INSTANCE_SAMPLE_CAP` rows
+     deterministically; render them into the locked
+     :data:`SYNTHESIZE_PROMPT` as numbered ``[Sample N]`` blocks
+     with the leading kaomoji masked to ``[FACE]``; call the
+     synthesizer's ``call_structured`` with
+     :data:`SYNTHESIS_SCHEMA`. Cache hit by content-hashed
+     ``(model, backend, base_url, source_model, canonical,
+     sample_set_hash)`` short-circuits the API call. The single
+     call returns a structured ``{primary_affect, stance_modality_
+     function}`` adjective bag drawn purely from the locked
+     :data:`LEXICON`.
+  3. Emit a manifest + one ``<sanitized_source_model>.jsonl``
      per source model at the top of ``~/.llmoji/bundle/`` — the
      loose-files inspection gap the user reads before deciding to
      ``upload``.
+
+The v1 pipeline was two-stage (per-instance describe → per-cell
+synthesize). v2 collapses both into one call per cell. The
+synthesizer sees all sampled instances at once, eliminating the
+prose-from-prose paraphrase layer that compounded fluff and made
+the resulting per-cell descriptions cluster as noise in PCA. The
+locked output schema also forces every adjective to come from the
+corpus vocabulary, removing free-form prose from the bundle
+entirely.
 
 Embedding, axis-projection, figures, clustering all live in
 ``llmoji-study`` — research-side. The bundle is the boundary.
@@ -58,59 +64,51 @@ from .synth import (
     load_cache,
     make_synthesizer,
     mask_kaomoji,
-    synthesize_descriptions,
+    samples_hash,
 )
 from .synth_prompts import (
     BACKEND_RATES_USD_PER_1M_TOKENS,
     CHARS_PER_TOKEN_HEURISTIC,
     DEFAULT_ANTHROPIC_MODEL_ID,
     DEFAULT_OPENAI_MODEL_ID,
-    DESCRIBE_PROMPT_NO_USER,
-    DESCRIBE_PROMPT_WITH_USER,
-    ESTIMATE_STAGE_A_OUTPUT_CHARS,
-    ESTIMATE_STAGE_B_OUTPUT_CHARS,
+    ESTIMATE_OUTPUT_CHARS,
+    LEXICON_VERSION,
+    SYNTHESIS_SCHEMA,
     SYNTHESIZE_PROMPT,
 )
 from .taxonomy import canonicalize_kaomoji
 
-# Stage-A sample cap per ``(source_model, canonical_kaomoji)`` cell.
-# ``_sample`` returns ``min(cap, len(rows))`` per cell — popular
-# faces get capped, rare faces fully sampled. Eriskii used 4 for the
-# original Claude-faces work; same number here keeps cross-corpus
-# comparison apples-to-apples.
+# Per-cell sample cap. ``_sample`` returns ``min(cap, len(rows))``
+# per cell — popular faces get capped, rare faces fully sampled.
+# Eriskii used 4 for the original Claude-faces work; same number
+# here keeps cross-corpus comparison apples-to-apples.
 INSTANCE_SAMPLE_CAP = 4
 INSTANCE_SAMPLE_SEED = 0
 
-# Stage-A call concurrency. The Anthropic / OpenAI httpx clients
+# Synthesis call concurrency. The Anthropic / OpenAI httpx clients
 # are thread-safe, and a content-hash cache append-write is POSIX-
-# atomic for sub-PIPE_BUF (4 KB) JSONL lines, so a small thread pool
-# gives ~Nx wallclock speedup on cache misses with no coordination
-# beyond per-future result handling on the main thread.
-# Override via $LLMOJI_CONCURRENCY (>=1).
+# atomic for sub-PIPE_BUF (4 KB) JSONL lines, so a small thread
+# pool gives ~Nx wallclock speedup on cache misses with no
+# coordination beyond per-future result handling on the main
+# thread. Override via ``$LLMOJI_CONCURRENCY`` (>= 1) or
+# ``--concurrency``.
 #
 # Default 1 because the org-level Haiku rate cap (50 req/min) trips
-# intermittently even at concurrency=2 on multi-hundred-row backfills.
-# Pre-Wave-6 default was 2; the SDK's ``max_retries=8`` exponential
-# backoff (set explicitly in ``AnthropicSynthesizer.__init__`` /
-# ``OpenAISynthesizer.__init__``, vs the SDK default of 2) recovered
-# but burned wallclock and, more importantly, a mid-wave failure
-# could lose successful Stage-A results that hadn't reached the
-# deferred cache flush. Wave 6 fixed the cache-on-error bug AND
-# dropped the default to 1 so the safe path is also the default;
-# bump via ``LLMOJI_CONCURRENCY=4+`` (or ``--concurrency 4``) if your
-# rate limit tier has the headroom.
-DEFAULT_STAGE_A_CONCURRENCY = 1
+# intermittently even at concurrency=2 on multi-hundred-cell
+# backfills; the SDK's ``max_retries=8`` exponential backoff
+# recovers but burns wallclock. Bump if your tier has headroom. v2
+# is roughly 5× lighter than v1 (one call per cell vs N+1) so even
+# concurrency=1 reanalyzes orders of magnitude faster than v1.
+DEFAULT_CONCURRENCY = 1
 
 
 class AnalyzeError(RuntimeError):
-    """Stage A or Stage B aborted with one or more failed synth calls.
+    """Synthesis aborted with one or more failed structured-output
+    calls.
 
-    Stage A errors leave the cache flushed for cells that succeeded
-    before the failure — re-running ``llmoji analyze`` resumes from
-    cache, paying API cost only for the cells that previously failed.
-    Stage B errors leave Stage A's cache fully intact, so a re-run
-    short-circuits Stage A entirely on cached cells and retries only
-    the Stage B syntheses.
+    The cache is flushed for cells that succeeded before the
+    failure — re-running ``llmoji analyze`` resumes from cache,
+    paying API cost only for the cells that previously failed.
     """
 
 
@@ -122,23 +120,21 @@ class AnalyzeResult:
     canonical_unique: int
     providers_seen: list[str]
     bundle_dir: Path
-    stage_a_calls_made: int
-    stage_a_calls_cached: int
-    stage_b_calls_made: int
+    calls_made: int
+    calls_cached: int
 
 
 @dataclass
 class AnalyzePlan:
     """``--dry-run`` snapshot — what an ``analyze`` invocation would
-    compute, without actually making any synth calls.
+    compute, without making any synth calls.
 
     Counts assume a cold cache (worst case for cost — a warm-cache
-    re-run pays for fewer dispatches). Per-cell sample counts respect
-    :data:`INSTANCE_SAMPLE_CAP`. Token counts and cost are
-    approximate (see :data:`CHARS_PER_TOKEN_HEURISTIC` /
-    :data:`ESTIMATE_STAGE_*_OUTPUT_CHARS` in :mod:`synth_prompts` for
-    the heuristics) — reliable for "is this $0.04 or $4?" but not as
-    a quote.
+    re-run pays for fewer dispatches). Per-cell sample counts
+    respect :data:`INSTANCE_SAMPLE_CAP`. Token counts and cost are
+    approximate (see :data:`CHARS_PER_TOKEN_HEURISTIC` and
+    :data:`ESTIMATE_OUTPUT_CHARS` in :mod:`synth_prompts`) —
+    reliable for "is this $0.04 or $4?" but not as a quote.
     """
 
     total_rows: int
@@ -146,9 +142,8 @@ class AnalyzePlan:
     providers_seen: list[str]
     model_counts: dict[str, int]
     counts_by_cell: dict[str, dict[str, int]]
-    stage_a_unique_calls: int
-    stage_a_max_calls: int  # before duplicate-key dedupe
-    stage_b_calls: int
+    cell_count: int          # total cells = max calls before sample-hash dedup
+    unique_calls: int        # cells with distinct cache keys
     estimated_input_tokens: int
     estimated_output_tokens: int
     estimated_cost_usd: float | None  # None when backend isn't priced
@@ -219,64 +214,84 @@ def _sample(
 
 
 def _resolve_concurrency(explicit: int | None) -> int:
-    """Stage-A worker count: ``--concurrency`` (CLI) → explicit arg
-    → ``$LLMOJI_CONCURRENCY`` → :data:`DEFAULT_STAGE_A_CONCURRENCY`.
+    """Synthesis worker count: ``--concurrency`` (CLI) → explicit
+    arg → ``$LLMOJI_CONCURRENCY`` → :data:`DEFAULT_CONCURRENCY`.
     Clamps to ``>=1``. Bad env values fall back silently to the
     default."""
     if explicit is not None:
         return max(1, explicit)
     raw = os.environ.get("LLMOJI_CONCURRENCY")
     if raw is None:
-        return DEFAULT_STAGE_A_CONCURRENCY
+        return DEFAULT_CONCURRENCY
     try:
         return max(1, int(raw))
     except ValueError:
-        return DEFAULT_STAGE_A_CONCURRENCY
+        return DEFAULT_CONCURRENCY
 
 
 # ---------------------------------------------------------------------------
-# Stage A — per-instance descriptions
+# Sample formatting + per-cell synthesis
 # ---------------------------------------------------------------------------
 
 
-def _stage_a(
+def _format_samples(samples: list[tuple[str, str]]) -> str:
+    """Render ``(user_text, masked_assistant_text)`` pairs as the
+    numbered ``[Sample N]`` block series the prompt expects.
+
+    Empty ``user_text`` → omit the ``User:`` line entirely (some
+    rows from static exports don't carry a surrounding user turn,
+    and the prompt should not invent one).
+    """
+    blocks: list[str] = []
+    for i, (user, masked_assistant) in enumerate(samples, 1):
+        if user:
+            blocks.append(
+                f"[Sample {i}]\nUser: {user}\nAssistant: {masked_assistant}"
+            )
+        else:
+            blocks.append(f"[Sample {i}]\nAssistant: {masked_assistant}")
+    return "\n\n".join(blocks)
+
+
+def _synthesize_cells(
     synth: Synthesizer,
     buckets: dict[str, dict[str, list[ScrapeRow]]],
     *,
     cache_path: Path,
     print_progress: bool = True,
     max_workers: int | None = None,
-) -> tuple[dict[str, dict[str, list[str]]], int, int]:
+) -> tuple[dict[str, dict[str, dict[str, Any]]], int, int]:
     """For each ``(source_model, canonical)`` cell, sample ≤
-    INSTANCE_SAMPLE_CAP rows; describe each (cache hit skips the
-    API call); return ``(descs_by_cell, n_calls, n_cached)``.
+    :data:`INSTANCE_SAMPLE_CAP` rows; render the prompt; call the
+    backend's structured-output path; return ``(synth_by_cell,
+    n_calls, n_cached)``.
 
-    ``descs_by_cell[source_model][canonical]`` is the list of Stage A
-    outputs for the cell — one entry per sampled row.
+    ``synth_by_cell[source_model][canonical]`` is the synthesis
+    object (``{primary_affect, stance_modality_function}``) for
+    the cell, sourced either from the cache (hit) or from the
+    backend (miss).
 
     Cache-miss API calls run on a small thread pool (``max_workers``
     or ``$LLMOJI_CONCURRENCY``, default 1). Both SDK clients are
     thread-safe.
 
-    Cache writes happen as each future succeeds, immediately, on the
-    main thread inside the ``as_completed`` loop. If any dispatch
-    raises, the cache is already flushed for cells that succeeded
-    before the failure; we collect errors and raise
-    :class:`AnalyzeError` once the loop has fully drained, so the
-    user can re-run and resume from the cache. ``descs_by_cell`` is
-    still assembled in deterministic walk order from the populated
-    walk entries — only the on-disk cache row order depends on which
-    futures finished first, and the cache is hash-keyed (order on
-    disk is not load-bearing).
+    Cache writes happen as each future succeeds, immediately, on
+    the main thread inside the ``as_completed`` loop. If any
+    dispatch raises, the cache is already flushed for cells that
+    succeeded; we collect errors and raise :class:`AnalyzeError`
+    once the loop has fully drained, so the user can re-run and
+    resume from the cache. ``synth_by_cell`` is assembled in
+    deterministic walk order so re-runs produce identical bundle
+    contents.
     """
     cache = load_cache(cache_path)
     n_cached = 0
 
-    # Walk every sampled row in deterministic (sorted source_model,
-    # sorted canonical, _sample-stable) order. Each entry records
-    # whether it was a cache hit (carries ``description`` directly)
-    # or a miss (carries ``prompt`` to be dispatched). After dispatch
-    # the misses are populated with their ``description`` in place.
+    # Walk every cell in deterministic (sorted source_model, sorted
+    # canonical) order. Each entry records the cell identity, the
+    # cache key, and either the cached synthesis (cache hit) or the
+    # rendered prompt to dispatch (cache miss). After dispatch the
+    # misses are populated with their ``synthesis`` in place.
     walk: list[dict[str, Any]] = []
     for source_model in sorted(buckets):
         per_canon = buckets[source_model]
@@ -286,43 +301,46 @@ def _stage_a(
                 cap=INSTANCE_SAMPLE_CAP,
                 seed_label=f"{source_model}:{canon}",
             )
-            for r in sampled:
-                user_text = (r.surrounding_user or "").strip()
-                assistant = r.assistant_text or ""
-                key = cache_key(
-                    synth.model_id, synth.backend, synth.base_url,
-                    canon, user_text, assistant,
+            samples = [
+                (
+                    (r.surrounding_user or "").strip(),
+                    r.assistant_text or "",
                 )
-                hit = cache.get(key)
-                if hit and "description" in hit:
-                    walk.append({
-                        "sm": source_model, "canon": canon, "key": key,
-                        "cached": True, "description": hit["description"],
-                    })
-                    n_cached += 1
-                    continue
-                masked = mask_kaomoji(assistant, r.first_word)
-                if user_text:
-                    prompt = DESCRIBE_PROMPT_WITH_USER.format(
-                        user_text=user_text, masked_text=masked,
-                    )
-                else:
-                    prompt = DESCRIBE_PROMPT_NO_USER.format(masked_text=masked)
+                for r in sampled
+            ]
+            sh = samples_hash(samples)
+            key = cache_key(
+                synth.model_id, synth.backend, synth.base_url,
+                source_model, canon, sh,
+            )
+            hit = cache.get(key)
+            if hit and isinstance(hit.get("synthesis"), dict):
                 walk.append({
                     "sm": source_model, "canon": canon, "key": key,
-                    "cached": False, "prompt": prompt, "description": None,
+                    "cached": True, "synthesis": hit["synthesis"],
                 })
+                n_cached += 1
+                continue
+            masked_samples = [
+                (user, mask_kaomoji(assistant, r.first_word))
+                for r, (user, assistant) in zip(sampled, samples)
+            ]
+            prompt = SYNTHESIZE_PROMPT.format(
+                samples=_format_samples(masked_samples),
+            )
+            walk.append({
+                "sm": source_model, "canon": canon, "key": key,
+                "cached": False, "prompt": prompt, "synthesis": None,
+            })
 
-    # Group cache misses by key. Two sampled rows can share a key
-    # (same canonical + user_text + assistant_text — common when one
-    # turn's assistant text gets sampled into multiple cells, or when
-    # the journal carries near-duplicate rows). Without this dedupe,
-    # a cold-cache run would dispatch each duplicate separately and
-    # potentially get different descriptions, while a warm-cache
-    # follow-up would read the (single) last-write-wins cache row
-    # for all duplicates — cold and warm would feed Stage B
-    # different lists. One dispatch per unique key keeps cold and
-    # warm in lockstep.
+    # Group cache misses by key. Two cells with identical sampled
+    # sets (rare — mostly happens when the same kaomoji shows up
+    # in multiple source_model buckets with overlapping content)
+    # share a key; without dedupe a cold-cache run would dispatch
+    # each duplicate separately and potentially get different
+    # adjective bags, while a warm-cache follow-up would read the
+    # last-write-wins cache row for all duplicates. One dispatch
+    # per unique key keeps cold and warm in lockstep.
     pending_by_key: dict[str, list[int]] = defaultdict(list)
     for i, e in enumerate(walk):
         if not e["cached"]:
@@ -333,13 +351,13 @@ def _stage_a(
         workers = _resolve_concurrency(max_workers)
         if print_progress:
             print(
-                f"stage A: {n_cached} cache hit(s), "
+                f"synthesize: {n_cached} cache hit(s), "
                 f"{len(pending_by_key)} dispatch(es) "
                 f"({workers} workers)"
             )
 
-        def _describe_one(prompt: str) -> str:
-            return synth.call(prompt)
+        def _synth_one(prompt: str) -> dict[str, Any]:
+            return synth.call_structured(prompt, schema=SYNTHESIS_SCHEMA)
 
         # Catching ``Exception`` (not ``BaseException``) so Ctrl-C
         # propagates naturally — the user gets the same partial-flush
@@ -348,7 +366,7 @@ def _stage_a(
         errors: dict[str, Exception] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
             future_to_key = {
-                pool.submit(_describe_one, walk[indices[0]]["prompt"]): key
+                pool.submit(_synth_one, walk[indices[0]]["prompt"]): key
                 for key, indices in pending_by_key.items()
             }
             iterator = as_completed(future_to_key)
@@ -356,30 +374,26 @@ def _stage_a(
                 iterator = tqdm(
                     iterator,
                     total=len(future_to_key),
-                    desc="stage A",
-                    unit="call",
+                    desc="synthesize",
+                    unit="cell",
                     dynamic_ncols=True,
                     leave=True,
                 )
             for fut in iterator:
                 key = future_to_key[fut]
                 try:
-                    description = fut.result()
-                except Exception as e:  # noqa: BLE001 — error captured + reraised
+                    synthesis = fut.result()
+                except Exception as e:  # noqa: BLE001 — captured + reraised
                     errors[key] = e
                     continue
                 indices = pending_by_key[key]
-                # Populate every walk entry that shares this key, so
-                # the deterministic-walk-order assembly below sees a
-                # full description for the cell.
                 for i in indices:
-                    walk[i]["description"] = description
-                # Flush cache immediately. A later future raising
-                # can't lose this row.
+                    walk[i]["synthesis"] = synthesis
                 row = {
                     "key": key,
                     "kaomoji": walk[indices[0]]["canon"],
-                    "description": description,
+                    "source_model": walk[indices[0]]["sm"],
+                    "synthesis": synthesis,
                     "model": synth.model_id,
                     "backend": synth.backend,
                 }
@@ -390,119 +404,24 @@ def _stage_a(
         if errors:
             first_err = next(iter(errors.values()))
             raise AnalyzeError(
-                f"stage A: {n_calls} of {len(pending_by_key)} dispatch(es) "
+                f"synthesize: {n_calls} of {len(pending_by_key)} dispatch(es) "
                 f"succeeded ({len(errors)} failed). cache flushed for "
                 f"successes; re-run `llmoji analyze` to resume.\n"
                 f"first failure: {first_err!r}"
             ) from first_err
 
-    # Assemble ``descs_by_cell`` in deterministic walk order. Every
+    # Assemble ``synth_by_cell`` in deterministic walk order. Every
     # walk entry is now populated (cache hit, or successfully
-    # dispatched — we'd have raised above otherwise). Order matters
-    # for Stage B because ``SYNTHESIZE_PROMPT`` numbers the
-    # descriptions; if Stage B sees the same list in the same order
-    # across runs, it produces the same prose.
-    descs_by_cell: dict[str, dict[str, list[str]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
+    # dispatched — we'd have raised above otherwise).
+    synth_by_cell: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for entry in walk:
-        descs_by_cell[entry["sm"]][entry["canon"]].append(entry["description"])
+        synth_by_cell[entry["sm"]][entry["canon"]] = entry["synthesis"]
 
-    return _freeze_two_level(descs_by_cell), n_calls, n_cached
-
-
-def _freeze_two_level(
-    d: dict[str, dict[str, list[str]]],
-) -> dict[str, dict[str, list[str]]]:
-    return {sm: dict(per_canon) for sm, per_canon in d.items()}
-
-
-# ---------------------------------------------------------------------------
-# Stage B — per-cell syntheses
-# ---------------------------------------------------------------------------
-
-
-def _stage_b(
-    synth: Synthesizer,
-    descs_by_cell: dict[str, dict[str, list[str]]],
-    *,
-    print_progress: bool = True,
-    max_workers: int | None = None,
-) -> tuple[dict[str, dict[str, str]], int]:
-    """Per ``(source_model, canonical)`` cell, pool descriptions and
-    synthesize a single 1-2-sentence meaning. Returns
-    ``(synthesized_by_cell, n_calls)``.
-
-    Synthesis calls dispatch on the same thread pool Stage A uses
-    (``max_workers`` or ``$LLMOJI_CONCURRENCY``, default 1). Each
-    cell's synthesis is independent — no shared mutable state, no
-    cache to serialize, so the dispatch is pure parallelism win.
-
-    Errors are collected per cell and raised together as
-    :class:`AnalyzeError` once the loop drains. Stage A's cache is
-    untouched, so a re-run hits the cache for every Stage A cell and
-    only retries the failed Stage B syntheses.
-    """
-    pending: list[tuple[str, str, list[str]]] = []
-    for sm in sorted(descs_by_cell):
-        for canon in sorted(descs_by_cell[sm]):
-            descs = descs_by_cell[sm][canon]
-            if descs:
-                pending.append((sm, canon, descs))
-    if not pending:
-        return {}, 0
-
-    workers = _resolve_concurrency(max_workers)
-    if print_progress:
-        print(f"stage B: {len(pending)} cell(s) ({workers} workers)")
-
-    def _synth_one(
-        sm: str, canon: str, descs: list[str],
-    ) -> tuple[str, str, str]:
-        line = synthesize_descriptions(
-            synth, descs,
-            synth_prompt_template=SYNTHESIZE_PROMPT,
-        )
-        return sm, canon, line
-
-    out: dict[str, dict[str, str]] = defaultdict(dict)
-    n_calls = 0
-    errors: list[tuple[str, str, Exception]] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_cell = {
-            pool.submit(_synth_one, sm, c, d): (sm, c)
-            for sm, c, d in pending
-        }
-        iterator = as_completed(future_to_cell)
-        if print_progress:
-            iterator = tqdm(
-                iterator,
-                total=len(future_to_cell),
-                desc="stage B",
-                unit="cell",
-                dynamic_ncols=True,
-                leave=True,
-            )
-        for fut in iterator:
-            sm, canon = future_to_cell[fut]
-            try:
-                _, _, line = fut.result()
-            except Exception as e:  # noqa: BLE001 — error captured + reraised
-                errors.append((sm, canon, e))
-                continue
-            out[sm][canon] = line
-            n_calls += 1
-
-    if errors:
-        first_sm, first_canon, first_err = errors[0]
-        raise AnalyzeError(
-            f"stage B: {n_calls} of {len(pending)} cell(s) succeeded "
-            f"({len(errors)} failed). stage A cache is intact; "
-            f"re-run `llmoji analyze` to resume.\n"
-            f"first failure ({first_sm!r}, {first_canon!r}): {first_err!r}"
-        ) from first_err
-
-    return {sm: dict(per_canon) for sm, per_canon in out.items()}, n_calls
+    return (
+        {sm: dict(p) for sm, p in synth_by_cell.items()},
+        n_calls,
+        n_cached,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +459,7 @@ def _write_bundle(
     bundle_dir: Path,
     *,
     counts_by_cell: dict[str, dict[str, int]],
-    synthesized_by_cell: dict[str, dict[str, str]],
+    synthesized_by_cell: dict[str, dict[str, dict[str, Any]]],
     providers_seen: list[str],
     model_counts: dict[str, int],
     submitter_id: str,
@@ -555,8 +474,15 @@ def _write_bundle(
     ``counts_by_cell[source_model][canonical]`` and
     ``synthesized_by_cell[source_model][canonical]`` carry the same
     set of keys — one row per face per source model.
+    ``synthesized_by_cell``'s value is the structured synthesis
+    object (``{primary_affect, stance_modality_function}``) drawn
+    from :data:`SYNTHESIS_SCHEMA`.
+
     ``total_synthesized_rows`` counts rows across files, so a face
-    appearing in 4 source-model files contributes 4.
+    appearing in 4 source-model files contributes 4. The manifest
+    carries ``lexicon_version`` so cross-corpus aggregation can
+    refuse to mix lexicon-version-N cells with lexicon-version-M
+    cells.
     """
     bundle_dir.mkdir(parents=True, exist_ok=True)
     _clear_bundle_dir(bundle_dir)
@@ -567,6 +493,7 @@ def _write_bundle(
 
     manifest = {
         "llmoji_version": package_version(),
+        "lexicon_version": LEXICON_VERSION,
         "synthesis_model_id": synth_model_id,
         "synthesis_backend": synth_backend,
         "submitter_id": submitter_id,
@@ -613,7 +540,7 @@ def _write_bundle(
                 row = {
                     "kaomoji": canon,
                     "count": int(counts.get(canon, 0)),
-                    "synthesis_description": per_canon[canon],
+                    "synthesis": per_canon[canon],
                 }
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -622,13 +549,15 @@ def _print_preview(
     bundle_dir: Path,
     *,
     counts_by_cell: dict[str, dict[str, int]],
-    synthesized_by_cell: dict[str, dict[str, str]],
+    synthesized_by_cell: dict[str, dict[str, dict[str, Any]]],
 ) -> None:
-    """Print a per-source-model summary plus per-face count + first
-    ~80 chars of synthesis. The inspection gap depends on this — the
-    user sees what they're about to publish before deciding to
+    """Print a per-source-model summary plus per-face count + the
+    flattened adjective bag. The inspection gap depends on this —
+    the user sees what they're about to publish before deciding to
     upload.
     """
+    from ._util import flatten_synthesis
+
     print("\n--- bundle preview ---")
     print(f"location: {bundle_dir}")
     n_models = len(synthesized_by_cell)
@@ -641,8 +570,8 @@ def _print_preview(
         print(f"  [{source_model}]  → {slug}.jsonl  ({len(per_canon)} faces)")
         for canon in sorted(per_canon, key=lambda c: -counts.get(c, 0)):
             n = counts.get(canon, 0)
-            short = per_canon[canon][:80].replace("\n", " ")
-            print(f"    n={n:>4}  {canon}  {short}")
+            adj = flatten_synthesis(per_canon[canon])
+            print(f"    n={n:>4}  {canon}  {adj}")
     print("\n--- end preview ---")
     print("review each <model>.jsonl before `llmoji upload`.\n")
 
@@ -678,12 +607,14 @@ def plan_analyze(
 ) -> AnalyzePlan:
     """Build an :class:`AnalyzePlan` without calling any synth backend.
 
-    Walks rows, buckets them, runs the same deterministic Stage-A
-    sampling :func:`_stage_a` would, computes the cache-key dedupe
-    that :func:`_stage_a` applies, and estimates token usage / cost
+    Walks rows, buckets them, runs the same deterministic per-cell
+    sampling :func:`_synthesize_cells` would, computes the
+    per-cell cache keys (so identical sample sets across cells
+    fold to one dispatch), and estimates token usage / cost
     against the per-1M rate table in :mod:`synth_prompts`. Backend
-    SDKs are not imported (``cache_key`` is pure-Python; the synth
-    classes that pull in SDKs are not invoked).
+    SDKs are not imported (``cache_key`` and ``samples_hash`` are
+    pure-Python; the synth classes that pull in SDKs are not
+    invoked).
     """
     rows_list = list(rows)
     buckets, providers_seen, model_counts = (
@@ -698,76 +629,59 @@ def plan_analyze(
     base_url_str = base_url or ""
 
     # Walk the same cells / sample the same rows / compute the same
-    # cache keys :func:`_stage_a` would. Track unique keys + accumulate
-    # input chars per dispatch so the estimate matches what the real
-    # run would issue at cold cache.
+    # cache keys :func:`_synthesize_cells` would. Track unique keys +
+    # accumulate input chars per dispatch so the estimate matches
+    # what the real run would issue at cold cache.
     seen_keys: set[str] = set()
-    stage_a_input_chars = 0
-    stage_a_max_calls = 0
-    samples_per_cell: dict[tuple[str, str], int] = {}
+    cell_count = 0
+    input_chars = 0
 
     for sm in sorted(buckets):
         per_canon = buckets[sm]
         for canon in sorted(per_canon):
+            cell_count += 1
             sampled = _sample(
                 per_canon[canon],
                 cap=INSTANCE_SAMPLE_CAP,
                 seed_label=f"{sm}:{canon}",
             )
-            samples_per_cell[(sm, canon)] = len(sampled)
-            stage_a_max_calls += len(sampled)
-            for r in sampled:
-                user_text = (r.surrounding_user or "").strip()
-                assistant = r.assistant_text or ""
-                key = cache_key(
-                    resolved_model_id, backend, base_url_str,
-                    canon, user_text, assistant,
+            samples = [
+                (
+                    (r.surrounding_user or "").strip(),
+                    r.assistant_text or "",
                 )
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                # mask_kaomoji-equivalent: the masked text is
-                # "[FACE] " + assistant, length-equivalent for
-                # estimation purposes.
-                masked_chars = len("[FACE] ") + len(assistant)
-                if user_text:
-                    prompt_chars = (
-                        len(DESCRIBE_PROMPT_WITH_USER)
-                        + len(user_text) + masked_chars
-                    )
-                else:
-                    prompt_chars = (
-                        len(DESCRIBE_PROMPT_NO_USER) + masked_chars
-                    )
-                stage_a_input_chars += prompt_chars
+                for r in sampled
+            ]
+            sh = samples_hash(samples)
+            key = cache_key(
+                resolved_model_id, backend, base_url_str,
+                sm, canon, sh,
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            # mask_kaomoji-equivalent: the masked text is "[FACE] "
+            # + assistant minus the leading kaomoji (already stripped
+            # in assistant_text by the journal contract). Length is
+            # close enough for estimation.
+            masked_samples = [
+                (user, "[FACE] " + assistant)
+                for user, assistant in samples
+            ]
+            input_chars += (
+                len(SYNTHESIZE_PROMPT)
+                + len(_format_samples(masked_samples))
+            )
 
-    stage_a_unique_calls = len(seen_keys)
-    stage_a_output_chars = (
-        stage_a_unique_calls * ESTIMATE_STAGE_A_OUTPUT_CHARS
-    )
+    unique_calls = len(seen_keys)
+    output_chars = unique_calls * ESTIMATE_OUTPUT_CHARS
 
-    # Stage B: one call per non-empty cell. Input = the prompt template
-    # plus N stage-A descriptions concatenated. Output ≈ one summary
-    # per cell.
-    stage_b_calls = sum(
-        1 for sm in buckets for _ in buckets[sm]
-    )
-    stage_b_input_chars = sum(
-        len(SYNTHESIZE_PROMPT)
-        + samples_per_cell.get((sm, canon), 0)
-        * ESTIMATE_STAGE_A_OUTPUT_CHARS
-        for sm in buckets for canon in buckets[sm]
-    )
-    stage_b_output_chars = stage_b_calls * ESTIMATE_STAGE_B_OUTPUT_CHARS
-
-    total_input_chars = stage_a_input_chars + stage_b_input_chars
-    total_output_chars = stage_a_output_chars + stage_b_output_chars
-    input_tokens = total_input_chars // CHARS_PER_TOKEN_HEURISTIC
-    output_tokens = total_output_chars // CHARS_PER_TOKEN_HEURISTIC
+    input_tokens = input_chars // CHARS_PER_TOKEN_HEURISTIC
+    output_tokens = output_chars // CHARS_PER_TOKEN_HEURISTIC
 
     rates = BACKEND_RATES_USD_PER_1M_TOKENS.get(backend)
     if rates:
-        cost = (
+        cost: float | None = (
             (input_tokens / 1_000_000) * rates["input"]
             + (output_tokens / 1_000_000) * rates["output"]
         )
@@ -784,9 +698,8 @@ def plan_analyze(
         providers_seen=providers_seen,
         model_counts=model_counts,
         counts_by_cell=counts_by_cell,
-        stage_a_unique_calls=stage_a_unique_calls,
-        stage_a_max_calls=stage_a_max_calls,
-        stage_b_calls=stage_b_calls,
+        cell_count=cell_count,
+        unique_calls=unique_calls,
         estimated_input_tokens=int(input_tokens),
         estimated_output_tokens=int(output_tokens),
         estimated_cost_usd=cost,
@@ -811,13 +724,24 @@ def run_analyze(
     :func:`llmoji.synth.make_synthesizer` so a user without the
     chosen backend's SDK installed gets a clean ImportError pointing
     at the right ``pip install`` rather than an opaque attribute
-    error deep inside Stage A.
+    error mid-synthesis.
     """
     synth = make_synthesizer(backend, base_url=base_url, model_id=model_id)
 
     paths.ensure_home()
     bundle_dir = paths.bundle_dir()
-    cache_path = paths.cache_per_instance_path()
+    cache_path = paths.cache_per_cell_path()
+
+    # Surface the legacy v1 cache one time so users who upgrade
+    # know they can reclaim disk space. v2 never touches this file
+    # — different keying, different shape — and ``cache clear``
+    # wipes it alongside the v2 cache.
+    legacy_path = paths.cache_per_instance_path()
+    if print_progress and legacy_path.exists():
+        print(
+            f"  (note: legacy per_instance cache from pre-v2 detected at "
+            f"{legacy_path}; safe to delete via `llmoji cache clear`)"
+        )
 
     rows_list = list(rows)
     buckets, providers_seen, model_counts = _bucket_by_source_model_and_canonical(
@@ -843,12 +767,8 @@ def run_analyze(
             f"backend={synth.backend} model={synth.model_id}"
         )
 
-    descs_by_cell, n_a, n_cached = _stage_a(
+    synthesized_by_cell, n_calls, n_cached = _synthesize_cells(
         synth, buckets, cache_path=cache_path,
-        print_progress=print_progress, max_workers=concurrency,
-    )
-    synthesized_by_cell, n_b = _stage_b(
-        synth, descs_by_cell,
         print_progress=print_progress, max_workers=concurrency,
     )
 
@@ -879,7 +799,6 @@ def run_analyze(
         canonical_unique=n_unique_canon,
         providers_seen=providers_seen,
         bundle_dir=bundle_dir,
-        stage_a_calls_made=n_a,
-        stage_a_calls_cached=n_cached,
-        stage_b_calls_made=n_b,
+        calls_made=n_calls,
+        calls_cached=n_cached,
     )
