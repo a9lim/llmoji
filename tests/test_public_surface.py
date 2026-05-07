@@ -160,7 +160,7 @@ def test_synth_prompts_locked():
     # Lexicon shape — every adjective is a unique lowercase string,
     # quadrant tags are constrained, families are non-empty.
     seen: set[str] = set()
-    quadrants = {"HP", "LP", "HN-D", "HN-S", "LN", "NB"}
+    quadrants = {"HP-D", "HP-S", "LP", "NP", "HN-D", "HN-S", "LN", "NB", "HB"}
     families = {"circumplex", "functional", "stance", "modality", "confidence"}
     quadrant_counts: dict[str, int] = {}
     family_counts: dict[str, int] = {}
