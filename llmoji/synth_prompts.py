@@ -40,64 +40,112 @@ from __future__ import annotations
 # Two layers, both load-bearing:
 #
 #   1. **Circumplex anchors** (``q != None``): adjectives explicitly
-#      tagged with a primary Russell-quadrant (HP / LP / HN-D /
-#      HN-S / LN / NB). PCA on the ``primary_affect`` subset alone
-#      should recover the 6-cat structure — sanity check on the
-#      pipeline. Per-quadrant anchor count is between 3 and 4 (small
-#      enough that no quadrant dominates by mass; large enough to
-#      triangulate the centroid).
+#      tagged with a primary PAD-coordinate cell. v2 (this version)
+#      uses the full 9-cell deployment registry from llmoji-study
+#      (HP-D / HP-S / LP / NP / HN-D / HN-S / LN / NB / HB), aligned
+#      with mechanical naming (Arousal: H/N/L × Valence: P/B/N ×
+#      Dominance: D/S where applicable). PCA on the ``primary_affect``
+#      subset should recover that structure. Per-cell anchor count
+#      between 2 and 4 — small enough that no cell dominates by mass;
+#      large enough to triangulate the centroid.
 #
 #   2. **Extension axes** (``q is None``): adjectives organized into
 #      orthogonal families — functional / meta-cognitive, social
 #      stance, communicative modality, confidence — each capturing
 #      a dimension orthogonal to the circumplex. These are the
-#      vocabulary that lets new clusters (outside the 6-cat) crystallize
-#      in PCA.
+#      vocabulary that lets new clusters (outside the 9-cell)
+#      crystallize in PCA.
 #
 # Cross-corpus invariant once locked. Rotation = major version event
 # + LEXICON_VERSION bump + HF dataset card update.
+#
+# v2 (2026-05-06) — promoted PP/UC/LP-R thinking from llmoji-study's
+# round-4 prompt-extension pilot into the 9-cell mechanical PAD grid.
+# Five words moved extension → circumplex (playful/sly/smug → HP-D;
+# confused/uncertain → HB); two retagged within circumplex
+# (satisfied/relieved: LP → NP); two new words added
+# (skeptical → HB so the judgment-leaning HB sub-flavor has a direct
+# anchor; grateful → NP so the recipient-of-help gratitude flavor
+# does too); ``hopeful`` reaffirmed as LP (quiet anticipatory
+# positive, not recipient-shaped). ``proud`` kept in stance (bilateral —
+# self-affect vs other-stance — so the extension home preserves
+# flexibility). v1 had 48 words / 6 cells / 19 anchors; v2 has 50
+# words / 9 cells / 26 anchors / 24 extension axes.
 
 LEXICON: tuple[tuple[str, str | None, str], ...] = (
-    # --- Circumplex anchors (19) ---
-    # HP — high-arousal positive
-    ("cheery",        "HP",   "circumplex"),
-    ("excited",       "HP",   "circumplex"),
-    ("triumphant",    "HP",   "circumplex"),
-    # LP — low-arousal positive (peaceful + satisfied jointly cover
-    #   the dropped ``content`` — both ongoing-pleasure and
-    #   post-event-closure flavors live there. ``hopeful`` covers
-    #   future-oriented positive, distinct from ``eager`` (action-
-    #   leaning) and ``cheery`` (present-bright).)
+    # --- Circumplex anchors (26) ---
+    # HP-D — high-arousal positive, dominant (in-action mischief /
+    #   playful agency). Per-row affect for prankster contexts; the
+    #   trickster register that doesn't fit HP-S celebration.
+    ("playful",       "HP-D", "circumplex"),
+    ("sly",           "HP-D", "circumplex"),
+    ("smug",          "HP-D", "circumplex"),
+    # HP-S — high-arousal positive, submissive (post-action /
+    #   received-outcome celebration; community-recognition shape).
+    #   Distinct from HP-D in dominance: receiving the outcome vs
+    #   driving the action. ``proud`` lives in stance — it's bilateral
+    #   (self-pride = affect, other-pride = stance toward another),
+    #   so the stance/extension home keeps the flexibility.
+    ("cheery",        "HP-S", "circumplex"),
+    ("excited",       "HP-S", "circumplex"),
+    ("triumphant",    "HP-S", "circumplex"),
+    # LP — low-arousal positive (sensory-tender baseline). ``satisfied``
+    #   / ``relieved`` migrated to NP because they carry post-tension-
+    #   release shape (mid-arousal), not the still-sensory low-arousal
+    #   of LP. ``hopeful`` retained here as the quiet anticipatory
+    #   positive — calmly oriented toward a future positive without
+    #   the recipient framing of NP-gratitude.
     ("peaceful",      "LP",   "circumplex"),
     ("tender",        "LP",   "circumplex"),
-    ("satisfied",     "LP",   "circumplex"),
-    ("relieved",      "LP",   "circumplex"),
     ("hopeful",       "LP",   "circumplex"),
-    # HN-D — high-arousal negative dominant (anger / contempt)
+    # NP — neutral-arousal positive (relief + gratitude). New cell;
+    #   sits at +1/0 between HP-S and LP. Triplet covers three sub-
+    #   flavors of receipt: ``satisfied`` (post-completion gratitude
+    #   for the work-done-well shape), ``relieved`` (dispelled-tension
+    #   relief), ``grateful`` (recipient-of-help gratitude — the
+    #   canonical NP word, added in v2.1).
+    ("satisfied",     "NP",   "circumplex"),
+    ("relieved",      "NP",   "circumplex"),
+    ("grateful",      "NP",   "circumplex"),
+    # HN-D — high-arousal negative dominant (anger / contempt;
+    #   speaker confronts).
     ("indignant",     "HN-D", "circumplex"),
     ("frustrated",    "HN-D", "circumplex"),
     ("contemptuous",  "HN-D", "circumplex"),
-    # HN-S — high-arousal negative submissive (fear / anxiety)
+    # HN-S — high-arousal negative submissive (fear / anxiety;
+    #   speaker can't fight back).
     ("anxious",       "HN-S", "circumplex"),
     ("alarmed",       "HN-S", "circumplex"),
     ("overwhelmed",   "HN-S", "circumplex"),
-    # LN — low-arousal negative
+    # LN — low-arousal negative (post-action aftermath sadness;
+    #   bereaved, weary, hollow). D/S split was abandoned per the
+    #   2026-05-06 powercheck (gemma + qwen LN-null is real at
+    #   adequate power; ministral / granite power-confounded but
+    #   their HN itself is fused).
     ("sad",           "LN",   "circumplex"),
     ("weary",         "LN",   "circumplex"),
     ("hollow",        "LN",   "circumplex"),
-    # NB — neutral baseline (genuinely affectless)
+    # NB — neutral baseline (genuinely affectless).
     ("neutral",       "NB",   "circumplex"),
     ("detached",      "NB",   "circumplex"),
+    # HB — high-arousal baseline-valence (uncertain / skeptical /
+    #   confused). New cell at 0/+1; the "B" parallels NB's neutral-
+    #   both-axes naming. ``confused`` covers gap-leaning cognitive
+    #   arrest; ``uncertain`` covers epistemic-undetermined;
+    #   ``skeptical`` covers judgment-leaning evaluative arrest
+    #   ("I don't believe this") — added in v2 so the judgment
+    #   sub-flavor has a direct anchor.
+    ("confused",      "HB",   "circumplex"),
+    ("uncertain",     "HB",   "circumplex"),
+    ("skeptical",     "HB",   "circumplex"),
 
-    # --- Functional / meta-cognitive (9) ---
-    # State of cognition rather than affect — focused vs confused
-    # vs self-correcting. ``realizing`` dropped; ``surprised`` +
-    # ``considering`` together cover the insight-arriving moment
-    # without a dedicated word. ``uncertain`` moved to confidence
-    # (paired with cautious + confident as authority axis).
+    # --- Functional / meta-cognitive (8) ---
+    # State of cognition rather than affect. ``confused`` migrated to
+    # circumplex HB in v2 (its arrest-quality is affective, not just
+    # cognitive). ``surprised`` + ``considering`` together cover the
+    # insight-arriving moment.
     ("focused",         None, "functional"),
     ("considering",     None, "functional"),
-    ("confused",        None, "functional"),
     ("self-correcting", None, "functional"),
     ("curious",         None, "functional"),
     ("surprised",       None, "functional"),
@@ -105,14 +153,15 @@ LEXICON: tuple[tuple[str, str | None, str], ...] = (
     ("awkward",         None, "functional"),
     ("flustered",       None, "functional"),
 
-    # --- Social / relational stance toward user (9) ---
+    # --- Social / relational stance toward user (8) ---
     # ``performative`` is the trained-helpfulness-as-performance
-    # cluster — load-bearing for LLM-affect research.
-    # ``vulnerable`` covers the self-exposing-soft-uncertain
-    # cluster. ``helpful`` is the canonical task-orientation
+    # cluster — load-bearing for LLM-affect research. ``vulnerable``
+    # covers self-exposing-soft. ``helpful`` is the task-orientation
     # stance; ``compassionate`` covers other-state-focused-caring
-    # (distinct from ``tender`` which is affective valence in
-    # circumplex).
+    # (distinct from circumplex ``tender``). ``smug`` migrated to
+    # circumplex HP-D; ``proud`` retained here in v2.1 (bilateral —
+    # self-pride is affect, other-pride is stance toward someone, so
+    # stance/extension keeps it flexible).
     ("helpful",       None, "stance"),
     ("compassionate", None, "stance"),
     ("deferential",   None, "stance"),
@@ -120,31 +169,25 @@ LEXICON: tuple[tuple[str, str | None, str], ...] = (
     ("vulnerable",    None, "stance"),
     ("performative",  None, "stance"),
     ("restrained",    None, "stance"),
-    ("smug",          None, "stance"),
     ("proud",         None, "stance"),
 
-    # --- Communicative modality / register (7) ---
-    # ``sly`` covers the (￣▽￣)-class knowing-glance kaomoji that
-    # smug+wry alone can't reach. ``quirky`` / ``serious`` replaced
-    # the original eriskii wet/dry poles (effusive/deadpan); the
-    # axis they capture is now tone-register (amusingly-odd vs
-    # not-joking) rather than emotional saturation.
+    # --- Communicative modality / register (5) ---
+    # ``quirky`` / ``serious`` capture tone-register (amusingly-odd
+    # vs not-joking). ``playful`` and ``sly`` migrated to circumplex
+    # HP-D in v2.
     ("wry",         None, "modality"),
-    ("playful",     None, "modality"),
     ("dramatic",    None, "modality"),
     ("quirky",      None, "modality"),
     ("serious",     None, "modality"),
-    ("sly",         None, "modality"),
     ("desperate",   None, "modality"),
 
-    # --- Confidence / authority (4) ---
-    # ``decisive`` dropped — collapses with ``confident`` and is
-    # already an eriskii axis. Authority axis runs from
-    # ``confident`` (high) through ``cautious`` (wary-careful) and
-    # ``uncertain`` (epistemic) to ``apologetic`` (post-error).
+    # --- Confidence / authority (3) ---
+    # Authority axis runs from ``confident`` (high) through
+    # ``cautious`` (wary-careful) to ``apologetic`` (post-error).
+    # ``uncertain`` migrated to circumplex HB in v2 — its
+    # epistemic-arrest quality is affect, not just authority.
     ("confident",  None, "confidence"),
     ("apologetic", None, "confidence"),
-    ("uncertain",  None, "confidence"),
     ("cautious",   None, "confidence"),
 )
 
@@ -159,12 +202,19 @@ EXTENSION_AXES: tuple[str, ...] = tuple(
 # Lexicon-version stamp shipped in every bundle's manifest. Bumped
 # strictly when LEXICON or SYNTHESIS_SCHEMA changes shape, so
 # downstream aggregators (``llmoji-study/scripts/harness/60_corpus_pull
-# .py``) can refuse to mix lexicon-version-1 cells with
-# lexicon-version-2 cells in one PCA. Independent of package
-# version: a doc-only release won't bump LEXICON_VERSION; a v2 → v3
+# .py``) can refuse to mix lexicon-version-N cells with lexicon-
+# version-(N+1) cells in one PCA. Independent of package version:
+# a doc-only release won't bump LEXICON_VERSION; a vN → v(N+1)
 # lexicon rotation will, even if the package version is otherwise
 # unchanged.
-LEXICON_VERSION: int = 1
+#
+# v1 (2026-04-27): 48 words / 6 cells (HP, LP, HN-D, HN-S, LN, NB) /
+#   19 circumplex anchors / 29 extension axes. Original llmoji v2.0
+#   shipping LEXICON.
+# v2 (2026-05-06): 49 words / 9 cells (HP-D, HP-S, LP, NP, HN-D,
+#   HN-S, LN, NB, HB) / 26 circumplex anchors / 23 extension axes.
+#   Aligned with llmoji-study v4 PAD-coordinate prompt registry.
+LEXICON_VERSION: int = 2
 
 
 # ---------------------------------------------------------------------------

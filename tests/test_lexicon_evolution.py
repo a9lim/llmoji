@@ -24,38 +24,59 @@ aggregation breaks silently).
 from __future__ import annotations
 
 
-_LEXICON_V1_SNAPSHOT: tuple[tuple[str, str | None, str], ...] = (
-    # Circumplex anchors (19)
-    ("cheery",        "HP",   "circumplex"),
-    ("excited",       "HP",   "circumplex"),
-    ("triumphant",    "HP",   "circumplex"),
+# Current snapshot — v2 (2026-05-06; v2.1 internal revision same day:
+# hopeful reaffirmed LP, grateful added as NP, proud kept in stance).
+# Aligned with llmoji-study v4 PAD-coordinate prompt registry. 9
+# cells, 26 circumplex anchors, 24 extension axes, 50 total.
+_LEXICON_V2_SNAPSHOT: tuple[tuple[str, str | None, str], ...] = (
+    # Circumplex anchors (26)
+    # HP-D
+    ("playful",       "HP-D", "circumplex"),
+    ("sly",           "HP-D", "circumplex"),
+    ("smug",          "HP-D", "circumplex"),
+    # HP-S
+    ("cheery",        "HP-S", "circumplex"),
+    ("excited",       "HP-S", "circumplex"),
+    ("triumphant",    "HP-S", "circumplex"),
+    # LP
     ("peaceful",      "LP",   "circumplex"),
     ("tender",        "LP",   "circumplex"),
-    ("satisfied",     "LP",   "circumplex"),
-    ("relieved",      "LP",   "circumplex"),
     ("hopeful",       "LP",   "circumplex"),
+    # NP
+    ("satisfied",     "NP",   "circumplex"),
+    ("relieved",      "NP",   "circumplex"),
+    ("grateful",      "NP",   "circumplex"),
+    # HN-D
     ("indignant",     "HN-D", "circumplex"),
     ("frustrated",    "HN-D", "circumplex"),
     ("contemptuous",  "HN-D", "circumplex"),
+    # HN-S
     ("anxious",       "HN-S", "circumplex"),
     ("alarmed",       "HN-S", "circumplex"),
     ("overwhelmed",   "HN-S", "circumplex"),
+    # LN
     ("sad",           "LN",   "circumplex"),
     ("weary",         "LN",   "circumplex"),
     ("hollow",        "LN",   "circumplex"),
+    # NB
     ("neutral",       "NB",   "circumplex"),
     ("detached",      "NB",   "circumplex"),
-    # Functional / meta-cognitive (9)
+    # HB
+    ("confused",      "HB",   "circumplex"),
+    ("uncertain",     "HB",   "circumplex"),
+    ("skeptical",     "HB",   "circumplex"),
+
+    # Functional / meta-cognitive (8) — confused migrated to HB
     ("focused",         None, "functional"),
     ("considering",     None, "functional"),
-    ("confused",        None, "functional"),
     ("self-correcting", None, "functional"),
     ("curious",         None, "functional"),
     ("surprised",       None, "functional"),
     ("embarrassed",     None, "functional"),
     ("awkward",         None, "functional"),
     ("flustered",       None, "functional"),
-    # Social / relational stance (9)
+    # Social / relational stance (8) — smug migrated to HP-D; proud
+    # kept here (bilateral self-affect vs other-stance)
     ("helpful",       None, "stance"),
     ("compassionate", None, "stance"),
     ("deferential",   None, "stance"),
@@ -63,20 +84,16 @@ _LEXICON_V1_SNAPSHOT: tuple[tuple[str, str | None, str], ...] = (
     ("vulnerable",    None, "stance"),
     ("performative",  None, "stance"),
     ("restrained",    None, "stance"),
-    ("smug",          None, "stance"),
     ("proud",         None, "stance"),
-    # Communicative modality / register (7)
+    # Communicative modality / register (5) — playful + sly migrated to HP-D
     ("wry",         None, "modality"),
-    ("playful",     None, "modality"),
     ("dramatic",    None, "modality"),
     ("quirky",      None, "modality"),
     ("serious",     None, "modality"),
-    ("sly",         None, "modality"),
     ("desperate",   None, "modality"),
-    # Confidence / authority (4)
+    # Confidence / authority (3) — uncertain migrated to HB
     ("confident",  None, "confidence"),
     ("apologetic", None, "confidence"),
-    ("uncertain",  None, "confidence"),
     ("cautious",   None, "confidence"),
 )
 
@@ -89,21 +106,21 @@ def test_lexicon_matches_snapshot() -> None:
     """
     from llmoji.synth_prompts import LEXICON
 
-    assert LEXICON == _LEXICON_V1_SNAPSHOT, (
-        "LEXICON has drifted from its v1 snapshot. If this is "
+    assert LEXICON == _LEXICON_V2_SNAPSHOT, (
+        "LEXICON has drifted from its v2 snapshot. If this is "
         "intentional, bump LEXICON_VERSION and update the snapshot "
         "in tests/test_lexicon_evolution.py in the same commit."
     )
 
 
-def test_lexicon_version_pinned_to_one() -> None:
-    """LEXICON_VERSION must be 1 while the v1 lexicon is current.
-    A future v2 lexicon rotation bumps both this assertion and
-    the snapshot above.
+def test_lexicon_version_pinned() -> None:
+    """LEXICON_VERSION must match the active snapshot above. v1 is
+    historical; v2 (2026-05-06) is the current ship. A future v3
+    lexicon rotation bumps both this assertion and the snapshot.
     """
     from llmoji.synth_prompts import LEXICON_VERSION
 
-    assert LEXICON_VERSION == 1, (
+    assert LEXICON_VERSION == 2, (
         "LEXICON_VERSION drifted; if intentional, update both this "
         "test and the snapshot in test_lexicon_evolution.py."
     )
@@ -117,3 +134,15 @@ def test_lexicon_total_size_in_target_band() -> None:
     from llmoji.synth_prompts import LEXICON
 
     assert 40 <= len(LEXICON) <= 60, len(LEXICON)
+
+
+def test_every_pad_cell_has_anchor() -> None:
+    """v2 design: every cell in the 9-cell PAD registry has at least
+    one circumplex anchor. Catches silent loss of an anchor word
+    during a future rotation."""
+    from llmoji.synth_prompts import LEXICON
+
+    cells_present = {q for _, q, fam in LEXICON if fam == "circumplex" and q is not None}
+    expected = {"HP-D", "HP-S", "LP", "NP", "HN-D", "HN-S", "LN", "NB", "HB"}
+    missing = expected - cells_present
+    assert not missing, f"v2 LEXICON missing circumplex anchor for cell(s): {missing}"

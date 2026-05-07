@@ -135,7 +135,7 @@ The `--long` flag swaps the one-sentence reminder for a longer introspection-bas
 
 ### Analysis
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each `(source_model, canonical_kaomoji)` cell, it samples up to 4 representative rows and calls the synthesizer once with all 4 instances visible. The synthesizer returns a structured adjective bag drawn from a locked 48-word lexicon: 1-3 from the Russell-circumplex anchors (HP / LP / HN-D / HN-S / LN / NB) plus 3-5 from extension axes (functional, stance, modality, confidence). This bag is the only thing that ships in the bundle.
+`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each `(source_model, canonical_kaomoji)` cell, it samples up to 4 representative rows and calls the synthesizer once with all 4 instances visible. The synthesizer returns a structured adjective bag drawn from a locked 50-word lexicon: 1-3 from the PAD-cell circumplex anchors (HP-D / HP-S / LP / NP / HN-D / HN-S / LN / NB / HB) plus 3-5 from extension axes (functional, stance, modality, confidence). This bag is the only thing that ships in the bundle.
 
 The lexicon is locked under `lexicon_version` in the manifest so cross-corpus aggregation can refuse to mix versions if the vocabulary ever rotates. v2's single-stage shape replaces the v1.x two-stage prose pipeline that produced free-form descriptions per cell — those clustered as noise in PCA because most of their token mass was structural template ("this kaomoji conveys X paired with Y"). Pure adjective bags carry signal-per-token instead.
 
