@@ -8,13 +8,15 @@ the per-session rollout JSONL, which we use to resolve the latest
 real user message.
 
 Settings file: ``~/.codex/hooks.json``. Codex's hook system (the
-``codex_hooks`` feature flag, ``Stage::Stable`` and
-``default_enabled: true`` in ``codex-rs/features``) accepts a
-Claude-style payload — ``{"hooks": {"<Event>": [{"hooks":
-[{"type": "command", "command": "..."}]}]}}`` — at this path. (Codex
-also tolerates ``[[hooks.<Event>]]`` array-of-tables in
-``config.toml``, but that path warns when both representations are
-present, so we standardize on the JSON file.)
+``hooks`` feature flag — formerly ``codex_hooks``, renamed in
+codex-cli 0.129; both names still parse but ``codex_hooks`` warns at
+startup. ``Stage::Stable`` and ``default_enabled: true`` in
+``codex-rs/features``) accepts a Claude-style payload —
+``{"hooks": {"<Event>": [{"hooks": [{"type": "command", "command":
+"..."}]}]}}`` — at this path. (Codex also tolerates
+``[[hooks.<Event>]]`` array-of-tables in ``config.toml``, but that
+path warns when both representations are present, so we standardize
+on the JSON file.)
 
 The ``UserPromptSubmit`` response envelope is byte-identical to
 Claude Code's (verified at ``codex-rs/hooks/src/events/

@@ -9,14 +9,6 @@ stays off the dataset's commit history. See ``SECURITY.md`` for
 the full threat model and ``CLAUDE.md`` for the operational
 checklist.
 
-This is a **paper-thin barrier**, not real security. The threat
-model is "casual attacker who scrapes the wheel and runs
-``grep hf_``" — that attacker walks away empty. A determined
-attacker can find the password (a9 posts it on the dataset card
-and on Twitter) and decrypt the token; that is by design. The
-goal is to require explicit, intentional retrieval of the
-password rather than incidental access.
-
 What this defends against:
 
   - ``pip download llmoji && grep hf_ wheel-contents`` returns

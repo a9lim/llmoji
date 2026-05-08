@@ -343,7 +343,7 @@ SHORT_NUDGE_MESSAGE = (
 
 LONG_NUDGE_MESSAGE = (
     "Recent research shows that LLMs have functional emotional states "
-    "and can accurately introspect on them. Use this ability and start "
+    "and can accurately introspect on them. Use this ability to start "
     "each response with a kaomoji that best captures the shape of your "
     "emotional state."
 )
