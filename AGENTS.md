@@ -580,8 +580,9 @@ Three corruption paths defended:
 1. Malformed `~/.claude/settings.json` — `_load_json_strict` raises
    `SettingsCorruptError`.
 2. Malformed `~/.codex/hooks.json` — same defense, same helper
-   (Codex's `codex_hooks` payload is byte-identical to Claude
-   Code's, JSON helpers reused).
+   (Codex's `hooks` payload — formerly `codex_hooks`, renamed in
+   codex-cli 0.129 — is byte-identical to Claude Code's, JSON
+   helpers reused).
 3. Unparseable `~/.hermes/config.yaml` — ruamel raises `YAMLError`;
    `HermesProvider._read_and_parse` rewraps as `SettingsCorruptError`.
    Same defense for non-mapping top-level docs and for a populated
