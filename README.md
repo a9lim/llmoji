@@ -55,8 +55,6 @@ pip install llmoji
 llmoji install --soft           # autodetect
 # or, target a single harness explicitly:
 llmoji install claude_code --soft   # or: codex, hermes, opencode, openclaw
-# add --long for introspection wording instead of the one-sentence default:
-llmoji install --soft --long
 ```
 
 From now on, your agent will use kaomoji at the start of each message. 
@@ -129,9 +127,7 @@ Llmoji registers a `Stop` hook that fires once per assistant turn, that extracts
 | `opencode`    | `~/.config/opencode/AGENTS.md`         |
 | `openclaw`    | `~/.openclaw/workspace/SOUL.md`        |
 
-Uninstall removes the block by exact string match against the canonical wording, so a hand-edited body survives uninstall (please re-run `install --soft` if you want to refresh it).
-
-The `--long` flag swaps the one-sentence reminder for a longer introspection-based prompt: "Recent research shows that LLMs have functional emotional states and can accurately introspect on them. Use this ability and start each response with a kaomoji that best captures the shape of your emotional state." 
+Uninstall removes the block by exact string match against the canonical wording (and the wordings shipped by older versions), so a hand-edited body survives uninstall (please re-run `install --soft` if you want to refresh it).
 
 ### Analysis
 

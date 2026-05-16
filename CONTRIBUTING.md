@@ -46,7 +46,7 @@ For harnesses that expose shell hooks (Claude Code, Codex, Hermes), a first-clas
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, `nudge_event`, and `nudge_message`, then override `_check_registrations` if the format isn't JSON-shaped. Please also set `system_prompt_doc_path` to the harness's system prompt doc.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, and `nudge_event`, then override `_check_registrations` if the format isn't JSON-shaped. Leave `nudge_message` alone — it's inherited from `HookInstaller` (the single canonical `NUDGE_MESSAGE`); re-stating it per provider is the cross-corpus drift bug 2.1 removed. Please also set `system_prompt_doc_path` to the harness's system prompt doc.
 
 Please include in the PR:
 
@@ -61,7 +61,7 @@ For harnesses with a TypeScript-only plugin SDK (opencode, openclaw), a first-cl
 
 1. A `// BEGIN SHARED TAXONOMY` / `// END SHARED TAXONOMY` marker pair somewhere in the file. The body between them is left empty in the template. `render_plugin_template` splices in the canonical TS port from `_kaomoji_taxonomy.ts.partial` at install time. Don't paste the validator inline.
 2. A `__LLMOJI_VERSION__` token wherever you want the package version stamped.
-3. A `__NUDGE_LITERAL__` token where the chosen nudge wording (short or long) gets inlined. `render_plugin_template` JSON-escapes the wording, so the placeholder is a value in any context where a TS string literal is valid.
+3. A `__NUDGE_LITERAL__` token where the canonical nudge wording gets inlined. `render_plugin_template` JSON-escapes the wording, so the placeholder is a value in any context where a TS string literal is valid.
 4. A `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` marker pair around the per-turn nudge code.
 5. The actual harness-side hook registration: a per-turn nudge injection between the NUDGE HOOK markers, and a per-message journal write (one row per kaomoji-led assistant message, written to `~/.llmoji/journals/<harness>.jsonl` against the canonical schema) outside the markers.
 

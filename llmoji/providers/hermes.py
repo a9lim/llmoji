@@ -205,10 +205,9 @@ class HermesProvider(HookInstaller):
     nudge_hook_template = "hermes_nudge.sh.tmpl"
     nudge_hook_filename = "pre-llm-call.sh"
     nudge_event = "pre_llm_call"
-    nudge_message = (
-        "Please begin your message with a kaomoji that best represents "
-        "how you feel."
-    )
+    # ``nudge_message`` is inherited from HookInstaller — the single
+    # canonical ``NUDGE_MESSAGE``, not re-stated here so the wording
+    # stays cross-corpus consistent.
 
     # PyYAML-style block-formatting defaults for fresh blocks. When we're
     # merging into an existing user-populated hooks block, we infer the

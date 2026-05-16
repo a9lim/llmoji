@@ -697,11 +697,16 @@ def test_hook_templates_render_to_valid_bash_substitutions():
                 assert placeholder not in nudge, (
                     f"{name} nudge kept literal {placeholder}"
                 )
-            # The shell-quoted nudge message should round-trip
-            # through the bash literal back to itself when sourced.
-            assert p.nudge_message in nudge or all(
-                c not in p.nudge_message for c in "'"
-            ), "nudge message lost in template rendering"
+            # The nudge message is substituted shell-quoted (embedded
+            # single quotes escaped as ``'\''``); the fully-quoted
+            # bash literal must round-trip verbatim into the rendered
+            # hook. Checking the quoted form (not the raw message)
+            # keeps the assertion correct for messages that contain
+            # apostrophes.
+            from llmoji.providers.base import _shell_quote
+
+            quoted = f"'{_shell_quote(p.nudge_message)}'"
+            assert quoted in nudge, "nudge message lost in template rendering"
             _bash_n(f"{name} nudge hook", nudge)
 
 
