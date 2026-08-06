@@ -222,12 +222,13 @@ and update the HF dataset card to match.
   rendered as numbered `[Sample N]` blocks),
   `DEFAULT_ANTHROPIC_MODEL_ID` (pinned Haiku snapshot),
   `DEFAULT_OPENAI_MODEL_ID` (pinned GPT-5.4 mini snapshot),
-  `SHORT_NUDGE_MESSAGE` (v1 one-sentence nudge),
-  `LONG_NUDGE_MESSAGE` (v7 introspection framing baked from
-  `llmoji-study/preambles/introspection_v7.txt`;
-  `tests/test_soft_install.py
-  ::test_long_nudge_message_matches_introspection_v7` enforces
-  byte-identity). The LEXICON itself is snapshot-pinned in
+  `NUDGE_MESSAGE` (the single canonical kaomoji-leading reminder
+  — one sentence + an explicit uncertainty license; changing it
+  is a cross-corpus bump). 2.1 dropped the 2.0 `--long` second
+  variant — the strong introspection framing drove refusals and
+  the bundle never tagged rows by variant, so the short/long
+  split was never analytically recoverable. The LEXICON itself
+  is snapshot-pinned in
   `tests/test_lexicon_evolution.py`; any rotation requires both
   the snapshot update and a `LEXICON_VERSION` bump in the same
   commit.
@@ -266,8 +267,9 @@ and update the HF dataset card to match.
 - **Soft-doc shape**: plain markdown, no comment fences. Block is
   `# Kaomoji\n\n<message>` appended at EOF with a blank-line
   separator. Uninstall removes the block by exact string match
-  against the two canonical wordings (short / long); a hand-edited
-  body falls through and survives uninstall (conservative on the
+  against the canonical wording plus the legacy wordings older
+  versions shipped (`_LEGACY_NUDGE_MESSAGES`); a hand-edited body
+  falls through and survives uninstall (conservative on the
   user's prose). The `# Kaomoji` heading is the cross-corpus anchor
   — bumping it strands existing soft installs.
 - **The five first-class providers**: `claude_code`, `codex`,
@@ -305,11 +307,7 @@ llmoji install <provider> --soft
                           exactly one required. Both capture journal
                           data; only the placement of the leading-
                           kaomoji reminder differs.
-llmoji install <provider> --soft|--hard --long
-                          orthogonal to soft/hard. Swaps the v1
-                          one-sentence wording for the v7
-                          introspection framing.
-llmoji install --soft|--hard [--long] [--yes]
+llmoji install --soft|--hard [--yes]
                           no-arg autodetect: install for every harness
                           whose home dir exists. Prompts unless --yes.
                           Partial success OK — one corrupt config

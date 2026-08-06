@@ -9,6 +9,7 @@ atomically. Lifting them keeps the dependency graph tree-shaped.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -24,11 +25,20 @@ def atomic_write_text(path: Path, content: str) -> None:
     in a partially-written state. ``os.replace`` (the underlying
     ``Path.replace`` call) is POSIX-atomic on the same filesystem,
     so the file either has the old content or the new — never half.
+
+    Symlinks are followed, not replaced. Harness config kept in a
+    dotfiles repository reaches ``~/.claude`` and ``~/.codex`` as
+    links, and a rename onto the link path would quietly detach the
+    live file from the repository it is versioned in — the write
+    would appear to succeed while every other machine kept the old
+    content. Resolving first also keeps the temp file beside its real
+    target, so the rename stays on one filesystem and stays atomic.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".llmoji-tmp")
+    target = Path(os.path.realpath(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".llmoji-tmp")
     tmp.write_text(content)
-    tmp.replace(path)
+    tmp.replace(target)
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:

@@ -41,7 +41,6 @@ from .sources.gemini_export import iter_gemini_export
 from .sources.journal import iter_journal
 from .sources.openhands_export import iter_openhands_export
 from .synth import cache_size
-from .synth_prompts import LONG_NUDGE_MESSAGE, SHORT_NUDGE_MESSAGE
 from .taxonomy import canonicalize_kaomoji
 
 
@@ -74,7 +73,7 @@ def _print_install_summary(
 
 
 def _install_one(
-    name: str, *, soft: bool, long: bool,
+    name: str, *, soft: bool,
 ) -> tuple[bool, str | None]:
     """Install a single provider by name. Returns
     ``(succeeded, error_message)``. Used by the autodetect path so
@@ -83,17 +82,10 @@ def _install_one(
     ``soft`` picks the placement: True → soft-doc append (no nudge
     hook); False → hard nudge hook. The journal-write hook is
     installed under both modes — that's the data-capture invariant.
-    ``long`` swaps the nudge text from ``SHORT_NUDGE_MESSAGE`` (the
-    v1 wording) to ``LONG_NUDGE_MESSAGE`` (the v7 introspection
-    framing).
+    The nudge wording is the single canonical ``NUDGE_MESSAGE``
+    (the provider class default).
     """
     p = get_provider(name)
-    # Per-instance attr override — the class default stays SHORT, so
-    # other concurrent provider instances aren't affected.
-    if long:
-        p.nudge_message = LONG_NUDGE_MESSAGE
-    else:
-        p.nudge_message = SHORT_NUDGE_MESSAGE
     try:
         if soft:
             p.install_soft()
@@ -109,7 +101,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     # argparse's mutually_exclusive_group(required=True) on --soft /
     # --hard already enforces "exactly one" at parse time, so no
     # re-validation needed here.
-    install_kwargs = {"soft": args.soft, "long": args.long}
+    install_kwargs = {"soft": args.soft}
 
     # Explicit provider: legacy single-target path.
     if args.provider is not None:
@@ -138,8 +130,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         return 2
 
     mode_label = "soft" if args.soft else "hard"
-    long_suffix = " (long prompt)" if args.long else ""
-    print(f"detected harnesses, will install [{mode_label}]{long_suffix}:")
+    print(f"detected harnesses, will install [{mode_label}]:")
     for name in detected:
         print(f"  - {name}  ({get_provider(name).settings_path.parent})")
     if not args.yes:
@@ -1057,16 +1048,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "install the journal-write hook AND a per-turn nudge "
             "hook that injects the kaomoji-leading reminder as "
             "additional context every turn. The v1 behavior."
-        ),
-    )
-    sp.add_argument(
-        "--long", action="store_true",
-        help=(
-            "use the long-form v7 introspection prompt instead of "
-            "the one-sentence default. Frames the kaomoji as a "
-            "self-report on a functional emotional state. Orthogonal "
-            "to --soft / --hard — pick one of those for placement, "
-            "this picks the wording."
         ),
     )
     sp.add_argument(

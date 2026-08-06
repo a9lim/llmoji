@@ -40,7 +40,7 @@ from __future__ import annotations
 # resolves it dynamically via ``[tool.hatch.version] path =
 # "llmoji/__init__.py"`` (hatch parses the literal without executing
 # the module, so the eager re-exports below don't fire at build time).
-__version__ = "2.0.2"
+__version__ = "2.1.2"
 
 from ._util import flatten_synthesis
 from .scrape import ScrapeRow, iter_all
@@ -51,8 +51,7 @@ from .synth_prompts import (
     EXTENSION_AXES,
     LEXICON,
     LEXICON_VERSION,
-    LONG_NUDGE_MESSAGE,
-    SHORT_NUDGE_MESSAGE,
+    NUDGE_MESSAGE,
     SYNTHESIS_SCHEMA,
     SYNTHESIZE_PROMPT,
 )
@@ -80,8 +79,7 @@ __all__ = [
     "SYNTHESIZE_PROMPT",
     "DEFAULT_ANTHROPIC_MODEL_ID",
     "DEFAULT_OPENAI_MODEL_ID",
-    "SHORT_NUDGE_MESSAGE",
-    "LONG_NUDGE_MESSAGE",
+    "NUDGE_MESSAGE",
     "flatten_synthesis",
     "__version__",
 ]

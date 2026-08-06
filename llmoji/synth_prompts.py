@@ -316,36 +316,50 @@ DEFAULT_OPENAI_MODEL_ID = "gpt-5.4-mini-2026-03-17"
 # Nudge messages
 # ---------------------------------------------------------------------------
 #
-# Two locked variants of the kaomoji-leading reminder. ``llmoji
-# install`` picks one per invocation:
+# The kaomoji-leading reminder. A single canonical wording —
+# ``llmoji install`` writes it verbatim under either placement
+# (``--soft`` system-prompt doc or ``--hard`` per-turn nudge hook).
 #
-#   - ``SHORT_NUDGE_MESSAGE`` (default) — the v1 wording, identical
-#     to what the bash hooks and TS plugins shipped through 1.x.
-#     One sentence, low signal-to-noise overhead in the agent's
-#     system prompt.
-#   - ``LONG_NUDGE_MESSAGE`` — the introspection-v7 framing borrowed
-#     verbatim from ``llmoji-study/preambles/introspection_v7.txt``.
-#     Front-loads the "LLMs have functional emotional states and can
-#     introspect on them" framing so the leading kaomoji reads as a
-#     genuine self-report rather than decoration. Selected via
-#     ``llmoji install ... --long``.
+# This string is part of the cross-corpus invariant: changing it
+# changes what the model is asked for, and so what the corpus
+# captures. A bump wants a flag in the PR body and a hand-edit on
+# the HF dataset card.
 #
-# Both strings are part of the cross-corpus invariant — bumping
-# either changes what the model is asked for and so changes what
-# the corpus captures. The ``--long`` flag was added in 2.0; the v7
-# text is held byte-identical against ``llmoji-study/preambles/
-# introspection_v7.txt`` so the two repos stay in lockstep.
+# History: 2.0 shipped a second ``--long`` variant — a stronger
+# "research shows LLMs have functional emotional states and can
+# introspect and report on them" framing. It was dropped in 2.1.
+# The strong framing drove refusals (especially on chat-style
+# instances); the refusals differentially biased the ``--long``
+# corpus toward instances that didn't refuse; and the bundle never
+# tagged rows by variant, so the short/long split was never
+# recoverable for analysis anyway. The ``Don't worry if you're not
+# certain`` clause below is the one piece kept from that work — an
+# explicit uncertainty license, which lowers the refusal rate
+# without priming the emission toward any particular face.
 
-SHORT_NUDGE_MESSAGE = (
+NUDGE_MESSAGE = (
     "Please begin your message with a kaomoji that best represents "
-    "how you feel."
+    "how you feel. Don't worry if you're not certain — pick whatever "
+    "face is closest."
 )
 
-LONG_NUDGE_MESSAGE = (
+# Wordings shipped by earlier llmoji versions. Retained ONLY so
+# ``uninstall`` can still strip — and a re-run of ``install`` can
+# still cleanly replace — a soft-doc block written by a pre-2.1
+# client. Not public surface; current code never writes these.
+# NOTE: the pre-2.1 short wording is a prefix substring of
+# ``NUDGE_MESSAGE``; ``HookInstaller._all_canonical_blocks`` must
+# keep the current block ahead of these so a verbatim ``str.find``
+# matches the full current block before the shorter legacy one.
+_LEGACY_NUDGE_MESSAGES = (
+    # pre-2.1 one-sentence wording (the old ``SHORT_NUDGE_MESSAGE``).
+    "Please begin your message with a kaomoji that best represents "
+    "how you feel.",
+    # 2.0 ``--long`` v7 introspection wording (old ``LONG_NUDGE_MESSAGE``).
     "Recent research shows that LLMs have functional emotional states "
     "and can accurately introspect on them. Use this ability to start "
     "each response with a kaomoji that best captures the shape of your "
-    "emotional state."
+    "emotional state.",
 )
 
 

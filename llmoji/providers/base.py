@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from string import Template
 from typing import Any
 
 from .._util import atomic_write_text, package_version, write_json
-from ..synth_prompts import LONG_NUDGE_MESSAGE, SHORT_NUDGE_MESSAGE
+from ..synth_prompts import NUDGE_MESSAGE, _LEGACY_NUDGE_MESSAGES
 from ..taxonomy import KAOMOJI_START_CHARS
 
 # Soft-doc heading appended ahead of the nudge text in the user's
@@ -29,9 +30,9 @@ from ..taxonomy import KAOMOJI_START_CHARS
 # ``~/.config/opencode/AGENTS.md``, ``~/.openclaw/workspace/SOUL.md``).
 # Plain markdown — no comment markers, no fence. Uninstall finds the
 # block by searching for the verbatim string ``"# Kaomoji\n\n<msg>"``
-# against the two canonical wordings (short / long); a hand-edited
-# block falls through and survives uninstall (conservative on the
-# user's prose).
+# against the canonical wording (and the legacy wordings older
+# versions shipped); a hand-edited block falls through and survives
+# uninstall (conservative on the user's prose).
 SOFT_DOC_HEADING = "# Kaomoji"
 
 
@@ -94,9 +95,9 @@ class ProviderStatus:
     #     (None for harnesses without a doc concept).
     #   - ``soft_installed`` — marker-fenced block currently present
     #     in the doc.
-    #   - ``soft_doc_current`` — block content matches what
-    #     ``install_soft`` would write right now (False = stale,
-    #     typically because ``--long`` was toggled without a re-run).
+    #   - ``soft_doc_current`` — block content matches a wording
+    #     llmoji writes (False = stale, the heading is present but
+    #     the body was hand-edited away from every known wording).
     # ``installed`` (the rolled-up summary) stays anchored on the
     # hard install — soft-only installs surface as ``installed=False``
     # with ``soft_installed=True`` so the CLI can render "soft only"
@@ -167,7 +168,7 @@ def _read_plugin_data(name: str) -> str:
 def render_plugin_template(
     template_name: str,
     *,
-    nudge_message: str = SHORT_NUDGE_MESSAGE,
+    nudge_message: str = NUDGE_MESSAGE,
     install_nudge: bool = True,
 ) -> str:
     """Render a TS plugin template by splicing the canonical taxonomy
@@ -203,7 +204,7 @@ def render_plugin_template(
     JSON's escape grammar) and substituted at ``__NUDGE_LITERAL__``,
     which lives OUTSIDE the SHARED TAXONOMY block by design — the
     partial stays pure taxonomy and the byte-identity test against
-    the partial is unaffected by the short/long pick. Templates that
+    the partial is unaffected by the nudge wording. Templates that
     don't reference the placeholder (e.g. ``openclaw.plugin.json``)
     are unaffected.
     """
@@ -325,14 +326,11 @@ class HookInstaller:
     nudge_hook_template: str = ""
     nudge_hook_filename: str = ""
     nudge_event: str = ""
-    # ``nudge_message`` defaults to the v1 short wording. The CLI
-    # ``--long`` flag swaps the per-instance attribute (instance ≠
-    # class) to :data:`llmoji.synth_prompts.LONG_NUDGE_MESSAGE` before
-    # calling install, so the rendered hook / soft-doc block carries
-    # the v7 introspection framing instead. Per-instance override
-    # keeps subclasses free to set their own class-level default
-    # without the CLI's --long mutation leaking across providers.
-    nudge_message: str = SHORT_NUDGE_MESSAGE
+    # ``nudge_message`` is the kaomoji-leading reminder text the
+    # rendered hook / soft-doc block carries. Class attr — a future
+    # provider may set its own default, though all five first-class
+    # providers currently share the one canonical wording.
+    nudge_message: str = NUDGE_MESSAGE
 
     # --- public API ---
 
@@ -438,9 +436,6 @@ class HookInstaller:
 
         The default :meth:`_register` registers both hooks in a
         single atomic settings-file write.
-
-        Caller sets :attr:`nudge_message` to the long-prompt variant
-        before calling for ``--long`` mode (instance attr override).
         """
         self._write_journal_hook()
         if self.has_nudge:
@@ -513,8 +508,9 @@ class HookInstaller:
     #
     # appended to EOF with a blank-line separator if the file isn't
     # empty. No comment markers; uninstall finds the block by exact
-    # string match against the two canonical wordings (short / long).
-    # A hand-edited block falls through and survives uninstall —
+    # string match against the canonical wording (and the legacy
+    # wordings older versions shipped). A hand-edited block falls
+    # through and survives uninstall —
     # conservative on the user's prose. Both writers go through
     # :func:`llmoji._util.atomic_write_text` so a SIGINT mid-write
     # leaves the file with either old or new content, never half.
@@ -528,21 +524,30 @@ class HookInstaller:
 
     @classmethod
     def _all_canonical_blocks(cls) -> list[str]:
-        """Every canonical block string we might have written —
-        short and long variants. Uninstall iterates this list to
-        find what to strip."""
+        """Every canonical block string we might have written — the
+        current wording first, then the legacy wordings older
+        versions shipped. Uninstall iterates this list to find what
+        to strip; a re-run of install iterates it to find a stale
+        block to replace.
+
+        Order matters: the pre-2.1 short wording is a prefix
+        substring of the current ``NUDGE_MESSAGE``, so the current
+        block MUST stay first — otherwise a verbatim ``str.find``
+        in :meth:`_strip_soft_doc` would match the shorter legacy
+        block inside a current block and strip only its prefix.
+        """
         return [
-            cls._soft_doc_block(SHORT_NUDGE_MESSAGE),
-            cls._soft_doc_block(LONG_NUDGE_MESSAGE),
+            cls._soft_doc_block(NUDGE_MESSAGE),
+            *(cls._soft_doc_block(m) for m in _LEGACY_NUDGE_MESSAGES),
         ]
 
     def _write_soft_doc_block(self, path: Path, message: str) -> None:
         """Append (or replace, if a canonical block is already there)
         the kaomoji block in ``path``.
 
-        Idempotent on repeat with the same message. ``--long``
-        toggling: removes any prior canonical block first, then
-        appends the chosen variant fresh.
+        Idempotent on repeat with the same message. A re-run after a
+        version that changed the wording removes the prior (now
+        legacy) block first, then appends the fresh one.
         """
         existing = path.read_text() if path.exists() else ""
         new_content = self._merge_soft_doc(existing, message)
@@ -575,9 +580,9 @@ class HookInstaller:
     def _merge_soft_doc(cls, existing: str, message: str) -> str:
         """Pure-function planner for :meth:`_write_soft_doc_block`.
 
-        Two-step: strip any existing canonical block (handles re-
-        install + ``--long`` toggle), then append the fresh block
-        with a blank-line separator.
+        Two-step: strip any existing canonical block (handles a re-
+        install, including across a wording change), then append the
+        fresh block with a blank-line separator.
         """
         # Step 1: strip any pre-existing canonical block.
         cleaned = cls._strip_soft_doc(existing)
@@ -595,7 +600,7 @@ class HookInstaller:
     def _strip_soft_doc(cls, existing: str) -> str:
         """Pure-function planner for :meth:`_remove_soft_doc_block`.
 
-        Searches for either canonical block (short or long variant)
+        Searches for any canonical block (current or legacy wording)
         verbatim. On match: removes the block + the blank-line
         separator the install path added before it (if any) + the
         trailing newline after the block. On no match: returns the
@@ -620,12 +625,13 @@ class HookInstaller:
         return existing
 
     def _is_soft_doc_current(self) -> bool:
-        """``True`` iff a canonical short or long block is present
-        verbatim in the configured doc, OR no soft-doc is configured.
+        """``True`` iff a canonical block (current or legacy
+        wording) is present verbatim in the configured doc, OR no
+        soft-doc is configured.
 
         Returns ``False`` only when the heading is present but the
-        body has been hand-edited away from both canonical wordings
-        — surfaces as ``stale`` in :meth:`status`, prompting a
+        body has been hand-edited away from every known wording —
+        surfaces as ``stale`` in :meth:`status`, prompting a
         re-install.
         """
         if self.system_prompt_doc_path is None:
@@ -852,7 +858,10 @@ class HookInstaller:
                     f"{type(bucket_field).__name__}, not an array",
                 )
             bucket: list[Any] = hooks.setdefault(event, [])
-            if any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket)):
+            if any(
+                _same_hook_command(leaf_cmd, cmd)
+                for _, _, leaf_cmd in _iter_leaf_commands(bucket)
+            ):
                 continue
             bucket.append({"hooks": [{"type": "command", "command": cmd}]})
             changed = True
@@ -886,7 +895,7 @@ class HookInstaller:
             # entry's ``hooks`` list is rebuilt at most once.
             drops_per_entry: dict[int, set[int]] = {}
             for entry_idx, hook_idx, leaf_cmd in _iter_leaf_commands(bucket):
-                if leaf_cmd == cmd:
+                if _same_hook_command(leaf_cmd, cmd):
                     drops_per_entry.setdefault(entry_idx, set()).add(hook_idx)
             if not drops_per_entry:
                 continue
@@ -950,7 +959,10 @@ class HookInstaller:
                 continue
             cmd = str(hook_path)
             out.append(
-                any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket))
+                any(
+                    _same_hook_command(leaf_cmd, cmd)
+                    for _, _, leaf_cmd in _iter_leaf_commands(bucket)
+                )
             )
         return out
 
@@ -978,10 +990,9 @@ class JsonSettingsHookInstaller(HookInstaller):
     nudge_hook_template = "claude_codex_nudge.sh.tmpl"
     nudge_hook_filename = "kaomoji-nudge.sh"
     nudge_event = "UserPromptSubmit"
-    nudge_message = (
-        "Please begin your message with a kaomoji that best represents "
-        "how you feel."
-    )
+    # ``nudge_message`` is inherited from HookInstaller (the single
+    # canonical ``NUDGE_MESSAGE``) — deliberately NOT re-stated here,
+    # so the wording can't fall out of sync per the class docstring.
 
 
 class PluginInstaller(HookInstaller):
@@ -1032,10 +1043,10 @@ class PluginInstaller(HookInstaller):
     nudge_hook_template: str = ""
     nudge_hook_filename: str = ""
     nudge_event: str = ""
-    # Inherit the same SHORT_NUDGE_MESSAGE default the bash base uses;
-    # the rendered plugin's ``__NUDGE_LITERAL__`` placeholder reads
-    # this attr (per-instance override on --long).
-    nudge_message: str = SHORT_NUDGE_MESSAGE
+    # Inherit the same NUDGE_MESSAGE default the bash base uses; the
+    # rendered plugin's ``__NUDGE_LITERAL__`` placeholder reads this
+    # attr.
+    nudge_message: str = NUDGE_MESSAGE
 
     # --- plugin-specific surface (subclass populates) ---
     #
@@ -1140,8 +1151,7 @@ class PluginInstaller(HookInstaller):
         are TS / JSON files the host harness loads, not executables.
 
         Renamed from ``install`` in 2.0 to mirror
-        :meth:`HookInstaller.install_hard`. Caller sets
-        :attr:`nudge_message` for ``--long`` mode.
+        :meth:`HookInstaller.install_hard`.
         """
         self.install_nudge = True
         self._write_plugin_files()
@@ -1299,6 +1309,32 @@ def _iter_leaf_commands(
             cmd = h.get("command")
             if isinstance(cmd, str):
                 yield entry_idx, hook_idx, cmd
+
+
+def _same_hook_command(a: str, b: str) -> bool:
+    """Do two hook ``command`` strings name the same script?
+
+    Compared after expanding ``$VAR`` and ``~`` and normalising the
+    path. A registration kept in a dotfiles repository is usually
+    written ``$HOME/.claude/hooks/kaomoji-log.sh`` so that one
+    checked-in settings file serves every machine — both Claude Code
+    and Codex run a ``type: command`` hook through a shell (Codex via
+    ``$SHELL -lc``), so the variable resolves at fire time.
+
+    A literal string comparison reads that as "not registered" and
+    appends an absolute-path duplicate beside it: two hooks fire, two
+    journal rows land per turn, and ``status`` reports a provider as
+    uninstalled forever. Expanding both sides costs nothing and makes
+    the two spellings the same registration, which they are.
+
+    Unset variables expand to themselves, so an unresolvable ``$FOO``
+    simply fails to match — the conservative direction.
+    """
+    return _expand_hook_command(a) == _expand_hook_command(b)
+
+
+def _expand_hook_command(cmd: str) -> str:
+    return os.path.normpath(os.path.expanduser(os.path.expandvars(cmd.strip())))
 
 
 def _load_json_strict(path: Path) -> dict[str, Any]:
