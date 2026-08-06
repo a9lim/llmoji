@@ -730,6 +730,10 @@ def test_nudge_install_uninstall_roundtrip():
             p.hooks_dir = td / provider_name / "hooks"
             p.settings_path = td / provider_name / "settings.json"
             p.journal_path = td / provider_name / "journal.jsonl"
+            # Fourth path, and the one this test used to forget:
+            # uninstall() strips the soft-doc block, so leaving this
+            # at its default edited the real ~/.claude/CLAUDE.md.
+            p.system_prompt_doc_path = td / provider_name / "DOC.md"
 
             p.install_hard()
             nudge_path = p.nudge_hook_path
