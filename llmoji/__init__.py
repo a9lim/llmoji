@@ -40,7 +40,7 @@ from __future__ import annotations
 # resolves it dynamically via ``[tool.hatch.version] path =
 # "llmoji/__init__.py"`` (hatch parses the literal without executing
 # the module, so the eager re-exports below don't fire at build time).
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 from ._util import flatten_synthesis
 from .scrape import ScrapeRow, iter_all

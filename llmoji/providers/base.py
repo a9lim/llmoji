@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -857,7 +858,10 @@ class HookInstaller:
                     f"{type(bucket_field).__name__}, not an array",
                 )
             bucket: list[Any] = hooks.setdefault(event, [])
-            if any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket)):
+            if any(
+                _same_hook_command(leaf_cmd, cmd)
+                for _, _, leaf_cmd in _iter_leaf_commands(bucket)
+            ):
                 continue
             bucket.append({"hooks": [{"type": "command", "command": cmd}]})
             changed = True
@@ -891,7 +895,7 @@ class HookInstaller:
             # entry's ``hooks`` list is rebuilt at most once.
             drops_per_entry: dict[int, set[int]] = {}
             for entry_idx, hook_idx, leaf_cmd in _iter_leaf_commands(bucket):
-                if leaf_cmd == cmd:
+                if _same_hook_command(leaf_cmd, cmd):
                     drops_per_entry.setdefault(entry_idx, set()).add(hook_idx)
             if not drops_per_entry:
                 continue
@@ -955,7 +959,10 @@ class HookInstaller:
                 continue
             cmd = str(hook_path)
             out.append(
-                any(leaf_cmd == cmd for _, _, leaf_cmd in _iter_leaf_commands(bucket))
+                any(
+                    _same_hook_command(leaf_cmd, cmd)
+                    for _, _, leaf_cmd in _iter_leaf_commands(bucket)
+                )
             )
         return out
 
@@ -1302,6 +1309,32 @@ def _iter_leaf_commands(
             cmd = h.get("command")
             if isinstance(cmd, str):
                 yield entry_idx, hook_idx, cmd
+
+
+def _same_hook_command(a: str, b: str) -> bool:
+    """Do two hook ``command`` strings name the same script?
+
+    Compared after expanding ``$VAR`` and ``~`` and normalising the
+    path. A registration kept in a dotfiles repository is usually
+    written ``$HOME/.claude/hooks/kaomoji-log.sh`` so that one
+    checked-in settings file serves every machine — both Claude Code
+    and Codex run a ``type: command`` hook through a shell (Codex via
+    ``$SHELL -lc``), so the variable resolves at fire time.
+
+    A literal string comparison reads that as "not registered" and
+    appends an absolute-path duplicate beside it: two hooks fire, two
+    journal rows land per turn, and ``status`` reports a provider as
+    uninstalled forever. Expanding both sides costs nothing and makes
+    the two spellings the same registration, which they are.
+
+    Unset variables expand to themselves, so an unresolvable ``$FOO``
+    simply fails to match — the conservative direction.
+    """
+    return _expand_hook_command(a) == _expand_hook_command(b)
+
+
+def _expand_hook_command(cmd: str) -> str:
+    return os.path.normpath(os.path.expanduser(os.path.expandvars(cmd.strip())))
 
 
 def _load_json_strict(path: Path) -> dict[str, Any]:
