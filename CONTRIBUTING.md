@@ -70,7 +70,7 @@ The `PluginInstaller` subclass needs:
 - `plugin_dir`: where on disk the rendered files land (typically inside `~/.<harness>/plugins/` or similar).
 - `plugin_files`: list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
 - `journal_path`: `~/.llmoji/journals/<harness>.jsonl` by convention.
-- `system_prompt_doc_path`: the harness's identity or global-instructions file. `install --soft` appends a `# Kaomoji` heading and the nudge wording there.
+- `system_prompt_doc_path`: the harness's identity or global-instructions file. `install --soft` appends a `## Kaomoji` heading and the nudge wording there.
 - `is_present`: by default returns `plugin_dir.parent.exists()`; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the parent-dir check matches the bash providers).
 - `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults. The base `_register` accepts `include_nudge`.
 

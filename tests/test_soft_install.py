@@ -6,7 +6,7 @@ exclusive placements that share the journal-write hook:
   - ``install_hard`` — write the journal-write Stop hook AND the
     per-turn nudge hook. The v1 behavior.
   - ``install_soft`` — write the journal-write Stop hook AND append
-    a ``# Kaomoji`` heading + the nudge wording to the harness's
+    a ``## Kaomoji`` heading + the nudge wording to the harness's
     persistent system-prompt doc (``~/.claude/CLAUDE.md`` /
     ``~/.codex/AGENTS.md`` / ``~/.hermes/SOUL.md`` /
     ``~/.config/opencode/AGENTS.md`` /
@@ -44,7 +44,7 @@ def test_merge_into_empty_doc_writes_heading_block():
     from llmoji.synth_prompts import NUDGE_MESSAGE
 
     out = HookInstaller._merge_soft_doc("", NUDGE_MESSAGE)
-    # ``# Kaomoji`` heading + blank line + message.
+    # ``## Kaomoji`` heading + blank line + message.
     assert out.startswith(f"{SOFT_DOC_HEADING}\n\n{NUDGE_MESSAGE}")
     # File ends with single trailing newline.
     assert out.endswith("\n")
@@ -93,6 +93,17 @@ def test_merge_replaces_legacy_block():
     assert after_current.startswith("prose\n")
 
 
+def test_merge_replaces_legacy_h1_heading():
+    """A re-run migrates the former H1 anchor without duplicating it."""
+    from llmoji.providers.base import HookInstaller, SOFT_DOC_HEADING
+    from llmoji.synth_prompts import NUDGE_MESSAGE
+
+    old = f"prose\n\n# Kaomoji\n\n{NUDGE_MESSAGE}\n"
+    out = HookInstaller._merge_soft_doc(old, NUDGE_MESSAGE)
+    assert out == f"prose\n\n{SOFT_DOC_HEADING}\n\n{NUDGE_MESSAGE}\n"
+    assert "\n# Kaomoji\n" not in out
+
+
 def test_strip_removes_canonical_block_and_separator():
     from llmoji.providers.base import HookInstaller
     from llmoji.synth_prompts import NUDGE_MESSAGE
@@ -111,6 +122,15 @@ def test_strip_finds_legacy_block():
     for legacy in _LEGACY_NUDGE_MESSAGES:
         after_legacy_install = HookInstaller._merge_soft_doc("p\n", legacy)
         assert HookInstaller._strip_soft_doc(after_legacy_install) == "p\n"
+
+
+def test_strip_finds_legacy_h1_heading():
+    """Uninstall recognizes blocks written with the former H1 anchor."""
+    from llmoji.providers.base import HookInstaller
+    from llmoji.synth_prompts import NUDGE_MESSAGE
+
+    old = f"p\n\n# Kaomoji\n\n{NUDGE_MESSAGE}\n"
+    assert HookInstaller._strip_soft_doc(old) == "p\n"
 
 
 def test_strip_no_op_when_no_canonical_block():
@@ -186,7 +206,7 @@ def test_install_soft_creates_doc_AND_journal_hook(tmp_path: Path):
     p.install_soft()
     text = doc.read_text()
     assert NUDGE_MESSAGE in text
-    assert "# Kaomoji" in text
+    assert "## Kaomoji" in text.splitlines()
     # Journal-write hook IS created — both modes capture data.
     assert p.hook_path.exists()
     # Per-turn nudge hook is NOT created in soft mode.
@@ -314,6 +334,19 @@ def test_status_treats_legacy_message_as_current(tmp_path: Path):
     doc.write_text(
         HookInstaller._merge_soft_doc("prose\n", _LEGACY_NUDGE_MESSAGES[0])
     )
+    s = p.status()
+    assert s.soft_installed is True
+    assert s.soft_doc_current is True
+
+
+def test_status_treats_legacy_h1_heading_as_current(tmp_path: Path):
+    """The former H1 anchor remains a recognized installed shape."""
+    from llmoji.providers import get_provider
+    from llmoji.synth_prompts import NUDGE_MESSAGE
+
+    p = get_provider("claude_code")
+    doc = _bind_provider_to_tmp(p, tmp_path)
+    doc.write_text(f"prose\n\n# Kaomoji\n\n{NUDGE_MESSAGE}\n")
     s = p.status()
     assert s.soft_installed is True
     assert s.soft_doc_current is True
