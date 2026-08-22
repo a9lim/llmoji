@@ -288,7 +288,7 @@ def _provider_health_summary(s: ProviderStatus) -> tuple[str, list[str]]:
     issues: list[str] = []
     if not s.installed and not s.soft_installed and not s.main_installed:
         # Nothing of ours is on disk. ``soft_doc_current=False`` here
-        # surfaces an orphan ``# Kaomoji`` heading the user (or an
+        # surfaces an orphan ``## Kaomoji`` heading the user (or an
         # earlier version) left behind — flag it without claiming we
         # installed.
         if not s.soft_doc_current:

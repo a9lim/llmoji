@@ -251,7 +251,7 @@ and update the HF dataset card to match.
     (`UserPromptSubmit` on claude_code/codex, `pre_llm_call` on
     hermes; baked into the rendered TS plugin for opencode/openclaw).
     The v1 behavior.
-  - `--soft`: journal-write hook + appends a `# Kaomoji` heading +
+  - `--soft`: journal-write hook + appends a `## Kaomoji` heading +
     the nudge text to the harness's persistent system-prompt doc.
     No per-turn nudge hook. For TS plugin providers,
     `render_plugin_template(install_nudge=False)` strips the
@@ -265,13 +265,14 @@ and update the HF dataset card to match.
   - `opencode` → `~/.config/opencode/AGENTS.md`
   - `openclaw` → `~/.openclaw/workspace/SOUL.md`
 - **Soft-doc shape**: plain markdown, no comment fences. Block is
-  `# Kaomoji\n\n<message>` appended at EOF with a blank-line
+  `## Kaomoji\n\n<message>` appended at EOF with a blank-line
   separator. Uninstall removes the block by exact string match
   against the canonical wording plus the legacy wordings older
   versions shipped (`_LEGACY_NUDGE_MESSAGES`); a hand-edited body
   falls through and survives uninstall (conservative on the
-  user's prose). The `# Kaomoji` heading is the cross-corpus anchor
-  — bumping it strands existing soft installs.
+  user's prose). The `## Kaomoji` heading is the cross-corpus anchor;
+  the former `# Kaomoji` shape remains recognized for migration and
+  uninstall so existing soft installs are not stranded.
 - **The five first-class providers**: `claude_code`, `codex`,
   `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
   `providers_seen` in shipped bundles names these directly.
@@ -300,7 +301,7 @@ llmoji install <provider> --hard
                           hook (the v1 behavior).
 llmoji install <provider> --soft
                           install journal-write hook + append
-                          "# Kaomoji" + the nudge wording to the
+                          "## Kaomoji" + the nudge wording to the
                           harness's system-prompt doc. No per-turn
                           nudge hook.
                           --soft and --hard are mutually exclusive;

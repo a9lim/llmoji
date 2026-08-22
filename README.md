@@ -24,7 +24,7 @@ The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-stu
 
 There are three main commands:
 
-- **`llmoji install --soft`** or **`--hard`**: installs the journal hook for all detected providers, and either adds a `# Kaomoji` section to the harness's prompt doc (`--soft`), or writes a nudge hook (`--hard`). The flags are mutually exclusive and one is required. Both modes capture journal data.
+- **`llmoji install --soft`** or **`--hard`**: installs the journal hook for all detected providers, and either adds a `## Kaomoji` section to the harness's prompt doc (`--soft`), or writes a nudge hook (`--hard`). The flags are mutually exclusive and one is required. Both modes capture journal data.
 - **`llmoji analyze`**: scrape and aggregate your logs
 - **`llmoji upload --target {hf,email}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; email: tarball)
 

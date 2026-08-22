@@ -29,11 +29,12 @@ from ..taxonomy import KAOMOJI_START_CHARS
 # ``~/.codex/AGENTS.md``, ``~/.hermes/SOUL.md``,
 # ``~/.config/opencode/AGENTS.md``, ``~/.openclaw/workspace/SOUL.md``).
 # Plain markdown — no comment markers, no fence. Uninstall finds the
-# block by searching for the verbatim string ``"# Kaomoji\n\n<msg>"``
-# against the canonical wording (and the legacy wordings older
+# block by searching for the verbatim string ``"## Kaomoji\n\n<msg>"``
+# against the canonical wording (and the legacy headings/wordings older
 # versions shipped); a hand-edited block falls through and survives
 # uninstall (conservative on the user's prose).
-SOFT_DOC_HEADING = "# Kaomoji"
+SOFT_DOC_HEADING = "## Kaomoji"
+_LEGACY_SOFT_DOC_HEADINGS = ("# Kaomoji",)
 
 
 class SoftInstallNotSupportedError(RuntimeError):
@@ -502,7 +503,7 @@ class HookInstaller:
     #
     # The soft-doc block is a plain markdown heading + body:
     #
-    #     # Kaomoji
+    #     ## Kaomoji
     #
     #     <nudge_message>
     #
@@ -516,19 +517,22 @@ class HookInstaller:
     # leaves the file with either old or new content, never half.
 
     @staticmethod
-    def _soft_doc_block(message: str) -> str:
+    def _soft_doc_block(
+        message: str, *, heading: str = SOFT_DOC_HEADING
+    ) -> str:
         """Canonical block string for ``message`` — the exact bytes
         the install path writes and the uninstall path searches for.
         """
-        return f"{SOFT_DOC_HEADING}\n\n{message}"
+        return f"{heading}\n\n{message}"
 
     @classmethod
     def _all_canonical_blocks(cls) -> list[str]:
         """Every canonical block string we might have written — the
-        current wording first, then the legacy wordings older
-        versions shipped. Uninstall iterates this list to find what
-        to strip; a re-run of install iterates it to find a stale
-        block to replace.
+        current heading first, then the legacy headings older versions
+        shipped; within each heading, the current wording comes first,
+        followed by legacy wordings. Uninstall iterates this list to
+        find what to strip; a re-run of install iterates it to find a
+        stale block to replace.
 
         Order matters: the pre-2.1 short wording is a prefix
         substring of the current ``NUDGE_MESSAGE``, so the current
@@ -536,9 +540,11 @@ class HookInstaller:
         in :meth:`_strip_soft_doc` would match the shorter legacy
         block inside a current block and strip only its prefix.
         """
+        messages = (NUDGE_MESSAGE, *_LEGACY_NUDGE_MESSAGES)
         return [
-            cls._soft_doc_block(NUDGE_MESSAGE),
-            *(cls._soft_doc_block(m) for m in _LEGACY_NUDGE_MESSAGES),
+            cls._soft_doc_block(message, heading=heading)
+            for heading in (SOFT_DOC_HEADING, *_LEGACY_SOFT_DOC_HEADINGS)
+            for message in messages
         ]
 
     def _write_soft_doc_block(self, path: Path, message: str) -> None:
@@ -626,8 +632,8 @@ class HookInstaller:
 
     def _is_soft_doc_current(self) -> bool:
         """``True`` iff a canonical block (current or legacy
-        wording) is present verbatim in the configured doc, OR no
-        soft-doc is configured.
+        heading and wording) is present verbatim in the configured
+        doc, OR no soft-doc is configured.
 
         Returns ``False`` only when the heading is present but the
         body has been hand-edited away from every known wording —
@@ -642,7 +648,10 @@ class HookInstaller:
             text = self.system_prompt_doc_path.read_text()
         except OSError:
             return False
-        if SOFT_DOC_HEADING not in text:
+        if not any(
+            heading in text
+            for heading in (SOFT_DOC_HEADING, *_LEGACY_SOFT_DOC_HEADINGS)
+        ):
             return True  # no block present at all — not "stale"
         return any(
             block in text for block in self._all_canonical_blocks()
