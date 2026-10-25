@@ -25,17 +25,20 @@ user_prompt_submit.rs``), so a single shared
 
 Per-provider quirks (vs claude_code / hermes):
 
-  - **One row per kaomoji-led agent_message in the current turn.**
-    Codex emits each model message as its own
-    ``event_msg.agent_message`` event with the text on
-    ``payload.message``. A tool-heavy turn writes 5–10 of these
+  - **One row per kaomoji-led agent message in the current turn.**
+    Codex emits each model message as its own event: an
+    ``event_msg`` / ``item_completed`` whose item is an
+    ``AgentMessage`` on codex-cli 0.144+, an ``event_msg.agent_message``
+    on older releases. A tool-heavy turn writes 5–10 of these
     (``phase: "commentary"`` for progress messages, ``"final_answer"``
     for the closing one); the journal captures every kaomoji-led
     message, not just the final summary. ``last_agent_message`` on
-    the Stop payload is now ignored.
-  - **No subagent concept** — sidechain filtering is unnecessary.
-    ``collaboration_mode`` is ``"default"`` for every observed
-    turn_context.
+    the Stop payload is ignored. The hook template documents the
+    shape rules.
+  - **Subagent threads are skipped.** Spawned threads end in
+    ``SubagentStop``, not ``Stop``; their rollouts carry
+    ``session_meta.payload.thread_source == "subagent"``, which the
+    hook and the backfill both drop as defense-in-depth.
   - **System-injected user-role prefixes:** AGENTS.md /
     ``<environment_context>`` / ``<INSTRUCTIONS>`` are injected as
     user-role response_items at session start. Drop them defensively.
@@ -43,16 +46,14 @@ Per-provider quirks (vs claude_code / hermes):
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from .base import JsonSettingsHookInstaller
+from .base import JsonSettingsHookInstaller, home_path
 
 
 class CodexProvider(JsonSettingsHookInstaller):
     name = "codex"
-    hooks_dir = Path.home() / ".codex" / "hooks"
-    settings_path = Path.home() / ".codex" / "hooks.json"
-    journal_path = Path.home() / ".codex" / "kaomoji-journal.jsonl"
+    hooks_dir = home_path(".codex", "hooks")
+    settings_path = home_path(".codex", "hooks.json")
+    journal_path = home_path(".codex", "kaomoji-journal.jsonl")
     # Codex's global instructions file — read by the CLI on every
     # session start, layered before any project-local AGENTS.md (see
     # https://developers.openai.com/codex/guides/agents-md). ``llmoji
@@ -60,7 +61,7 @@ class CodexProvider(JsonSettingsHookInstaller):
     # honors ``AGENTS.override.md`` when present, but we target the
     # base file because that's the conventional global surface and
     # the override file is documented as a temporary swap-in.
-    system_prompt_doc_path = Path.home() / ".codex" / "AGENTS.md"
+    system_prompt_doc_path = home_path(".codex", "AGENTS.md")
     hook_template = "codex.sh.tmpl"
     # Same per-entry-loop reasoning as ClaudeCodeProvider: the validate
     # partial sits inside a ``while read``-loop iterating every

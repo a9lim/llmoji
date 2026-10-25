@@ -8,10 +8,17 @@ live hook appends to. The journal becomes the single source of
 truth for kaomoji emission per provider.
 
   - Claude Code: ``~/.claude/projects/**/*.jsonl`` (per-event JSONL)
-  - Codex:       ``~/.codex/sessions/**/rollout-*.jsonl`` (rollout JSONL)
+  - Codex:       ``~/.codex/sessions/**/rollout-*.jsonl[.zst]`` and
+                  ``~/.codex/archived_sessions/`` (rollout JSONL; codex-cli
+                  zstd-compresses older rollouts in place)
   - Hermes:      ``~/.hermes/sessions/session_*.json`` (whole-session JSON
                   with full ``messages`` list — same shape the live hook
-                  receives via ``extra.conversation_history``)
+                  receives via ``extra.conversation_history``). Hermes
+                  stopped writing these snapshots in v0.21.1 (2026-09-07);
+                  sessions since then live only in its ``state.db``, so
+                  this replays history up to that release.
+  - Grok:        ``~/.grok/sessions/<cwd>/<session>/updates.jsonl`` (ACP
+                  update stream, the file the live hook reads)
 
 Per-row schema (matches the bash hook templates under
 ``llmoji._hooks/``):
@@ -38,12 +45,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ._util import atomic_write_text, scrape_row_to_journal_line
-from .providers import ClaudeCodeProvider, CodexProvider, HermesProvider
+from .providers import ClaudeCodeProvider, CodexProvider, GrokProvider, HermesProvider
 from .scrape import ScrapeRow
 from .sources._common import walk_parents_for_user_text
 from .taxonomy import _KAOMOJI_MAX_LEN, is_kaomoji_candidate
@@ -70,6 +79,48 @@ def _flush_rows(rows: Iterable[ScrapeRow], journal: Path) -> int:
                 + "\n"
             )
     return len(materialized)
+
+
+def _zstd_decoder() -> Any:
+    """A ``bytes -> bytes`` zstd decompressor from whatever the
+    interpreter offers: the stdlib ``compression.zstd`` (Python 3.14+),
+    else the ``zstandard`` package (``pip install 'llmoji[zstd]'``).
+    ``None`` when neither is available."""
+    try:
+        from compression import zstd  # type: ignore[import-not-found]
+    except ImportError:
+        pass
+    else:
+        return zstd.decompress
+    try:
+        import zstandard  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+
+    def decompress(data: bytes) -> bytes:
+        with zstandard.ZstdDecompressor().stream_reader(data) as reader:
+            return reader.read()
+
+    return decompress
+
+
+def _read_session_text(path: Path) -> str | None:
+    """Read a session file, decompressing ``.zst``. ``None`` when the
+    file can't be read, or is compressed and no zstd decoder is
+    installed — :func:`_unreadable_sources` reports the latter."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if path.suffix == ".zst":
+        decompress = _zstd_decoder()
+        if decompress is None:
+            return None
+        try:
+            data = decompress(data)
+        except Exception:  # noqa: BLE001 — a corrupt frame skips the file
+            return None
+    return data.decode("utf-8", errors="replace")
 
 
 def kaomoji_prefix(text: str) -> str:
@@ -114,15 +165,26 @@ def kaomoji_prefix(text: str) -> str:
     return prefix
 
 
+def as_shell_var(text: str) -> str:
+    """``text`` as a live hook holds it after ``VAR=$(... | jq -r ...)``:
+    command substitution drops every trailing newline. The replay
+    applies the same rule to ``assistant_text`` and ``user_text`` so a
+    live row and its replay compare equal — a message ending in a
+    newline otherwise never dedups."""
+    return text.rstrip("\n")
+
+
 def strip_leading_kaomoji(text: str, kaomoji: str) -> str:
     """Drop the leading kaomoji + surrounding whitespace from ``text``.
 
-    Mirrors the jq pipeline both Stop hooks apply to ``assistant_text``:
-    ``sub("^\\s+"; "") | ltrimstr($kaomoji) | sub("^\\s+"; "")``. The
-    ``kaomoji`` argument is what was already extracted from ``text``,
-    so the prefix match is guaranteed.
+    Mirrors the live hooks: the text arrives through command
+    substitution (trailing newlines dropped, see :func:`as_shell_var`),
+    then the journal-write jq applies ``sub("^\\s+"; "") |
+    ltrimstr($kaomoji) | sub("^\\s+"; "")``. The ``kaomoji`` argument is
+    what was already extracted from ``text``, so the prefix match is
+    guaranteed.
     """
-    stripped = text.lstrip()
+    stripped = as_shell_var(text).lstrip()
     if stripped.startswith(kaomoji):
         return stripped[len(kaomoji):].lstrip()
     return stripped
@@ -273,7 +335,7 @@ def _replay_claude_transcript(path: Path) -> Iterator[ScrapeRow]:
             cwd=str(ev.get("cwd") or "") or None,
             first_word=prefix,
             assistant_text=strip_leading_kaomoji(text, prefix),
-            surrounding_user=user_text,
+            surrounding_user=as_shell_var(user_text),
         )
 
 
@@ -306,23 +368,66 @@ _CODEX_INJECTED_PREFIXES: tuple[str, ...] = tuple(
 )
 
 
+def _codex_is_subagent_rollout(events: list[dict[str, Any]]) -> bool:
+    """A spawned subagent thread's rollout — ``session_meta`` says so
+    via ``thread_source == "subagent"`` or a ``source`` object keyed
+    ``subagent``. Mirrors the live hook's ``is_subagent`` check."""
+    for ev in events:
+        if ev.get("type") != "session_meta":
+            continue
+        p = ev.get("payload") or {}
+        if not isinstance(p, dict):
+            return False
+        src = p.get("source")
+        return p.get("thread_source") == "subagent" or (
+            isinstance(src, dict) and "subagent" in src
+        )
+    return False
+
+
+def _codex_agent_message_text(ev: dict[str, Any]) -> tuple[str, str] | None:
+    """``(shape, text)`` if ``ev`` is an agent-message event, else
+    ``None``. ``shape`` is ``"item"`` for the current codex-cli
+    ``item_completed`` / ``AgentMessage`` event and ``"legacy"`` for
+    the older ``agent_message`` event."""
+    if ev.get("type") != "event_msg":
+        return None
+    p = ev.get("payload") or {}
+    if not isinstance(p, dict):
+        return None
+    if p.get("type") == "agent_message":
+        return "legacy", str(p.get("message") or "")
+    if p.get("type") != "item_completed":
+        return None
+    item = p.get("item") or {}
+    if not isinstance(item, dict) or item.get("type") != "AgentMessage":
+        return None
+    content = item.get("content") or []
+    if not isinstance(content, list):
+        return "item", ""
+    return "item", "".join(
+        str(b.get("text") or "")
+        for b in content
+        if isinstance(b, dict) and str(b.get("type") or "").lower() == "text"
+    )
+
+
 def _replay_codex_rollout(path: Path) -> Iterator[ScrapeRow]:
     """Walk a Codex rollout JSONL and emit one journal row per
-    kaomoji-led ``event_msg.agent_message`` event.
+    kaomoji-led agent message.
 
-    Codex emits each model message as its own ``agent_message``
-    event (``payload.message`` carries the text); a tool-heavy turn
-    emits 5–10 of these. Pre-fix this only emitted on
-    ``task_complete.last_agent_message``, dropping every kaomoji-led
-    progress message. Per-turn invariants (``model``, ``cwd``,
-    ``user_text``) are tracked via ``turn_context`` and user
-    response_items as we walk; ``current_turn_id`` is the most
-    recent turn_context's id and applies to every subsequent
-    agent_message until the next turn_context.
+    Codex emits each model message as its own event — an
+    ``item_completed`` ``AgentMessage`` on current codex-cli, an
+    ``agent_message`` on older releases; a tool-heavy turn emits 5–10
+    of these. Each ``turn_context`` opens a turn and supplies its
+    ``model`` and ``cwd``. A turn is read in whichever message shape it
+    carries, item_completed first, so a release that wrote both can't
+    count a message twice — the live hook's rule. ``user_text`` is the
+    latest real user response_item seen so far in the walk. Subagent
+    threads are skipped whole, as the live hook skips them.
     """
-    try:
-        raw = path.read_text(errors="replace")
-    except OSError:
+    raw = _read_session_text(path)
+    if raw is None:
         return
     events: list[dict[str, Any]] = []
     for line in raw.splitlines():
@@ -333,78 +438,72 @@ def _replay_codex_rollout(path: Path) -> Iterator[ScrapeRow]:
             events.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    if _codex_is_subagent_rollout(events):
+        return
 
-    # Index turn_context by turn_id for model + cwd lookup.
-    turn_ctx: dict[str, dict[str, str]] = {}
     session_cwd = ""
     for ev in events:
         if ev.get("type") == "session_meta":
             p = ev.get("payload") or {}
             session_cwd = str(p.get("cwd") or "")
-        elif ev.get("type") == "turn_context":
-            p = ev.get("payload") or {}
-            tid = p.get("turn_id")
-            if tid:
-                turn_ctx[str(tid)] = {
-                    "model": str(p.get("model") or ""),
-                    "cwd": str(p.get("cwd") or session_cwd),
-                }
+            break
 
-    # Walk events in order. Maintain rolling state for the current
-    # turn (turn_id, latest user_text); emit per agent_message.
-    # ``agent_message`` events don't carry turn_id themselves, so we
-    # use the last turn_context's id as a proxy — fine because
-    # rollouts are chronological and turn_context fires at turn
-    # start.
-    current_turn_id = ""
-    latest_user = ""
+    # Split into turns at each turn_context. Events before the first
+    # turn_context (session_meta, injected AGENTS.md items) form a
+    # leading slice with no turn context of its own.
+    turns: list[tuple[dict[str, Any], list[dict[str, Any]]]] = [({}, [])]
     for ev in events:
-        t = ev.get("type")
-        if t == "turn_context":
+        if ev.get("type") == "turn_context":
             p = ev.get("payload") or {}
-            current_turn_id = str(p.get("turn_id") or "")
-            continue
-        if t == "response_item":
-            p = ev.get("payload") or {}
-            if p.get("role") == "user":
-                content = p.get("content") or []
-                if isinstance(content, list):
-                    parts = [
-                        str(b.get("text") or "")
-                        for b in content
-                        if isinstance(b, dict) and b.get("type") == "input_text"
-                    ]
-                    txt = "\n".join(s for s in parts if s)
-                    if txt and not txt.startswith(_CODEX_INJECTED_PREFIXES):
-                        latest_user = txt
-            continue
-        if t != "event_msg":
-            continue
-        p = ev.get("payload") or {}
-        if p.get("type") != "agent_message":
-            continue
-        text = str(p.get("message") or "")
-        if not text:
-            continue
-        prefix = kaomoji_prefix(text)
-        if not prefix:
-            continue
-        ctx = turn_ctx.get(current_turn_id, {})
-        ts = ev.get("timestamp") or ""
-        yield ScrapeRow(
-            source="codex-backfill",
-            model=ctx.get("model", "") or None,
-            timestamp=str(ts),
-            cwd=ctx.get("cwd", session_cwd) or None,
-            first_word=prefix,
-            assistant_text=strip_leading_kaomoji(text, prefix),
-            surrounding_user=latest_user,
-        )
+            turns.append((p if isinstance(p, dict) else {}, []))
+        turns[-1][1].append(ev)
+
+    latest_user = ""
+    for ctx, turn in turns:
+        model = str(ctx.get("model") or "")
+        cwd = str(ctx.get("cwd") or session_cwd)
+        shapes = {
+            m[0] for m in map(_codex_agent_message_text, turn) if m is not None
+        }
+        shape = "item" if "item" in shapes else "legacy"
+        for ev in turn:
+            if ev.get("type") == "response_item":
+                p = ev.get("payload") or {}
+                if p.get("role") == "user":
+                    content = p.get("content") or []
+                    if isinstance(content, list):
+                        parts = [
+                            str(b.get("text") or "")
+                            for b in content
+                            if isinstance(b, dict) and b.get("type") == "input_text"
+                        ]
+                        txt = "\n".join(s for s in parts if s)
+                        if txt and not txt.startswith(_CODEX_INJECTED_PREFIXES):
+                            latest_user = txt
+                continue
+            msg = _codex_agent_message_text(ev)
+            if msg is None or msg[0] != shape:
+                continue
+            text = msg[1]
+            if not text:
+                continue
+            prefix = kaomoji_prefix(text)
+            if not prefix:
+                continue
+            yield ScrapeRow(
+                source="codex-backfill",
+                model=model or None,
+                timestamp=str(ev.get("timestamp") or ""),
+                cwd=cwd or None,
+                first_word=prefix,
+                assistant_text=strip_leading_kaomoji(text, prefix),
+                surrounding_user=as_shell_var(latest_user),
+            )
 
 
 def backfill_codex(rollouts_root: Path, journal: Path) -> int:
     rows: list[ScrapeRow] = []
-    paths = sorted(rollouts_root.rglob("rollout-*.jsonl"))
+    paths = sorted(rollouts_root.rglob("rollout-*.jsonl*"))
     for path in paths:
         rows.extend(_replay_codex_rollout(path))
     return _flush_rows(rows, journal)
@@ -508,7 +607,7 @@ def _replay_hermes_session(path: Path) -> Iterator[ScrapeRow]:
                 cwd=cwd or None,
                 first_word=prefix,
                 assistant_text=strip_leading_kaomoji(content, prefix),
-                surrounding_user=user_text,
+                surrounding_user=as_shell_var(user_text),
             )
 
 
@@ -531,6 +630,197 @@ def backfill_hermes(sessions_root: Path, journal: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Grok sessions: ~/.grok/sessions/<encoded cwd>/<session id>/updates.jsonl
+# ---------------------------------------------------------------------------
+
+
+def _grok_ms_to_iso(ms: Any) -> str:
+    """``_meta.agentTimestampMs`` → second-precision ISO-8601 UTC, the
+    same string jq's ``($ms / 1000 | floor | todate)`` gives the live
+    hook. ``""`` when absent."""
+    if not isinstance(ms, (int, float)):
+        return ""
+    return datetime.fromtimestamp(int(ms // 1000), tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _grok_subagent_session_ids(sessions_root: Path) -> set[str]:
+    """Session ids of every subagent child under ``sessions_root``.
+
+    Grok keeps a child's own session in the normal sessions tree and
+    records it under the parent's ``subagents/`` directory. A child's
+    turns end in ``SubagentStop``, never ``Stop``, so the live hook
+    never journals them; the replay skips them to match. The meta file
+    schema isn't documented, so every directory name under
+    ``subagents/`` and every string value in its ``*.json`` files is
+    taken as a candidate id — only names of real session directories
+    are ever compared against the set. The parent's own id is left
+    out, since a child's meta may well record who spawned it.
+    """
+    ids: set[str] = set()
+    for sub in sessions_root.glob("*/*/subagents"):
+        found: set[str] = set()
+        for entry in sub.rglob("*"):
+            if entry.is_dir():
+                found.add(entry.name)
+            elif entry.suffix == ".json":
+                try:
+                    data = json.loads(entry.read_text(errors="replace"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                stack: list[Any] = [data]
+                while stack:
+                    node = stack.pop()
+                    if isinstance(node, dict):
+                        stack.extend(node.values())
+                    elif isinstance(node, list):
+                        stack.extend(node)
+                    elif isinstance(node, str):
+                        found.add(node)
+        found.discard(sub.parent.name)
+        ids |= found
+    return ids
+
+
+def _replay_grok_session(path: Path) -> Iterator[ScrapeRow]:
+    """Walk one Grok ``updates.jsonl`` and emit one journal row per
+    kaomoji-led agent message.
+
+    Mirrors the live hook's fold: ``agent_message_chunk`` updates
+    carrying ``_meta.promptId`` belong to that prompt's turn, a run of
+    consecutive chunks from one turn is one message, and any other
+    update ends it. A turn's ``user_text`` is the latest
+    ``user_message_chunk`` text seen before its first chunk. Its model
+    is the dominant key of the turn's ``turn_completed.modelUsage``
+    (output tokens), falling back to the latest ``model_id`` in the
+    sibling ``chat_history.jsonl`` — the live hook reads the latter,
+    since ``turn_completed`` lands after the Stop hook runs.
+    """
+    raw = _read_session_text(path)
+    if raw is None:
+        return
+    updates: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            updates.append(row)
+
+    session_dir = path.parent
+    cwd = ""
+    try:
+        summary = json.loads((session_dir / "summary.json").read_text())
+        info = summary.get("info") if isinstance(summary, dict) else None
+        if isinstance(info, dict):
+            cwd = str(info.get("cwd") or "")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    fallback_model = ""
+    chat = _read_session_text(session_dir / "chat_history.jsonl")
+    for line in (chat or "").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict) and row.get("type") == "assistant" and row.get("model_id"):
+            fallback_model = str(row["model_id"])
+
+    # (pid, text, ts) per message, in stream order; user text per pid.
+    messages: list[list[str]] = []
+    turn_user: dict[str, str] = {}
+    turn_model: dict[str, str] = {}
+    user = ""
+    ucur: str | None = None
+    cur: list[str] | None = None
+    for row in updates:
+        params = row.get("params") or {}
+        if not isinstance(params, dict):
+            continue
+        u = params.get("update") or {}
+        meta = params.get("_meta") or {}
+        if not isinstance(u, dict) or not isinstance(meta, dict):
+            continue
+        kind = u.get("sessionUpdate") or ""
+        content = u.get("content")
+        text = str(content.get("text") or "") if isinstance(content, dict) else ""
+        pid = str(meta.get("promptId") or "")
+        if kind == "agent_message_chunk" and pid:
+            if cur is not None and cur[0] == pid:
+                cur[1] += text
+            else:
+                if cur is not None:
+                    messages.append(cur)
+                turn_user.setdefault(pid, user)
+                cur = [pid, text, _grok_ms_to_iso(meta.get("agentTimestampMs"))]
+            ucur = None
+            continue
+        if cur is not None:
+            messages.append(cur)
+            cur = None
+        if kind == "user_message_chunk":
+            ucur = text if ucur is None else ucur + text
+            user = ucur
+            continue
+        ucur = None
+        if kind == "turn_completed":
+            usage = (u.get("usage") or {}).get("modelUsage") or {}
+            if isinstance(usage, dict) and usage:
+                turn_model[str(u.get("prompt_id") or "")] = max(
+                    usage,
+                    key=lambda m: (
+                        usage[m].get("outputTokens") or 0
+                        if isinstance(usage[m], dict) else 0
+                    ),
+                )
+    if cur is not None:
+        messages.append(cur)
+
+    for pid, text, ts in messages:
+        if not text:
+            continue
+        prefix = kaomoji_prefix(text)
+        if not prefix:
+            continue
+        yield ScrapeRow(
+            source="grok-backfill",
+            model=turn_model.get(pid) or fallback_model or None,
+            timestamp=ts,
+            cwd=cwd or None,
+            first_word=prefix,
+            assistant_text=strip_leading_kaomoji(text, prefix),
+            surrounding_user=as_shell_var(turn_user.get(pid, "")),
+        )
+
+
+def _grok_session_paths(sessions_root: Path) -> list[Path]:
+    """Every main-agent ``updates.jsonl`` under ``sessions_root``,
+    sorted — subagent children excluded (see
+    :func:`_grok_subagent_session_ids`)."""
+    children = _grok_subagent_session_ids(sessions_root)
+    return [
+        p for p in sorted(sessions_root.glob("*/*/updates.jsonl"))
+        if p.parent.name not in children
+    ]
+
+
+def backfill_grok(sessions_root: Path, journal: Path) -> int:
+    """Walk every main-agent session under ``sessions_root``, write
+    chronologically-sorted journal rows to ``journal``. Returns row
+    count."""
+    rows: list[ScrapeRow] = []
+    for path in _grok_session_paths(sessions_root):
+        rows.extend(_replay_grok_session(path))
+    return _flush_rows(rows, journal)
+
+
+# ---------------------------------------------------------------------------
 # `llmoji import` — dedup-aware merge into the live journal
 # ---------------------------------------------------------------------------
 #
@@ -546,10 +836,16 @@ def backfill_hermes(sessions_root: Path, journal: Path) -> int:
 # the old content or the merged content, never half.
 #
 # Dedup key: hash of (ts, model, assistant_text). ``ts`` is set per
-# event in claude_code/codex sources and per session in hermes (whose
-# session JSON only persists session-level timestamps); collisions
-# inside one session for hermes are intentional — same key, same
-# row, dedup folds them.
+# event in claude_code/codex/grok sources and per session in hermes
+# (whose session JSON only persists session-level timestamps);
+# collisions inside one session for hermes are intentional — same
+# key, same row, dedup folds them.
+#
+# Live rows written before 2.2 carry the hook's fire time instead of
+# the message's own time, so they never share a key with the replayed
+# copy of the same message. :func:`_LegacyRowPool` folds those by
+# (model, assistant_text) inside a time window, one live row per
+# replayed row.
 
 
 @dataclass
@@ -560,10 +856,13 @@ class ImportResult:
     ``--since`` filtering). ``rows_novel`` is what made it past the
     dedup check and got appended. ``rows_seen - rows_novel`` is the
     dedup hit count — typically every row on a re-import.
+    ``unreadable`` counts source files skipped because they're
+    zstd-compressed and no decoder is installed.
     """
 
     rows_seen: int
     rows_novel: int
+    unreadable: int = 0
 
 
 def _dedup_key_for_journal_row(
@@ -582,13 +881,12 @@ def _dedup_key_for_journal_row(
     return h.hexdigest()[:16]
 
 
-def _journal_dedup_keys(journal_path: Path) -> set[str]:
-    """Read existing journal rows and build the dedup-key set.
-    Tolerates malformed lines (skips silently — analyze re-walks the
-    journal anyway and surfaces malformed rows there)."""
-    keys: set[str] = set()
+def _iter_journal_rows(journal_path: Path) -> Iterator[dict[str, Any]]:
+    """Existing journal rows as dicts. Tolerates malformed lines
+    (skips silently — analyze re-walks the journal anyway and surfaces
+    malformed rows there)."""
     if not journal_path.exists():
-        return keys
+        return
     with journal_path.open() as f:
         for line in f:
             line = line.strip()
@@ -598,14 +896,109 @@ def _journal_dedup_keys(journal_path: Path) -> set[str]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(row, dict):
-                continue
-            keys.add(_dedup_key_for_journal_row(
-                str(row.get("ts") or ""),
-                str(row.get("model") or ""),
-                str(row.get("assistant_text") or ""),
-            ))
-    return keys
+            if isinstance(row, dict):
+                yield row
+
+
+def _journal_dedup_keys(journal_path: Path) -> set[str]:
+    """Read existing journal rows and build the dedup-key set."""
+    return {
+        _dedup_key_for_journal_row(
+            str(row.get("ts") or ""),
+            str(row.get("model") or ""),
+            str(row.get("assistant_text") or ""),
+        )
+        for row in _iter_journal_rows(journal_path)
+    }
+
+
+def _parse_ts(ts: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+# How far after a message a pre-2.2 live hook could have stamped it:
+# the hook ran at turn end, and long agentic turns run for hours.
+_LEGACY_FIRE_WINDOW = timedelta(hours=24)
+# A fire time is never before its message, but the hook truncated to
+# whole seconds while transcripts keep milliseconds.
+_LEGACY_FIRE_SLACK = timedelta(seconds=5)
+
+
+# The only shape a pre-2.2 live hook wrote: ``date -u
+# +%Y-%m-%dT%H:%M:%SZ``, whole seconds. Rows a replay wrote keep the
+# transcript's milliseconds and are never fold candidates.
+_FIRE_TIME_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class _LegacyRowPool:
+    """Existing journal rows that a replayed row might duplicate under
+    a different timestamp.
+
+    Before 2.2 the live hooks stamped hook fire time, so the journal
+    holds a message under one ``ts`` and its replay under another.
+    Exact-key dedup misses that pair, and every ``llmoji import``
+    after install counted the live-captured messages again. The pool
+    matches a replayed row to an unclaimed existing row in fire-time
+    format with the same model, kaomoji and text whose ``ts`` falls in
+    ``[ts - slack, ts + window]``. Each existing row absorbs at most one
+    replayed row, exact or folded, so two genuine repeats of a short
+    message both land when both have their own live rows.
+
+    It's a heuristic and can miscount in one direction: when a live
+    row's own message is no longer replayable (its transcript was
+    deleted) and an identical message — same model, face and text —
+    sits up to a day before it, the earlier one folds into that row and
+    one message goes uncounted. ``cwd`` and ``user_text`` would narrow
+    that further but cost real folds: the pre-2.2 hooks and the replay
+    resolve them differently often enough to matter (22 and 35 of 885
+    on one real journal).
+
+    Callers claim every exact-key match first (:meth:`claim_exact`)
+    and only then try :meth:`claim_legacy` on what's left, both over
+    the whole replay set; otherwise a fuzzy claim could take the row a
+    later replayed row matches exactly, and drop a real message.
+    """
+
+    def __init__(self, journal_path: Path) -> None:
+        self._exact: dict[str, list[int]] = defaultdict(list)
+        self._fold: dict[tuple[str, str, str], list[tuple[datetime, int]]] = defaultdict(list)
+        self._claimed: set[int] = set()
+        for i, row in enumerate(_iter_journal_rows(journal_path)):
+            ts = str(row.get("ts") or "")
+            model = str(row.get("model") or "")
+            text = str(row.get("assistant_text") or "")
+            self._exact[_dedup_key_for_journal_row(ts, model, text)].append(i)
+            parsed = _parse_ts(ts) if _FIRE_TIME_TS_RE.match(ts) else None
+            if parsed is not None:
+                kaomoji = str(row.get("kaomoji") or "")
+                self._fold[(model, kaomoji, text)].append((parsed, i))
+        for candidates in self._fold.values():
+            candidates.sort()
+
+    def claim_exact(self, ts: str, model: str, text: str) -> bool:
+        for i in self._exact.get(_dedup_key_for_journal_row(ts, model, text), ()):
+            if i not in self._claimed:
+                self._claimed.add(i)
+                return True
+        return False
+
+    def claim_legacy(self, ts: str, model: str, kaomoji: str, text: str) -> bool:
+        msg_time = _parse_ts(ts)
+        if msg_time is None:
+            return False
+        lo = msg_time - _LEGACY_FIRE_SLACK
+        hi = msg_time + _LEGACY_FIRE_WINDOW
+        for t, i in self._fold.get((model, kaomoji, text), ()):
+            if i not in self._claimed and lo <= t <= hi:
+                self._claimed.add(i)
+                return True
+        return False
 
 
 # Source-path resolvers for each provider. Single source of truth for
@@ -613,50 +1006,80 @@ def _journal_dedup_keys(journal_path: Path) -> set[str]:
 # — the existing ``backfill_*`` callers pass the root in, but the CLI
 # ``import`` path resolves via the provider class, so the convention
 # pins here.
-_PROVIDER_SOURCE_GLOBS: dict[str, tuple[type, str, str]] = {
-    # (provider_class, root_subpath_under_settings_parent, glob_pattern)
-    "claude_code": (ClaudeCodeProvider, "projects", "**/*.jsonl"),
-    "codex":       (CodexProvider, "sessions", "**/rollout-*.jsonl"),
-    "hermes":      (HermesProvider, "sessions", "session_*.json"),
+_PROVIDER_SOURCE_GLOBS: dict[str, tuple[type, tuple[tuple[str, str], ...]]] = {
+    # provider_class, ((root_subpath_under_home_dir, glob_pattern), ...)
+    "claude_code": (ClaudeCodeProvider, (("projects", "**/*.jsonl"),)),
+    "codex": (CodexProvider, (
+        ("sessions", "**/rollout-*.jsonl"),
+        ("sessions", "**/rollout-*.jsonl.zst"),
+        ("archived_sessions", "rollout-*.jsonl"),
+        ("archived_sessions", "rollout-*.jsonl.zst"),
+    )),
+    "hermes": (HermesProvider, (("sessions", "session_*.json"),)),
+    "grok": (GrokProvider, (("sessions", "*/*/updates.jsonl"),)),
 }
 
 # Public-ish view of which providers ``import_provider`` can replay
 # from native session files. The TS-plugin providers (opencode,
 # openclaw) aren't here — their hosts don't persist a transcript-on-
 # disk shape we can replay, so live-hook capture is the only path
-# for those. CLI uses this to (a) tighten ``llmoji import`` 's
-# ``choices=`` to providers we can actually serve, and (b) drive the
-# no-arg autodetect path.
+# for those. Antigravity isn't either: its transcripts carry no
+# per-message model id (that lives in protobuf blobs in a SQLite
+# store), and every bundle row is keyed by model. CLI uses this to
+# (a) tighten ``llmoji import`` 's ``choices=`` to providers we can
+# actually serve, and (b) drive the no-arg autodetect path.
 IMPORTABLE_PROVIDERS: tuple[str, ...] = tuple(_PROVIDER_SOURCE_GLOBS)
 
 
-def _iter_rows_for_provider(name: str) -> Iterator[ScrapeRow]:
-    """Walk the canonical source path for ``name`` and yield every
-    :class:`ScrapeRow` the corresponding ``backfill_*`` function would
-    produce. Same iteration order: ``sorted(rglob/glob)``. Skips
-    cleanly when the source root doesn't exist (a provider that's
-    been installed but has no session files yet).
-    """
+def _source_paths(name: str) -> list[Path]:
+    """Every source file for ``name``, in replay order: each
+    ``(subpath, pattern)`` root in turn, sorted within it. Grok's
+    subagent child sessions are left out (see
+    :func:`_grok_session_paths`)."""
     if name not in _PROVIDER_SOURCE_GLOBS:
         raise ValueError(
             f"unknown provider {name!r}; "
             f"known: {sorted(_PROVIDER_SOURCE_GLOBS)}"
         )
-    cls, subpath, pattern = _PROVIDER_SOURCE_GLOBS[name]
-    provider = cls()
-    root = provider.settings_path.parent / subpath
-    if not root.exists():
-        return
-    paths = sorted(root.glob(pattern))
-    if name == "claude_code":
-        for path in paths:
-            yield from _replay_claude_transcript(path)
-    elif name == "codex":
-        for path in paths:
-            yield from _replay_codex_rollout(path)
-    elif name == "hermes":
-        for path in paths:
-            yield from _replay_hermes_session(path)
+    cls, sources = _PROVIDER_SOURCE_GLOBS[name]
+    home = cls().home_dir
+    if name == "grok":
+        root = home / sources[0][0]
+        return _grok_session_paths(root) if root.exists() else []
+    paths: list[Path] = []
+    for subpath, pattern in sources:
+        root = home / subpath
+        if root.exists():
+            paths.extend(sorted(root.glob(pattern)))
+    return paths
+
+
+def _unreadable_sources(name: str) -> int:
+    """How many of ``name``'s source files are zstd-compressed with no
+    decoder installed — skipped by the replay, reported by the CLI."""
+    if _zstd_decoder() is not None:
+        return 0
+    return sum(1 for p in _source_paths(name) if p.suffix == ".zst")
+
+
+_REPLAYERS: dict[str, Any] = {
+    "claude_code": _replay_claude_transcript,
+    "codex": _replay_codex_rollout,
+    "hermes": _replay_hermes_session,
+    "grok": _replay_grok_session,
+}
+
+
+def _iter_rows_for_provider(name: str) -> Iterator[ScrapeRow]:
+    """Walk the canonical source paths for ``name`` and yield every
+    :class:`ScrapeRow` the corresponding ``backfill_*`` function would
+    produce. Skips cleanly when a source root doesn't exist (a provider
+    that's been installed but has no session files yet).
+    """
+    paths = _source_paths(name)  # validates ``name``
+    replay = _REPLAYERS[name]
+    for path in paths:
+        yield from replay(path)
 
 
 def _journal_for(name: str) -> Path:
@@ -667,7 +1090,7 @@ def _journal_for(name: str) -> Path:
             f"unknown provider {name!r}; "
             f"known: {sorted(_PROVIDER_SOURCE_GLOBS)}"
         )
-    cls, _, _ = _PROVIDER_SOURCE_GLOBS[name]
+    cls, _ = _PROVIDER_SOURCE_GLOBS[name]
     return cls().journal_path
 
 
@@ -682,9 +1105,11 @@ def import_provider(
     idempotent.
 
     ``since``: ISO-8601 timestamp string; rows with ``ts < since`` are
-    skipped. Comparison is lexicographic on the raw timestamp strings,
-    which is correct for ISO-8601-with-Z (the only format the sources
-    emit).
+    neither counted nor appended. Comparison is lexicographic on the
+    raw timestamp strings, which is correct for ISO-8601-with-Z (the
+    only format the sources emit). Dedup still runs over every replayed
+    row, so an older message keeps its claim on the journal row that
+    is its own and can't leave it for a newer one to fold into.
 
     ``dry_run``: walk + dedup but don't write the journal. Returned
     ``ImportResult`` carries the same counts the real run would, so
@@ -696,24 +1121,42 @@ def import_provider(
     operation.
     """
     journal_path = _journal_for(name)
-    existing_keys = _journal_dedup_keys(journal_path)
+    pool = _LegacyRowPool(journal_path)
 
-    rows_seen = 0
+    replayed = list(_iter_rows_for_provider(name))
+
+    def in_window(r: ScrapeRow) -> bool:
+        return since is None or r.timestamp >= since
+
+    rows_seen = sum(1 for r in replayed if in_window(r))
+    # Exact matches first, then the pre-2.2 fire-time fold over what's
+    # left, in timestamp order (see _LegacyRowPool) — both over every
+    # replayed row; ``since`` only gates what's appended. A replayed
+    # row whose key is already taken — by a journal row or an earlier
+    # replayed copy — is a duplicate of it and never reaches the fold.
+    taken: set[str] = set()
+    unmatched: list[ScrapeRow] = []
+    for r in replayed:
+        model = r.model or ""
+        text = r.assistant_text or ""
+        key = _dedup_key_for_journal_row(r.timestamp, model, text)
+        if pool.claim_exact(r.timestamp, model, text) or key in taken:
+            taken.add(key)
+            continue
+        taken.add(key)
+        unmatched.append(r)
     novel: list[ScrapeRow] = []
-    for r in _iter_rows_for_provider(name):
-        if since is not None and r.timestamp < since:
+    for r in sorted(unmatched, key=lambda r: r.timestamp):
+        if pool.claim_legacy(r.timestamp, r.model or "", r.first_word, r.assistant_text or ""):
             continue
-        rows_seen += 1
-        key = _dedup_key_for_journal_row(
-            r.timestamp, r.model or "", r.assistant_text or "",
-        )
-        if key in existing_keys:
-            continue
-        existing_keys.add(key)
-        novel.append(r)
+        if in_window(r):
+            novel.append(r)
+    unreadable = _unreadable_sources(name)
 
     if dry_run or not novel:
-        return ImportResult(rows_seen=rows_seen, rows_novel=len(novel))
+        return ImportResult(
+            rows_seen=rows_seen, rows_novel=len(novel), unreadable=unreadable,
+        )
 
     # Atomic merge: read existing text (if any), append novel rows
     # sorted by timestamp, write the whole concatenation via
@@ -731,4 +1174,6 @@ def import_provider(
     new_text = existing_text + "\n".join(new_lines) + "\n"
     atomic_write_text(journal_path, new_text)
 
-    return ImportResult(rows_seen=rows_seen, rows_novel=len(novel))
+    return ImportResult(
+        rows_seen=rows_seen, rows_novel=len(novel), unreadable=unreadable,
+    )

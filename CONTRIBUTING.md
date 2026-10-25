@@ -40,19 +40,19 @@ llmoji ships two kinds of installers.
 
 ### Bash hook providers
 
-For harnesses that expose shell hooks (Claude Code, Codex, Hermes), a first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs. Please keep the following in mind:
+For harnesses that expose shell hooks (Claude Code, Codex, Hermes, Grok, Antigravity), a first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs. Please keep the following in mind:
 
 1. Where the harness keeps its hooks dir and settings file.
 2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
 3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code and Codex, YAML for Hermes), please add a new format alongside. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, and `nudge_event`, then override `_check_registrations` if the format isn't JSON-shaped. Leave `nudge_message` alone — it's inherited from `HookInstaller` (the single canonical `NUDGE_MESSAGE`); re-stating it per provider is the cross-corpus drift bug 2.1 removed. Please also set `system_prompt_doc_path` to the harness's system prompt doc.
+If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code, Codex and Grok, YAML for Hermes; Antigravity writes its own plugin directory), please add a new format alongside. Declare path defaults with `home_path(...)`, not `Path.home() / ...` in the class body — the latter is evaluated at import and escapes the test suite's `HOME` sandbox. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, and `nudge_event`, then override `_check_registrations` if the format isn't JSON-shaped. If the harness has no way to put text in front of the model each turn, set `hard_unsupported_reason` instead (see `GrokProvider`). Leave `nudge_message` alone — it's inherited from `HookInstaller` (the single canonical `NUDGE_MESSAGE`); re-stating it per provider is the cross-corpus drift bug 2.1 removed. Please also set `system_prompt_doc_path` to the harness's system prompt doc.
 
 Please include in the PR:
 
-- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl` or `hermes_nudge.sh.tmpl`.
+- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl`, `hermes_nudge.sh.tmpl` or `antigravity_nudge.sh.tmpl`. Set `ROW_TS` per row to the message's own transcript timestamp when the source has one, so live rows match what `llmoji import` replays.
 - The `HookInstaller` subclass with `system_injected_prefixes` (empty if the harness doesn't inject system-role-as-user-text payloads) and `system_prompt_doc_path`.
-- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage. 
+- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path, and a hook-vs-backfill case in `test_pipeline_parity.py` if the harness keeps replayable transcripts. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage. 
 - A short note on the harness's docs version and where the kaomoji lands in the stop payload.
 
 ### TS plugin providers
@@ -71,7 +71,7 @@ The `PluginInstaller` subclass needs:
 - `plugin_files`: list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
 - `journal_path`: `~/.llmoji/journals/<harness>.jsonl` by convention.
 - `system_prompt_doc_path`: the harness's identity or global-instructions file. `install --soft` appends a `## Kaomoji` heading and the nudge wording there.
-- `is_present`: by default returns `plugin_dir.parent.exists()`; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the parent-dir check matches the bash providers).
+- `home_dir`: by default `plugin_dir.parent`, which `is_present` checks; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the check matches the bash providers).
 - `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults. The base `_register` accepts `include_nudge`.
 
 Please include in the PR:

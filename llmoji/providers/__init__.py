@@ -4,12 +4,13 @@ A *provider* is one coding harness whose per-turn data-capture
 contract llmoji can install into. Two installer flavors live under
 this package:
 
-  - **bash hook** (claude_code, codex, hermes) — the traditional
-    shape. Each provider ships a bash template under
+  - **bash hook** (claude_code, codex, hermes, grok, antigravity) —
+    the traditional shape. Each provider ships a bash template under
     :mod:`llmoji._hooks`, gets rendered + written to the harness's
     hooks directory, and is registered via the harness's settings
-    file (JSON for claude_code/codex, YAML for hermes). See
-    :class:`HookInstaller` and :class:`JsonSettingsHookInstaller`.
+    file (JSON for claude_code/codex/grok, YAML for hermes, a whole
+    plugin directory for antigravity). See :class:`HookInstaller`
+    and :class:`JsonSettingsHookInstaller`.
   - **TS plugin** (opencode, openclaw, since 1.3) — the harness has
     no shell-hook escape hatch but does support TypeScript plugins.
     Each provider ships one or more ``.ts.tmpl`` / ``.json.tmpl``
@@ -52,28 +53,33 @@ Three things drive the abstraction:
      contract motivated users on unsupported harnesses can use).
 
 Cross-corpus invariant note: 1.3 promotes opencode + openclaw to
-first-class. The ``providers_seen`` list in shipped bundles now
-includes ``opencode`` / ``openclaw`` rows; flag this on the dataset
-card.
+first-class, and 2.2 adds grok + antigravity. The ``providers_seen``
+list in shipped bundles includes their rows; flag this on the
+dataset card.
 """
 
 from __future__ import annotations
 
+from .antigravity import AntigravityProvider
 from .base import HookInstaller, PluginInstaller, ProviderStatus
 from .claude_code import ClaudeCodeProvider
 from .codex import CodexProvider
+from .grok import GrokProvider
 from .hermes import HermesProvider
 from .opencode import OpencodeProvider
 from .openclaw import OpenclawProvider
 
 # Registry order is the user-facing default order for ``llmoji status``
-# and similar listings. Bash providers (the original three) come
-# first in install-popularity order; plugin providers follow because
-# they're newer and the host harnesses are less common in the corpus.
+# and similar listings. Bash providers come first (the original three
+# in install-popularity order, then the 2.2 additions); plugin
+# providers follow because the host harnesses are less common in the
+# corpus.
 PROVIDERS: dict[str, type[HookInstaller]] = {
     "claude_code": ClaudeCodeProvider,
     "codex": CodexProvider,
     "hermes": HermesProvider,
+    "grok": GrokProvider,
+    "antigravity": AntigravityProvider,
     "opencode": OpencodeProvider,
     "openclaw": OpenclawProvider,
 }
@@ -96,6 +102,8 @@ __all__ = [
     "ClaudeCodeProvider",
     "CodexProvider",
     "HermesProvider",
+    "GrokProvider",
+    "AntigravityProvider",
     "OpencodeProvider",
     "OpenclawProvider",
     "PROVIDERS",

@@ -104,7 +104,7 @@ from ruamel.yaml import YAML, YAMLError
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 
 from .._util import atomic_write_text
-from .base import HookInstaller, SettingsCorruptError
+from .base import HookInstaller, SettingsCorruptError, home_path
 
 
 def _yaml_parser() -> YAML:
@@ -168,9 +168,9 @@ def _block_end_excl(
 
 class HermesProvider(HookInstaller):
     name = "hermes"
-    hooks_dir = Path.home() / ".hermes" / "agent-hooks"
-    settings_path = Path.home() / ".hermes" / "config.yaml"
-    journal_path = Path.home() / ".hermes" / "kaomoji-journal.jsonl"
+    hooks_dir = home_path(".hermes", "agent-hooks")
+    settings_path = home_path(".hermes", "config.yaml")
+    journal_path = home_path(".hermes", "kaomoji-journal.jsonl")
     # Hermes's identity / voice file — slot #1 of the system prompt
     # (per https://hermes-agent.nousresearch.com/docs/user-guide/
     # features/personality), the documented home for tone /
@@ -180,7 +180,7 @@ class HermesProvider(HookInstaller):
     # starter SOUL.md on first run if one doesn't exist; ``llmoji
     # install --soft`` writes a marker-fenced block at EOF so it
     # composes with whatever identity prose the user has already.
-    system_prompt_doc_path = Path.home() / ".hermes" / "SOUL.md"
+    system_prompt_doc_path = home_path(".hermes", "SOUL.md")
     hook_template = "hermes.sh.tmpl"
     hook_filename = "post-llm-call.sh"
     main_event = "post_llm_call"

@@ -1,6 +1,6 @@
 """OpenClaw provider — TS plugin bundle at
-``~/.openclaw/plugins/llmoji-kaomoji/`` plus a ``config.json`` flag
-flip to grant conversation-hook access.
+``~/.openclaw/extensions/llmoji-kaomoji/`` plus an ``openclaw.json``
+flag flip to grant conversation-hook access.
 
 OpenClaw (https://openclaw.ai) ships a TypeScript plugin SDK with
 ``definePluginEntry`` + ``api.on(hookName, handler)``. ``llm_input``
@@ -12,10 +12,20 @@ fire those hooks for the plugin and the journal stays empty.
 Install lifecycle:
 
   1. Render ``index.ts`` + ``openclaw.plugin.json`` from package
-     templates into ``~/.openclaw/plugins/llmoji-kaomoji/``.
-  2. Read ``~/.openclaw/config.json``, set
+     templates into ``~/.openclaw/extensions/llmoji-kaomoji/`` — the
+     global plugin root OpenClaw scans (``resolveDefaultPluginExtensionsDir``
+     in ``src/plugins/install-paths.ts``).
+  2. Read ``~/.openclaw/openclaw.json`` (``CONFIG_FILENAME`` in
+     ``src/config/paths.ts``), set
      ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess
      = true``, atomic-write back.
+
+Before 2.2 the bundle went to ``~/.openclaw/plugins/llmoji-kaomoji/``
+and the flag to ``~/.openclaw/config.json``. OpenClaw reads neither —
+both paths were wrong from the provider's first release (1.3.0), and
+OpenClaw v2026.3.1 already used the current ones — so no earlier
+install ever captured anything. Install and uninstall now delete what
+those versions left at the old paths.
 
 Uninstall is the inverse — remove the plugin dir, unset the
 ``llmoji-kaomoji`` entry under ``plugins.entries`` (drop the whole
@@ -27,6 +37,10 @@ Per-provider notes (vs claude_code / codex / hermes / opencode):
 
   - **No bash hook.** Same as opencode — ``hook_path`` points at
     ``index.ts``.
+  - **Settings file is JSON5 to OpenClaw, strict JSON to us.**
+    OpenClaw parses ``openclaw.json`` as JSON5; a hand-edited file
+    with comments or trailing commas is refused with
+    :class:`SettingsCorruptError` rather than rewritten without them.
   - **Settings file is JSON, but the shape isn't the
     ``hooks``-keyed shape claude_code / codex use.** The base
     :class:`JsonSettingsHookInstaller` helpers don't apply; this
@@ -55,24 +69,25 @@ from .base import (
     PluginInstaller,
     SettingsCorruptError,
     _load_json_strict,
+    home_path,
 )
 
 # OpenClaw plugin id used both as the plugin directory name and the
-# key under ``plugins.entries`` in ``~/.openclaw/config.json``.
+# key under ``plugins.entries`` in ``~/.openclaw/openclaw.json``.
 # Matches the ``id`` field in the rendered ``openclaw.plugin.json``.
 PLUGIN_ID = "llmoji-kaomoji"
 
 
 class OpenclawProvider(PluginInstaller):
     name = "openclaw"
-    # Plugin dir = ``~/.openclaw/plugins/llmoji-kaomoji/`` — OpenClaw's
+    # Plugin dir = ``~/.openclaw/extensions/llmoji-kaomoji/`` — OpenClaw's
     # ``plugins install <path>`` command copies the entire bundle
     # directory into this location, but ``llmoji install`` writes the
     # rendered files directly so the user doesn't need to invoke
     # OpenClaw's own CLI for setup.
-    plugin_dir = Path.home() / ".openclaw" / "plugins" / PLUGIN_ID
-    settings_path = Path.home() / ".openclaw" / "config.json"
-    journal_path = Path.home() / ".llmoji" / "journals" / "openclaw.jsonl"
+    plugin_dir = home_path(".openclaw", "extensions", PLUGIN_ID)
+    settings_path = home_path(".openclaw", "openclaw.json")
+    journal_path = home_path(".llmoji", "journals", "openclaw.jsonl")
     # OpenClaw's persona / voice file — slot #1 of the assembled
     # system prompt per https://docs.openclaw.ai/concepts/system-prompt.
     # The workspace dir is configurable via ``agents.defaults.workspace``
@@ -80,29 +95,32 @@ class OpenclawProvider(PluginInstaller):
     # (voice / identity) rather than AGENTS.md (procedure / SOP) for
     # the same reason as Hermes: the kaomoji-leading reminder is
     # voice-coded.
-    system_prompt_doc_path = (
-        Path.home() / ".openclaw" / "workspace" / "SOUL.md"
-    )
+    system_prompt_doc_path = home_path(".openclaw", "workspace", "SOUL.md")
     plugin_files = [
         ("openclaw_index.ts.tmpl", "index.ts"),
         ("openclaw_plugin.json.tmpl", "openclaw.plugin.json"),
     ]
+    # Where llmoji < 2.2 wrote the bundle and the flag. OpenClaw reads
+    # neither path; install and uninstall clean them up.
+    legacy_plugin_dir = home_path(".openclaw", "plugins", PLUGIN_ID)
+    legacy_settings_path = home_path(".openclaw", "config.json")
 
     # --- presence detection ---
 
-    def is_present(self) -> bool:
+    @property
+    def home_dir(self) -> Path:
         """OpenClaw's home dir is ``~/.openclaw/``. Match the bash
-        providers' ``settings_path.parent.exists()`` rule rather than
+        providers' ``settings_path.parent`` rule rather than
         :class:`PluginInstaller`'s default ``plugin_dir.parent`` — the
-        plugin_dir parent (``~/.openclaw/plugins/``) doesn't exist on
+        plugin_dir parent (``~/.openclaw/extensions/``) doesn't exist on
         a fresh OpenClaw install, so the default would false-negative.
         """
-        return self.settings_path.parent.exists()
+        return self.settings_path.parent
 
     # --- registration via plugins.entries.<id>.hooks.allowConversationAccess ---
 
     def _register(self, *, include_nudge: bool = True) -> None:
-        """Atomic read-modify-write of ``~/.openclaw/config.json`` to
+        """Atomic read-modify-write of ``~/.openclaw/openclaw.json`` to
         set ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess
         = true``. Idempotent — re-running is a no-op when the flag
         is already on. Refuses to mutate a corrupt config (loud
@@ -153,51 +171,40 @@ class OpenclawProvider(PluginInstaller):
             )
         hooks: dict[str, Any] = entry.setdefault("hooks", {})
 
-        if hooks.get("allowConversationAccess") is True:
-            return  # idempotent — flag already set
-        hooks["allowConversationAccess"] = True
-        write_json(self.settings_path, cfg)
+        if hooks.get("allowConversationAccess") is not True:
+            hooks["allowConversationAccess"] = True
+            write_json(self.settings_path, cfg)
+        self._remove_legacy_install()
 
     def _unregister(self) -> None:
         """Inverse: drop the ``llmoji-kaomoji`` entry from
-        ``plugins.entries``. No-op when the config file is missing,
-        absent the entry, or unparseable (refusing to mutate a
-        corrupt config matches the JSON-settings policy in the base
-        class).
+        ``plugins.entries`` (see :func:`_drop_plugin_entry`), then
+        clear anything an older version left at the legacy paths."""
+        _drop_plugin_entry(self.settings_path)
+        self._remove_legacy_install()
 
-        We drop the whole sub-mapping rather than just toggling the
-        flag back to ``false`` so a clean uninstall leaves no
-        ``llmoji-kaomoji`` mention in the user's config — same
-        contract as the bash providers' uninstall.
-        """
-        if not self.settings_path.exists():
-            return
-        try:
-            cfg = _load_json_strict(self.settings_path)
-        except SettingsCorruptError:
-            return
-
-        plugins = cfg.get("plugins")
-        if not isinstance(plugins, dict):
-            return
-        entries = plugins.get("entries")
-        if not isinstance(entries, dict):
-            return
-        if PLUGIN_ID not in entries:
-            return
-        entries.pop(PLUGIN_ID, None)
-
-        # Tidy up empty containers so the config doesn't carry a
-        # ``"entries": {}`` / ``"plugins": {}`` shape after removal.
-        if not entries:
-            plugins.pop("entries", None)
-        if not plugins:
-            cfg.pop("plugins", None)
-        write_json(self.settings_path, cfg)
+    def _remove_legacy_install(self) -> None:
+        """Delete what llmoji < 2.2 left at the paths OpenClaw never
+        read: the two bundle files under ``~/.openclaw/plugins/
+        llmoji-kaomoji/`` (and the directories, once empty) and our
+        entry in ``~/.openclaw/config.json`` (and the file, once
+        nothing else is in it). Anything else found there is left
+        alone."""
+        for _, dest_filename in self.plugin_files:
+            stale = self.legacy_plugin_dir / dest_filename
+            if stale.exists():
+                stale.unlink()
+        for d in (self.legacy_plugin_dir, self.legacy_plugin_dir.parent):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        if _drop_plugin_entry(self.legacy_settings_path) == {}:
+            self.legacy_settings_path.unlink()
 
     def _check_registrations(self) -> tuple[bool, bool]:
         """Both files present on disk AND the conversation-access flag
-        set in ``config.json`` = registered. Returns ``False`` on a
+        set in ``openclaw.json`` = registered. Returns ``False`` on a
         corrupt or missing config — the install would have created
         the entry, so absence at status-check time is a real gap."""
         # File-presence check from the base class.
@@ -235,3 +242,36 @@ class OpenclawProvider(PluginInstaller):
         except SettingsCorruptError as e:
             return e.why
         return None
+
+
+def _drop_plugin_entry(path: Path) -> dict[str, Any] | None:
+    """Remove the ``llmoji-kaomoji`` entry from ``plugins.entries`` in
+    the JSON config at ``path``, tidying the containers it leaves
+    empty. Returns the config as written, or ``None`` when nothing
+    changed — the file is missing, unparseable (refusing to mutate a
+    corrupt config matches the JSON-settings policy in the base
+    class), or had no entry of ours.
+
+    The whole sub-mapping goes rather than the flag flipping back to
+    ``false``, so a clean uninstall leaves no ``llmoji-kaomoji``
+    mention behind — same contract as the bash providers' uninstall.
+    """
+    if not path.exists():
+        return None
+    try:
+        cfg = _load_json_strict(path)
+    except SettingsCorruptError:
+        return None
+    plugins = cfg.get("plugins")
+    if not isinstance(plugins, dict):
+        return None
+    entries = plugins.get("entries")
+    if not isinstance(entries, dict) or PLUGIN_ID not in entries:
+        return None
+    entries.pop(PLUGIN_ID, None)
+    if not entries:
+        plugins.pop("entries", None)
+    if not plugins:
+        cfg.pop("plugins", None)
+    write_json(path, cfg)
+    return cfg

@@ -234,11 +234,12 @@ def test_provider_interface():
     from llmoji.providers import PROVIDERS, get_provider
     from llmoji.providers.base import HookInstaller, PluginInstaller
 
-    # All five first-class providers register: three bash-hook + two
-    # TS-plugin (1.3 promoted opencode + openclaw from generic-JSONL
-    # examples).
+    # All seven first-class providers register: five bash-hook
+    # (2.2 added grok + antigravity) + two TS-plugin (1.3 promoted
+    # opencode + openclaw from generic-JSONL examples).
     assert set(PROVIDERS) == {
-        "claude_code", "codex", "hermes", "opencode", "openclaw",
+        "claude_code", "codex", "hermes", "grok", "antigravity",
+        "opencode", "openclaw",
     }
     for name in PROVIDERS:
         p = get_provider(name)
@@ -672,7 +673,7 @@ def test_hook_templates_render_to_valid_bash_substitutions():
             f"{label} failed bash -n: {r.stderr}"
         )
 
-    for name in ("claude_code", "codex", "hermes"):
+    for name in ("claude_code", "codex", "hermes", "grok", "antigravity"):
         p = get_provider(name)
         rendered = p.render_hook()
         # The rendered hook still contains shell-side $KAOMOJI refs

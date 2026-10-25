@@ -42,9 +42,7 @@ Per-provider notes (vs claude_code / codex / hermes):
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from .base import PluginInstaller
+from .base import PluginInstaller, home_path
 
 
 class OpencodeProvider(PluginInstaller):
@@ -53,14 +51,12 @@ class OpencodeProvider(PluginInstaller):
     # opencode session. Project-local ``.opencode/plugins/`` would
     # also work but isn't where ``llmoji install`` belongs (the user
     # wants the journal across every project, not just one repo).
-    plugin_dir = Path.home() / ".config" / "opencode" / "plugins"
-    journal_path = Path.home() / ".llmoji" / "journals" / "opencode.jsonl"
+    plugin_dir = home_path(".config", "opencode", "plugins")
+    journal_path = home_path(".llmoji", "journals", "opencode.jsonl")
     # opencode's global rules file — applied across every opencode
     # session per https://opencode.ai/docs/rules/. ``llmoji install
     # --soft`` writes a marker-fenced block here.
-    system_prompt_doc_path = (
-        Path.home() / ".config" / "opencode" / "AGENTS.md"
-    )
+    system_prompt_doc_path = home_path(".config", "opencode", "AGENTS.md")
     plugin_files = [
         ("opencode.ts.tmpl", "llmoji.ts"),
     ]

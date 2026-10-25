@@ -7,6 +7,13 @@
 #   $USER_TEXT       latest real user message, system-injection filtered
 #   $MODEL           active model slug
 #   $CWD             working directory at hook fire
+#   $ROW_TS          (optional) the message's own timestamp, ISO-8601
+#                    UTC, when the transcript carries one. Unset or
+#                    empty falls back to hook fire time. Providers that
+#                    can stamp the message time do, so the live row is
+#                    byte-identical to the one ``llmoji import`` builds
+#                    from the same transcript and the import dedup
+#                    folds them instead of counting the message twice.
 #   JOURNAL_PATH     rendered absolute path to the journal JSONL
 #                    (Python ``string.Template`` substitution; written
 #                    as a plain word here, not a shell variable
@@ -28,8 +35,24 @@
 JOURNAL="$JOURNAL_PATH"
 mkdir -p "$(dirname "$JOURNAL")"
 
-jq -nc \
-  --arg ts             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+# A Stop hook fires again when another hook blocks the stop and the
+# agent keeps going; the walk then re-emits the turn's earlier
+# messages. With rows stamped by message time, such a row is
+# byte-identical to the one the earlier fire wrote. So each row is
+# checked against the journal's last 256 lines as they stood when this
+# run began, and a match uses that line up: each line absorbs one
+# identical row, the rest land. Two identical rows from one run (Hermes
+# stamps them all with the same fire time) therefore both land, and a
+# repeat past an earlier copy lands once. Re-fires follow a blocked
+# stop within seconds; the 256-line bound only misses one that comes
+# after a turn (or busy concurrent sessions) wrote more rows than that.
+if [ -z "${JOURNAL_TAIL_READ:-}" ]; then
+  JOURNAL_TAIL=$(tail -n 256 "$JOURNAL" 2>/dev/null || true)
+  JOURNAL_TAIL_READ=1
+fi
+
+LINE=$(jq -nc \
+  --arg ts             "${ROW_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" \
   --arg model          "$MODEL" \
   --arg cwd            "$CWD" \
   --arg kaomoji        "$KAOMOJI" \
@@ -45,5 +68,14 @@ jq -nc \
                      | sub("^\\s+"; "")
                      | ltrimstr($kaomoji)
                      | sub("^\\s+"; ""))
-  }' \
-  >> "$JOURNAL" 2>/dev/null || true
+  }' 2>/dev/null || true)
+if [ -n "$LINE" ]; then
+  if [ -n "$JOURNAL_TAIL" ] && printf '%s\n' "$JOURNAL_TAIL" | grep -qxF -- "$LINE"; then
+    # Use the matched line up (first occurrence only). ENVIRON, not
+    # ``awk -v``, so awk doesn't interpret the JSON's backslashes.
+    JOURNAL_TAIL=$(printf '%s\n' "$JOURNAL_TAIL" \
+      | LLMOJI_LINE="$LINE" awk '!used && $0 == ENVIRON["LLMOJI_LINE"] { used = 1; next } { print }')
+  else
+    printf '%s\n' "$LINE" >> "$JOURNAL" 2>/dev/null || true
+  fi
+fi

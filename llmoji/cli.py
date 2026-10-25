@@ -120,7 +120,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print(
             "no harnesses detected (looked for "
             + ", ".join(
-                f"{name} ({get_provider(name).settings_path.parent})"
+                f"{name} ({get_provider(name).home_dir})"
                 for name in PROVIDERS
             )
             + "). install a supported harness, or pass an explicit "
@@ -130,9 +130,26 @@ def _cmd_install(args: argparse.Namespace) -> int:
         return 2
 
     mode_label = "soft" if args.soft else "hard"
+    # A harness with no per-turn injection point can't take --hard;
+    # name it and move on rather than failing the whole batch on it.
+    unsupported: list[tuple[str, str]] = []
+    if not args.soft:
+        for name in detected:
+            reason = get_provider(name).hard_unsupported_reason
+            if reason is not None:
+                unsupported.append((name, reason))
+        detected = [n for n in detected if n not in dict(unsupported)]
     print(f"detected harnesses, will install [{mode_label}]:")
     for name in detected:
-        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+        print(f"  - {name}  ({get_provider(name).home_dir})")
+    for name, reason in unsupported:
+        print(
+            f"  - {name}  skipped: {reason}. "
+            f"`llmoji install {name} --soft` installs it."
+        )
+    if not detected:
+        print("nothing to install.", file=sys.stderr)
+        return 1
     if not args.yes:
         try:
             ans = input(
@@ -203,7 +220,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         print(
             "no harnesses detected (looked for "
             + ", ".join(
-                f"{name} ({get_provider(name).settings_path.parent})"
+                f"{name} ({get_provider(name).home_dir})"
                 for name in PROVIDERS
             )
             + "). pass an explicit provider name (e.g. "
@@ -215,7 +232,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
 
     print("detected harnesses:")
     for name in detected:
-        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+        print(f"  - {name}  ({get_provider(name).home_dir})")
     if not args.yes:
         try:
             ans = input(
@@ -447,7 +464,10 @@ def _print_status_human(
         settings_suffix = ""
         if s.settings_parse_error is not None:
             settings_suffix = f"  (unparseable: {s.settings_parse_error})"
-        print(f"        settings:{s.settings_path}{settings_suffix}")
+        # Plugin providers with no config file (opencode) carry the
+        # unset ``Path()``, which would print as ``.``.
+        settings_label = "(none)" if s.settings_path == Path() else s.settings_path
+        print(f"        settings:{settings_label}{settings_suffix}")
         if s.system_prompt_doc_path is not None:
             if s.soft_installed:
                 soft_suffix = "" if s.soft_doc_current else "  (stale content)"
@@ -860,6 +880,12 @@ def _import_one(
         f"{name}: saw {result.rows_seen} row(s); {label} "
         f"{result.rows_novel}; skipped {skipped} dedup hit(s)."
     )
+    if result.unreadable:
+        print(
+            f"{name}: {result.unreadable} compressed session file(s) "
+            f"skipped — no zstd decoder. Python 3.14+ has one built in; "
+            f"otherwise `pip install 'llmoji[zstd]'` and re-run."
+        )
     if dry_run:
         print("(dry run — journal not modified)")
     elif result.rows_novel:
@@ -896,9 +922,9 @@ def _cmd_import(args: argparse.Namespace) -> int:
         return 0
 
     # Autodetect path: importable providers (claude_code, codex,
-    # hermes) whose harness home dir exists. TS-plugin providers
-    # (opencode, openclaw) don't expose a replayable on-disk
-    # transcript shape and so are excluded — see
+    # hermes, grok) whose harness home dir exists. TS-plugin providers
+    # (opencode, openclaw) and antigravity don't expose a replayable
+    # on-disk transcript shape and so are excluded — see
     # ``backfill.IMPORTABLE_PROVIDERS``.
     detected = [
         name for name in IMPORTABLE_PROVIDERS
@@ -908,7 +934,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
         print(
             "no importable harnesses detected (looked for "
             + ", ".join(
-                f"{name} ({get_provider(name).settings_path.parent})"
+                f"{name} ({get_provider(name).home_dir})"
                 for name in IMPORTABLE_PROVIDERS
             )
             + "). install a supported harness, or pass an explicit "
@@ -919,7 +945,7 @@ def _cmd_import(args: argparse.Namespace) -> int:
 
     print("detected harnesses:")
     for name in detected:
-        print(f"  - {name}  ({get_provider(name).settings_path.parent})")
+        print(f"  - {name}  ({get_provider(name).home_dir})")
     if not args.yes:
         try:
             ans = input(

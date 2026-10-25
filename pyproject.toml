@@ -17,6 +17,10 @@ keywords = [
     "claude-code",
     "codex",
     "hermes",
+    "grok",
+    "antigravity",
+    "opencode",
+    "openclaw",
     "emoticons",
     "agents",
     "interpretability",
@@ -34,6 +38,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Operating System :: OS Independent",
     "Environment :: Console",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -68,6 +73,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# ``llmoji import codex`` reads the rollouts codex-cli zstd-compresses
+# in place (``rollout-*.jsonl.zst``). Python 3.14 decodes them with the
+# stdlib ``compression.zstd``; older interpreters need this package.
+zstd = [
+    "zstandard>=0.22; python_version < '3.14'",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6.9",
@@ -132,6 +143,8 @@ include = [
     "llmoji/scrape.py",
     "llmoji/providers/__init__.py",
     "llmoji/providers/base.py",
+    "llmoji/providers/grok.py",
+    "llmoji/providers/antigravity.py",
     "llmoji/providers/opencode.py",
     "llmoji/providers/openclaw.py",
     "llmoji/upload.py",

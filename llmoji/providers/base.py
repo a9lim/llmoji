@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from string import Template
-from typing import Any
+from typing import Any, cast
 
 from .._util import atomic_write_text, package_version, write_json
 from ..synth_prompts import NUDGE_MESSAGE, _LEGACY_NUDGE_MESSAGES
@@ -37,6 +37,35 @@ SOFT_DOC_HEADING = "## Kaomoji"
 _LEGACY_SOFT_DOC_HEADINGS = ("# Kaomoji",)
 
 
+class _HomePath:
+    """Non-data descriptor behind :func:`home_path`. Resolves against
+    ``Path.home()`` on every read; an instance attribute of the same
+    name shadows it, which is how tests and callers rebind a path."""
+
+    def __init__(self, parts: tuple[str, ...]) -> None:
+        self._parts = parts
+
+    def __get__(self, obj: object, objtype: type | None = None) -> Path:
+        return Path.home().joinpath(*self._parts)
+
+
+def home_path(*parts: str) -> Path:
+    """A provider path default under the user's home directory,
+    resolved when it is read rather than when the class is defined.
+
+    ``hooks_dir = Path.home() / ".claude" / "hooks"`` in a class body
+    runs once, at import. Anything that changes ``HOME`` afterwards —
+    the test suite's sandbox fixture, most importantly — never reaches
+    those defaults, so a test that forgot to rebind one wrote into the
+    developer's real ``~/.claude``. Reading through ``Path.home()`` on
+    each access makes ``HOME`` the single switch it was assumed to be.
+
+    Typed as :class:`~pathlib.Path` so class bodies keep reading as
+    plain path attributes; the descriptor is an implementation detail.
+    """
+    return cast(Path, _HomePath(parts))
+
+
 class SoftInstallNotSupportedError(RuntimeError):
     """Raised by :meth:`HookInstaller.install_soft` when the harness
     has no canonical system-prompt doc to write into.
@@ -52,6 +81,25 @@ class SoftInstallNotSupportedError(RuntimeError):
             f"not supported for this harness. Use --hard instead."
         )
         self.name = name
+
+
+class HardInstallNotSupportedError(RuntimeError):
+    """Raised by :meth:`HookInstaller.install_hard` when the harness
+    has no hook that can put text in front of the model each turn.
+
+    Grok is the case that motivated it: its ``UserPromptSubmit`` hook
+    runs, but the harness discards an allowing hook's stdout, so a
+    nudge written there never reaches the model. Installing anyway
+    would report success and change nothing.
+    """
+
+    def __init__(self, name: str, reason: str) -> None:
+        super().__init__(
+            f"provider {name!r} can't take --hard: {reason}. "
+            f"Use --soft instead."
+        )
+        self.name = name
+        self.reason = reason
 
 
 @dataclass
@@ -315,6 +363,12 @@ class HookInstaller:
     # one-shot migration note in the release.
     system_prompt_doc_path: Path | None = None
 
+    # Why ``--hard`` can't work on this harness, or ``None`` when it
+    # can. Set by providers whose harness has no per-turn injection
+    # point (grok); :meth:`install_hard` refuses with this reason and
+    # the CLI's autodetect skips the provider under ``--hard``.
+    hard_unsupported_reason: str | None = None
+
     # --- nudge hook (optional secondary hook) ---
     #
     # A "nudge" is a fire-before-each-turn hook that injects extra
@@ -355,6 +409,20 @@ class HookInstaller:
             and self.nudge_event
         )
 
+    @property
+    def home_dir(self) -> Path:
+        """The harness's own home directory (``~/.claude``,
+        ``~/.codex``, ``~/.hermes``, …). Drives :meth:`is_present` and
+        the CLI's autodetect listing, and roots ``llmoji import``'s
+        session-file search.
+
+        Defaults to the settings file's parent, which is the home dir
+        for every harness whose settings file sits at its top level.
+        Providers that keep their settings deeper (grok's
+        ``~/.grok/hooks/llmoji.json``) override.
+        """
+        return self.settings_path.parent
+
     def is_present(self) -> bool:
         """Heuristic: does this harness's home directory exist on disk?
 
@@ -369,7 +437,7 @@ class HookInstaller:
         case we accept the false-positive on. Subclasses are free to
         override if a more specific signal turns out to matter.
         """
-        return self.settings_path.parent.exists()
+        return self.home_dir.exists()
 
     def render_hook(self) -> str:
         """Read the bash template from package data and substitute the
@@ -437,7 +505,14 @@ class HookInstaller:
 
         The default :meth:`_register` registers both hooks in a
         single atomic settings-file write.
+
+        Refuses with :class:`HardInstallNotSupportedError` when
+        :attr:`hard_unsupported_reason` is set, before touching disk.
         """
+        if self.hard_unsupported_reason is not None:
+            raise HardInstallNotSupportedError(
+                self.name, self.hard_unsupported_reason,
+            )
         self._write_journal_hook()
         if self.has_nudge:
             assert self.nudge_hook_path is not None
@@ -1094,19 +1169,20 @@ class PluginInstaller(HookInstaller):
         # disk to install or check.
         return False
 
-    def is_present(self) -> bool:
+    @property
+    def home_dir(self) -> Path:
         """Plugin providers detect via the parent harness's home dir.
 
         For opencode that's ``~/.config/opencode/`` (the dir that holds
-        ``plugins/``); for openclaw it's ``~/.openclaw/``. Subclasses
-        that need a different signal can override.
+        ``plugins/``). Subclasses whose plugin dir sits deeper
+        (openclaw's ``~/.openclaw/plugins/<id>/``) override.
 
         Reusing :attr:`plugin_dir`'s parent here means a never-installed
         opencode user (no ``~/.config/opencode``) won't get autodetected
         by ``llmoji install`` (no-arg). That matches the bash providers'
         ``settings_path.parent.exists()`` rule.
         """
-        return self.plugin_dir.parent.exists()
+        return self.plugin_dir.parent
 
     # --- rendering ---
 

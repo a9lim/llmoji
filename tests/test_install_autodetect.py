@@ -111,7 +111,50 @@ def test_install_no_args_with_yes_installs_all_detected(
     rc = cli._cmd_install(args)
 
     assert rc == 0
+    # --hard skips the harnesses that can't take a per-turn nudge
+    # (grok); --soft reaches every detected provider.
+    hard_capable = {
+        name for name, cls in PROVIDERS.items()
+        if cls.hard_unsupported_reason is None
+    }
+    assert "grok" not in hard_capable
+    assert set(installed) == hard_capable
+
+    installed.clear()
+    args = parser.parse_args(["install", "--soft", "--yes"])
+    assert cli._cmd_install(args) == 0
     assert set(installed) == set(PROVIDERS)
+
+
+def test_install_hard_skip_is_named_not_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A detected harness that can't take --hard is listed as skipped
+    with the --soft command that would install it, and doesn't count
+    as a failure; when it's the only one detected, there's nothing to
+    install and the exit code says so."""
+    from llmoji import cli
+    from llmoji.providers import PROVIDERS, GrokProvider
+
+    for name, _cls in PROVIDERS.items():
+        monkeypatch.setattr(
+            _cls, "is_present",
+            _always_present if name == "grok" else _never_present,
+        )
+
+    def fake_install_one(name: str, **_kwargs: object) -> tuple[bool, str | None]:
+        raise AssertionError(f"{name} should not have been installed")
+
+    monkeypatch.setattr(cli, "_install_one", fake_install_one)
+
+    args = cli._build_parser().parse_args(["install", "--hard", "--yes"])
+    assert cli._cmd_install(args) == 1
+    out = capsys.readouterr()
+    assert "grok  skipped" in out.out
+    assert "llmoji install grok --soft" in out.out
+    assert GrokProvider.hard_unsupported_reason in out.out
+    assert "nothing to install" in out.err
 
 
 def test_install_no_args_partial_failure_returns_1(
