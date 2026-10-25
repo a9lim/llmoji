@@ -16,6 +16,9 @@ Per-provider quirks (vs codex / hermes):
     (text → tool_use → text → tool_use → text) emits up to one row
     per text block. Non-kaomoji text blocks are skipped without
     aborting the rest of the walk.
+  - **The final message may not be in the transcript yet.** The hook
+    falls back to the Stop payload's ``last_assistant_message``
+    (Claude Code 2.1.47+) when the walk didn't find it.
   - **Sidechain filter via the ``isSidechain`` field flag.** Set on
     every event in a Task-tool-spawned subagent session; the hook
     drops these rows.
@@ -27,21 +30,19 @@ Per-provider quirks (vs codex / hermes):
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from .base import JsonSettingsHookInstaller
+from .base import JsonSettingsHookInstaller, home_path
 
 
 class ClaudeCodeProvider(JsonSettingsHookInstaller):
     name = "claude_code"
-    hooks_dir = Path.home() / ".claude" / "hooks"
-    settings_path = Path.home() / ".claude" / "settings.json"
-    journal_path = Path.home() / ".claude" / "kaomoji-journal.jsonl"
+    hooks_dir = home_path(".claude", "hooks")
+    settings_path = home_path(".claude", "settings.json")
+    journal_path = home_path(".claude", "kaomoji-journal.jsonl")
     # Claude Code's persistent global memory file. Auto-loaded into
     # every session's system prompt by Claude Code itself (see
     # https://docs.claude.com/en/docs/claude-code/memory). ``llmoji
     # install --soft`` writes a marker-fenced block here.
-    system_prompt_doc_path = Path.home() / ".claude" / "CLAUDE.md"
+    system_prompt_doc_path = home_path(".claude", "CLAUDE.md")
     hook_template = "claude_code.sh.tmpl"
     # The validate partial is inlined inside a per-entry while-loop
     # in the rendered hook (one iteration per text-bearing assistant

@@ -12,9 +12,9 @@
 > **プライバシーに関するお知らせ** `llmoji`のバージョン1.2.0より前の版において、潜在的なプライバシー上の問題が存在する可能性が判明しましたが、現在は修正済みです。この問題を解消するため、アップロード方法を変更いたしました。アップロードを行う前に、(`pip install --upgrade llmoji`) を実行してパッケージを更新する必要があります。
 
 > [!WARNING]
-> **Update Notice** The kaomoji detection has been significantly improved with 2.0.0. Please run `llmoji install --hard --yes && llmoji import --yes` (or `--soft` instead of `--hard`, see below) to update the nudges and backfill the logs with any missed kaomoji. 
+> **Update Notice** 2.2.0 fixes three capture gaps. Codex logging stopped working when codex-cli switched to a new session format (rolled out between 0.144 and 0.158); Claude Code often missed the last message of each turn; and the OpenClaw plugin was installed somewhere OpenClaw never looks. Please upgrade, then run `llmoji install --soft --yes && llmoji import --yes` (or `--hard`, see below) to reinstall the hooks and recover the missed kaomoji from your session history. 2.2.0 also adds Grok Build and Antigravity.
 > 
-> **更新のお知らせ** バージョン 2.0.0 にて、顔文字の検出精度が大幅に向上しました。ナッジの更新および、ログ内で検出漏れとなっていた顔文字の補完を行うため、`llmoji install --hard --yes && llmoji import --yes` を実行してください（なお、`--hard` の代わりに `--soft` を指定することも可能です。詳細は下記をご参照ください）。
+> **更新のお知らせ** バージョン 2.2.0 では、記録漏れの問題を3点修正しました。codex-cli の新しいセッション形式への移行（0.144〜0.158 にかけて段階的に導入）により Codex の記録が停止していた問題、Claude Code で各ターンの最後のメッセージが記録されないことが多かった問題、そして OpenClaw プラグインが OpenClaw の読み込まない場所にインストールされていた問題です。アップグレード後、`llmoji install --soft --yes && llmoji import --yes`（`--hard` も可。詳細は下記をご参照ください）を実行してフックを再インストールし、セッション履歴から記録漏れの顔文字を補完してください。また、2.2.0 で Grok Build と Antigravity に対応しました。
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
@@ -54,7 +54,7 @@ The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datase
 pip install llmoji
 llmoji install --soft           # autodetect
 # or, target a single harness explicitly:
-llmoji install claude_code --soft   # or: codex, hermes, opencode, openclaw
+llmoji install claude_code --soft   # or: codex, hermes, grok, antigravity, opencode, openclaw
 ```
 
 From now on, your agent will use kaomoji at the start of each message. 
@@ -91,7 +91,9 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is four packages: `anthropic`, `openai`, `huggingface_hub`, and `ruamel.yaml`. Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependency footprint is five packages: `anthropic`, `openai`, `huggingface_hub`, `ruamel.yaml`, and `tqdm`. Hooks run in `bash` and need `jq`.
+
+codex-cli compresses older sessions to `.jsonl.zst`. To replay those with `llmoji import codex` on Python 3.13 or older, install the `zstd` extra (`pip install 'llmoji[zstd]'`); Python 3.14 reads them out of the box.
 
 From source:
 
@@ -115,7 +117,7 @@ Llmoji registers a `Stop` hook that fires once per assistant turn, that extracts
 
 ### Placement: soft or hard
 
-`--hard` is the v1 behavior. It injects the kaomoji reminder as additional context every turn.
+`--hard` is the v1 behavior. It injects the kaomoji reminder as additional context every turn. Grok is the exception: it throws away anything a hook tries to add to the prompt, so Grok only supports `--soft` (`llmoji install --hard` skips it and says so).
 
 `--soft` instead adds the reminder to the prompt doc:
 
@@ -124,6 +126,8 @@ Llmoji registers a `Stop` hook that fires once per assistant turn, that extracts
 | `claude_code` | `~/.claude/CLAUDE.md`                  |
 | `codex`       | `~/.codex/AGENTS.md`                   |
 | `hermes`      | `~/.hermes/SOUL.md`                    |
+| `grok`        | `~/.grok/AGENTS.md`                    |
+| `antigravity` | `~/.gemini/GEMINI.md`                  |
 | `opencode`    | `~/.config/opencode/AGENTS.md`         |
 | `openclaw`    | `~/.openclaw/workspace/SOUL.md`        |
 
@@ -176,20 +180,24 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 **Bash hook providers**
 
-| Provider      | Journal-write event | Hard-mode nudge event | Settings format | Soft-doc path             |
-|---------------|---------------------|-----------------------|-----------------|---------------------------|
-| `claude_code` | Stop                | UserPromptSubmit      | JSON            | `~/.claude/CLAUDE.md`     |
-| `codex`       | Stop                | UserPromptSubmit      | JSON            | `~/.codex/AGENTS.md`      |
-| `hermes`      | post_llm_call       | pre_llm_call          | YAML            | `~/.hermes/SOUL.md`       |
+| Provider      | Journal-write event | Hard-mode nudge event | Settings                                        | Soft-doc path             |
+|---------------|---------------------|-----------------------|-------------------------------------------------|---------------------------|
+| `claude_code` | Stop                | UserPromptSubmit      | `~/.claude/settings.json`                       | `~/.claude/CLAUDE.md`     |
+| `codex`       | Stop                | UserPromptSubmit      | `~/.codex/hooks.json`                           | `~/.codex/AGENTS.md`      |
+| `hermes`      | post_llm_call       | pre_llm_call          | `~/.hermes/config.yaml`                         | `~/.hermes/SOUL.md`       |
+| `grok`        | Stop                | (soft only)           | `~/.grok/hooks/llmoji.json`                     | `~/.grok/AGENTS.md`       |
+| `antigravity` | Stop                | PreInvocation         | plugin at `~/.gemini/config/plugins/llmoji/`    | `~/.gemini/GEMINI.md`     |
 
-Subagent traffic on hermes is not currently filtered; the upstream payload doesn't carry a child id.
+Subagent traffic on hermes and antigravity is not currently filtered: neither harness marks a subagent's own model calls in the payload the journal hook sees.
+
+If Grok's Claude compatibility is on (its default), Grok also runs the hooks in `~/.claude/settings.json` and reads `~/.claude/CLAUDE.md`. That's harmless: the Claude Code hook finds nothing to log in a Grok session.
 
 **TS plugin providers**
 
 | Provider   | Plugin location                              | Settings format | Soft-doc path                       |
 |------------|----------------------------------------------|-----------------|-------------------------------------|
 | `opencode` | `~/.config/opencode/plugins/llmoji.ts`       | (none)          | `~/.config/opencode/AGENTS.md`      |
-| `openclaw` | `~/.openclaw/plugins/llmoji-kaomoji/`        | JSON            | `~/.openclaw/workspace/SOUL.md`     |
+| `openclaw` | `~/.openclaw/extensions/llmoji-kaomoji/`     | JSON            | `~/.openclaw/workspace/SOUL.md`     |
 
 `install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files), the settings entry, and the soft-doc block if one was appended. `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-cell synth cache are preserved; wipe the cache with `llmoji cache clear`.
 
@@ -213,7 +221,9 @@ llmoji parse --provider openhands ~/.openhands/conversations
 | `gemini`    | `MyActivity.json`                                                                         | `gemini_aistudio_export.jsonl`          |
 | `openhands` | `<conversation>/events/event-NNNNN-<id>.json`                                             | `openhands_export.jsonl`                |
 
-For Claude Code, Codex, or Hermes history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`. Run with no provider to autodetect every importable harness present on disk and replay each in one go: `llmoji import` (or `llmoji import --yes` to skip the confirmation prompt). Re-runs are idempotent — every replayed row is dedup'd against the existing journal, so it's safe to run after any taxonomy improvement to recover newly-recognized kaomoji.
+For Claude Code, Codex, Hermes, or Grok history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`. Run with no provider to autodetect every importable harness present on disk and replay each in one go: `llmoji import` (or `llmoji import --yes` to skip the confirmation prompt). Re-runs are idempotent — every replayed row is dedup'd against the existing journal, including rows the live hook already logged, so it's safe to run after any taxonomy improvement to recover newly-recognized kaomoji.
+
+Hermes stopped writing the session files `import` reads in v0.21.1, so `llmoji import hermes` only covers sessions from before that release. Antigravity can't be imported: its transcripts don't record which model wrote each message.
 
 ---
 

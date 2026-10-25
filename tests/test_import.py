@@ -534,3 +534,166 @@ def test_import_rejects_non_importable_providers_at_argparse(
     err = capsys.readouterr().err
     assert "invalid choice" in err
     assert "opencode" in err
+
+
+# ---------------------------------------------------------------------------
+# pre-2.2 live rows stamped with hook fire time
+# ---------------------------------------------------------------------------
+#
+# Before 2.2 a live hook wrote ``ts`` = the moment the hook ran (turn
+# end, whole seconds) while the replay stamps the message's own time.
+# The two copies of one message never shared a dedup key, so every
+# import after install counted live-captured messages twice — 13% of
+# the rows in one real Claude Code journal.
+
+
+def _replayed(ts: str, text: str = "same words") -> object:
+    from llmoji.scrape import ScrapeRow
+
+    return ScrapeRow(
+        source="claude_code", model="m1", timestamp=ts, cwd="/tmp",
+        first_word="(◕‿◕)", assistant_text=text, surrounding_user="u",
+    )
+
+
+def _import_with(
+    monkeypatch: pytest.MonkeyPatch, journal: Path, rows: list[object],
+) -> object:
+    from llmoji import backfill
+
+    monkeypatch.setattr(backfill, "_iter_rows_for_provider", lambda _n: iter(rows))
+    monkeypatch.setattr(backfill, "_journal_for", lambda _n: journal)
+    return backfill.import_provider("claude_code")
+
+
+def test_import_folds_a_fire_time_live_row_into_its_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T17:35:53Z", assistant_text="same words")])
+    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")])
+    assert (r.rows_seen, r.rows_novel) == (1, 0)
+
+
+def test_import_keeps_genuine_repeats_of_a_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One live row can stand in for one replayed row only: the same
+    short message said twice, with only one live copy, lands as two."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T18:00:10Z", assistant_text="same words")])
+    r = _import_with(monkeypatch, journal, [
+        _replayed("2026-04-29T17:00:00.000Z"),
+        _replayed("2026-04-29T18:00:00.000Z"),
+    ])
+    assert r.rows_novel == 1
+    assert len(journal.read_text().splitlines()) == 2
+
+
+def test_import_ignores_live_rows_outside_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _row(ts="2026-04-29T17:00:00Z", assistant_text="same words"),  # before the message
+        _row(ts="2026-05-02T17:00:00Z", assistant_text="same words"),  # days after
+    ])
+    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T18:00:00.000Z")])
+    assert r.rows_novel == 1
+
+
+def test_import_claims_exact_matches_before_folding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row an earlier import wrote matches its replay exactly. The
+    fold must not hand that row to an earlier replayed copy first, or
+    the earlier message would be dropped."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T18:00:00.000Z", assistant_text="same words")])
+    r = _import_with(monkeypatch, journal, [
+        _replayed("2026-04-29T17:00:00.000Z"),
+        _replayed("2026-04-29T18:00:00.000Z"),
+    ])
+    assert r.rows_novel == 1
+
+
+def test_import_duplicate_replay_copy_cannot_steal_a_live_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replayed row repeated in the sources (a forked session
+    replays its parent) is a duplicate of the row its key already
+    matched, not a candidate for another message's live row."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [
+        _row(ts="2026-04-29T17:00:00.000Z", assistant_text="same words"),
+        _row(ts="2026-04-29T19:00:00Z", assistant_text="same words"),  # live, fire time
+    ])
+    r = _import_with(monkeypatch, journal, [
+        _replayed("2026-04-29T17:00:00.000Z"),
+        _replayed("2026-04-29T17:00:00.000Z"),
+        _replayed("2026-04-29T18:55:00.000Z"),
+    ])
+    assert (r.rows_seen, r.rows_novel) == (3, 0)
+
+
+def test_import_since_cannot_free_a_row_for_a_newer_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The journal holds message one exactly. With --since past it,
+    message one isn't appended — but it still claims its own row, so
+    the identical message four seconds later isn't folded into it."""
+    from llmoji import backfill
+
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T10:00:00.000Z", assistant_text="Done.")])
+    rows = [
+        _replayed("2026-04-29T10:00:00.000Z", "Done."),
+        _replayed("2026-04-29T10:00:04.000Z", "Done."),
+    ]
+    monkeypatch.setattr(backfill, "_iter_rows_for_provider", lambda _n: iter(rows))
+    monkeypatch.setattr(backfill, "_journal_for", lambda _n: journal)
+    r = backfill.import_provider("claude_code", since="2026-04-29T10:00:01.000Z")
+    assert (r.rows_seen, r.rows_novel) == (1, 1)
+
+
+def test_import_fold_needs_the_same_face(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(
+        ts="2026-04-29T17:35:53Z", kaomoji="(╥﹏╥)", assistant_text="same words",
+    )])
+    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")])
+    assert r.rows_novel == 1
+
+
+def test_import_exact_claim_uses_up_the_row_it_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact key ignores the face; the fold doesn't. An exact claim
+    must consume the very row it matched, so the fold can't hand that
+    row out a second time."""
+    from llmoji.scrape import ScrapeRow
+
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T10:00:00Z", kaomoji="(◕‿◕)", assistant_text="Done.")])
+    rows = [
+        ScrapeRow(source="claude_code", model="m1", timestamp="2026-04-29T10:00:00Z",
+                  cwd="/tmp", first_word="(╥﹏╥)", assistant_text="Done.",
+                  surrounding_user="u"),
+        _replayed("2026-04-29T09:00:00.000Z", "Done."),
+    ]
+    r = _import_with(monkeypatch, journal, rows)
+    assert (r.rows_seen, r.rows_novel) == (2, 1)
+
+
+def test_import_rows_an_earlier_import_wrote_are_not_fold_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only whole-second ``...Z`` stamps can be pre-2.2 fire times. A
+    millisecond row came from a replay; if its message isn't replayed
+    any more, it still mustn't absorb a different, earlier message."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_row(ts="2026-04-29T11:00:00.000Z", assistant_text="same words")])
+    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T10:00:00.000Z")])
+    assert r.rows_novel == 1

@@ -3,8 +3,8 @@
 ## What this is
 
 `llmoji` is a small provider-agnostic CLI for collecting kaomoji
-journals from coding agents (Claude Code, Codex, Hermes, opencode,
-openclaw), distilling them into per-(source-model, canonical-face)
+journals from coding agents (Claude Code, Codex, Hermes, Grok Build,
+Antigravity, opencode, openclaw), distilling them into per-(source-model, canonical-face)
 descriptions via the user's chosen synthesis backend, and submitting
 privacy-preserving aggregates to a shared HF dataset for cross-corpus
 research. Companion to the research-side
@@ -59,9 +59,33 @@ presence = registered); openclaw writes a bundle at
 
 Each provider declares: `hooks_dir`, `settings_path`, `journal_path`,
 `main_event`, `system_prompt_doc_path`, `skip_action` (`continue`
-for claude_code/codex per-message walks; `echo '{}'; exit 0` for
-hermes's stdout-JSON contract), `system_injected_prefixes`, and
-optional nudge attrs.
+for the per-message walks; `echo '{}'; exit 0` for hermes's
+stdout-JSON contract), `system_injected_prefixes`, optional nudge
+attrs, and `hard_unsupported_reason` (set when the harness has no
+per-turn injection point — grok; `install_hard` then raises
+`HardInstallNotSupportedError` and no-arg `install --hard` skips the
+provider by name). `home_dir` (the harness root: drives
+`is_present`, the CLI's autodetect listing, and `import`'s source
+roots) defaults to `settings_path.parent`; grok, antigravity,
+openclaw and the plugin base override it.
+
+Two more bash-hook providers own their registration file outright
+instead of merging into a shared one: grok writes
+`~/.grok/hooks/llmoji.json` (Grok scans `~/.grok/hooks/*.json`; the
+JSON-settings helpers apply unchanged) and antigravity writes a whole
+plugin at `~/.gemini/config/plugins/llmoji/` (`plugin.json` +
+`hooks.json` keyed by hook name, plus both scripts). Uninstall
+deletes what's left once our entry is gone.
+
+Path defaults are declared with `home_path(".claude", "hooks")`, a
+descriptor that reads `Path.home()` on every access. A class-body
+`Path.home() / ...` is evaluated once at import, before the test
+suite's `HOME` sandbox exists, so every default pointed at the
+developer's real home whatever the fixture did — the 2.1.2 guard
+covered runtime `Path.home()` calls only.
+`test_every_default_path_follows_the_sandbox_home` fails on any
+provider path that escapes the sandbox; use `home_path` for new
+ones.
 
 Bash hook templates live under `llmoji/_hooks/`. Two shared partials
 inline into every main hook: `_kaomoji_validate.sh.partial`
@@ -233,13 +257,18 @@ and update the HF dataset card to match.
   the snapshot update and a `LEXICON_VERSION` bump in the same
   commit.
 - **6-field journal row schema** (on-disk JSONL):
-  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. The
+  `{ts, model, cwd, kaomoji, user_text, assistant_text}`. Since 2.2
+  `ts` is the message's own transcript time wherever the source has
+  one (claude_code, codex, grok, antigravity), hook fire time
+  otherwise (hermes, and claude_code's `last_assistant_message`
+  fallback). `ts` never ships in a bundle. The
   in-memory `llmoji.scrape.ScrapeRow` (7 fields: `source, model,
   timestamp, cwd, assistant_text, first_word, surrounding_user`) is
   free to evolve.
 - **System-injection prefix lists** per provider (in
   `llmoji.providers.{claude_code,codex,hermes}`).
-- **`HookInstaller` / `PluginInstaller` interfaces.** 2.0 split the
+- **`HookInstaller` / `PluginInstaller` interfaces.** 2.2 added
+  `home_dir` and `hard_unsupported_reason`. 2.0 split the
   install lifecycle into `install_hard` and `install_soft` —
   mutually exclusive *placement* modes that share the journal-write
   hook. Both modes install the Stop / `post_llm_call` hook so
@@ -262,6 +291,10 @@ and update the HF dataset card to match.
   - `codex` → `~/.codex/AGENTS.md`
   - `hermes` → `~/.hermes/SOUL.md` (voice slot — paired with
     AGENTS.md for procedure)
+  - `grok` → `~/.grok/AGENTS.md` (global rules, read before the
+    repo-root-to-cwd walk)
+  - `antigravity` → `~/.gemini/GEMINI.md` (global rules; NOT under
+    `~/.gemini/config/`, which Antigravity's policy checker guards)
   - `opencode` → `~/.config/opencode/AGENTS.md`
   - `openclaw` → `~/.openclaw/workspace/SOUL.md`
 - **Soft-doc shape**: plain markdown, no comment fences. Block is
@@ -273,9 +306,11 @@ and update the HF dataset card to match.
   user's prose). The `## Kaomoji` heading is the cross-corpus anchor;
   the former `# Kaomoji` shape remains recognized for migration and
   uninstall so existing soft installs are not stranded.
-- **The five first-class providers**: `claude_code`, `codex`,
-  `hermes` (bash hooks); `opencode`, `openclaw` (TS plugins).
-  `providers_seen` in shipped bundles names these directly.
+- **The seven first-class providers**: `claude_code`, `codex`,
+  `hermes`, `grok`, `antigravity` (bash hooks); `opencode`,
+  `openclaw` (TS plugins). `providers_seen` in shipped bundles names
+  these directly (as `<name>-hook`); 2.2 added `grok` and
+  `antigravity`, flagged for the dataset card.
 - **Bundle schema**:
   - `manifest.json` keys: `llmoji_version`, `lexicon_version`,
     `synthesis_model_id`, `synthesis_backend`, `submitter_id`,
@@ -334,12 +369,13 @@ llmoji parse --provider <n> P
 llmoji import [<provider>] [--since <ISO>] [--dry-run] [--yes]
                           replay native session/transcript files into
                           the live journal. Dedup-aware merge against
-                          (ts, model, assistant_text), atomic. Stop
-                          the harness first. No-arg autodetects every
-                          importable harness (claude_code, codex,
-                          hermes — TS plugins don't expose replayable
-                          transcripts). Recommended after every
-                          taxonomy bump.
+                          (ts, model, assistant_text), plus a one-to-one
+                          fold of pre-2.2 fire-time live rows; atomic.
+                          Stop the harness first. No-arg autodetects
+                          every importable harness (claude_code, codex,
+                          hermes, grok — TS plugins and antigravity
+                          don't expose replayable transcripts).
+                          Recommended after every taxonomy bump.
 llmoji analyze [--notes …] [--backend …] [--model …] [--base-url …]
                           scrape + canonicalize + synthesize →
                           ~/.llmoji/bundle/. backend defaults to
@@ -388,21 +424,24 @@ llmoji/
                          # openhands, generic journal); all route
                          # through _common.kaomoji_lead_strip
     backfill.py          # transcript→journal replays for claude_code
-                         # + codex + hermes; parity-tested. Hybrid
-                         # extraction mirrors shell hook (see
-                         # "Round-6 Path B" gotcha)
+                         # + codex (incl. .jsonl.zst) + hermes + grok;
+                         # parity-tested. Hybrid extraction mirrors
+                         # shell hook (see "Round-6 Path B" gotcha)
     providers/           # base.py (HookInstaller +
                          # JsonSettingsHookInstaller +
                          # PluginInstaller + ProviderStatus +
-                         # SettingsCorruptError + render helpers)
-                         # plus claude_code / codex / hermes /
-                         # opencode / openclaw concrete subclasses
+                         # SettingsCorruptError + home_path + render
+                         # helpers) plus claude_code / codex / hermes /
+                         # grok / antigravity / opencode / openclaw
+                         # concrete subclasses
     _hooks/              # bash templates per harness +
                          # _kaomoji_validate.sh.partial (validator)
                          # + _journal_write.sh.partial +
                          # claude_codex_nudge.sh.tmpl (shared
                          # UserPromptSubmit) + hermes_nudge.sh.tmpl
-                         # (bare {context: ...} shape)
+                         # (bare {context: ...} shape) +
+                         # antigravity_nudge.sh.tmpl (injectSteps
+                         # ephemeralMessage)
     _plugins/            # TS plugin templates +
                          # _kaomoji_taxonomy.ts.partial (canonical
                          # TS port of validator + Path B; spliced
@@ -420,6 +459,8 @@ llmoji/
     cli.py               # argparse entry, [project.scripts] llmoji
   tests/                 # public_surface, canonicalize (~70 cases),
                          # pipeline_parity (bash-vs-Python), import,
+                         # new_providers (grok / antigravity /
+                         # openclaw paths + HOME-sandbox guard),
                          # status_extended, soft_install,
                          # install_autodetect, source-export readers,
                          # upload_proof_of_life
@@ -500,16 +541,66 @@ tool-heavy turn easily writes 5–10 rows interleaved with tool calls.
 - **Claude Code**: each assistant content block (text, tool_use,
   thinking) is its own top-level transcript JSONL entry. Stop hook
   scopes to entries at-or-after the latest real-user message
-  (string content OR text-block array, NOT tool_result), walks every
-  text-bearing non-sidechain entry. `BOUNDARY_TS` query slurps the
-  transcript once; the per-entry walk is `jq -c` streamed into a
-  `while read` loop with `SKIP_ACTION=continue`.
-- **Codex**: each model message is its own
-  `event_msg.agent_message` event with `payload.message` carrying
-  the text. The Stop hook finds the latest `turn_context` index
-  (current turn boundary), slices forward, walks every
-  `agent_message`. `user_text` resolves to the latest non-injected
-  user response_item in the same slice.
+  (string content OR text-block array, NOT tool_result, NOT an
+  injected-prefix payload such as a skill body — before 2.2 a skill
+  loaded mid-turn reset the boundary and dropped every message ahead
+  of it), walks every text-bearing non-sidechain entry, and feeds
+  the rows into a
+  `while read` loop with `SKIP_ACTION=continue`. The transcript is
+  often behind when Stop fires — Claude Code documents it, and on a
+  real corpus 89 of 347 recent kaomoji-led messages (the closing one
+  of a turn, almost always) never reached the journal — so the hook
+  also reads the payload's `last_assistant_message` (2.1.47+) and
+  appends it unless the turn's last assistant message — the run of
+  assistant entries after the turn's last user-type entry — is the
+  final reply already: no `tool_use` block (a message calling a tool
+  didn't end the turn) and a first text block the payload text starts
+  with. Any earlier message is irrelevant: an earlier
+  "(◕‿◕) Done." must not hide a missing "(◕‿◕) Done. Here's …". The
+  appended row has no transcript time yet and carries fire time.
+- **Codex**: each model message is its own event. codex-cli 0.144+
+  writes `event_msg` / `item_completed` with `item.type ==
+  "AgentMessage"` (text in `item.content[].text`); older releases
+  wrote `event_msg.agent_message` (`payload.message`). The paginated
+  format became the default between 0.151 (app-server threads) and
+  0.158 (local), and the pre-2.2 hook — which read only the legacy
+  event — went silent with no error: a9's journal stops on
+  2026-08-24. The hook finds the latest `turn_context` index,
+  slices forward, and reads the turn in whichever shape it carries
+  (item_completed wins; legacy is the fallback for a turn with
+  none), so a release writing both can't double-count. It never
+  reads `response_item` assistant messages: a forked thread replays
+  its parent's history into the child rollout as response_items.
+  `user_text` resolves to the latest non-injected user response_item
+  in the rollout so far — a turn Codex starts by itself (goal step,
+  subagent result) has none of its own and carries the prompt that
+  set it going (before 2.2 those rows got `""`, about 12% of a9's) —
+  and `model` falls back to the turn_context's when the Stop payload
+  has none. On all 337 current rollouts on a9's machine the live
+  rows are byte-identical to the replay's.
+- **Grok**: `transcript_path` is the session's `updates.jsonl` (ACP
+  update stream). The hook keeps `agent_message_chunk` updates whose
+  `_meta.promptId` equals the payload's `promptId`, joins runs of
+  consecutive chunks into one message, and takes `user_text` from the
+  latest `user_message_chunk` before the turn's first chunk (what the
+  user typed — Grok's injected `<user_info>` and reminders live only
+  in `chat_history.jsonl`). The model is the latest `model_id` in the
+  sibling `chat_history.jsonl`; `turn_completed.modelUsage` has it
+  too, but lands after the Stop hook. Only `reason == "end_turn"`
+  is journaled: Grok fires a second Stop at session teardown
+  (`shutdown` / `channel_closed`) that would repeat the last turn.
+- **Antigravity**: the transcript (`transcriptPath`, the
+  `transcript_full.jsonl` under `brain/<id>/`) is a step list; the
+  hook walks `PLANNER_RESPONSE` steps with non-empty `content` after
+  the latest `USER_INPUT`. Model and prompt come from the payload
+  (`modelName`, `lastUserInput` — the latter since agy 1.4.7, with a
+  `<USER_REQUEST>`-stripping fallback to the step). The transcript is
+  complete when Stop fires (verified live). Hooks answer in JSON on
+  stdout, so the journal hook prints `{}` before anything else. The
+  journal is `~/.gemini/antigravity-cli/kaomoji-journal.jsonl`, inside
+  agy's state dir: gaslamp's Seatbelt profile for Gemini consults
+  allows writes only there (and temp), and the fail-open hook would
+  drop rows anywhere else without a word.
 - **Hermes**: walks `extra.conversation_history` (full message list
   `post_llm_call` carries), slices from the latest user-role message
   to end, emits one row per kaomoji-led non-empty assistant message.
@@ -520,6 +611,19 @@ Per-row invariants:
 
 - `user_text` is resolved once per turn — every row from one turn
   carries the same originating prompt.
+- Text fields go through bash command substitution in the live
+  hooks, which drops trailing newlines; the replays apply the same
+  rule (`backfill.as_shell_var`) so the two copies of a message
+  compare equal.
+- A Stop hook fires again when another hook blocks the stop and the
+  agent continues, and the walk re-emits the turn's earlier
+  messages. Rows carry message time, so a repeat from an earlier fire
+  is byte-identical: the journal-write partial checks each row against
+  the journal's last 256 lines as they stood when the run began, and a
+  match uses that line up (multiset — one earlier copy absorbs one
+  repeat, so two identical rows from one run, or a genuine third copy,
+  still land). The bound only misses a re-fire that arrives after more
+  than 256 rows were written since the first fire.
 - The cache key hashes `(synth_model_id, backend, base_url,
   source_model, canonical, sample_set_hash)` where
   `sample_set_hash` covers the sorted `(user, assistant)` pairs
@@ -527,11 +631,16 @@ Per-row invariants:
   on re-import (new rows added past `INSTANCE_SAMPLE_CAP`)
   cache-miss cleanly; stable cells cache-hit.
 - Backfills (`backfill_codex` / `backfill_claude_code` /
-  `backfill_hermes`) implement the same per-message walk and stay
-  parity-tested via `test_pipeline_parity.py`. Hermes parity uses
-  `_HERMES_PARITY_FIELDS` (excludes `cwd`) because session JSON
-  doesn't persist cwd — backfilled rows carry `""` while the live
-  hook stamps `Path.cwd()`.
+  `backfill_hermes` / `backfill_grok`) implement the same
+  per-message walk and stay parity-tested via
+  `test_pipeline_parity.py`, `ts` included: since 2.2 a live row and
+  its replay are the same row. Hermes parity uses
+  `_HERMES_PARITY_FIELDS` (excludes `cwd` and `ts`) because session
+  JSON persists neither per message — backfilled rows carry `""` /
+  `last_updated` while the live hook stamps `Path.cwd()` / fire time.
+  Antigravity has no backfill: its transcripts carry no per-step
+  model id (that's in protobuf blobs in the conversation SQLite
+  store), and every bundle row is keyed by model.
 
 ### Nudge hooks — what gives the corpus its size
 
@@ -549,6 +658,15 @@ the hook variant:
   literal.
 - **Hermes**: bare `{"context": "<msg>"}` — no envelope, returned by
   `pre_llm_call`, the only hook whose return value is used.
+- **Antigravity**: `{"injectSteps": [{"ephemeralMessage": "<msg>"}]}`
+  from `PreInvocation`, before every model call. Ephemeral steps are
+  transient by design (Antigravity's own docs use them for exactly
+  this kind of reminder) and each call can open a new message. In a
+  live run (Gemini 3.8 Flash, 2026-10-25) with a prompt that never
+  mentioned kaomoji, both of the turn's messages led with one.
+- **Grok**: none. `UserPromptSubmit` runs but Grok discards an
+  allowing hook's stdout, so `--hard` is refused
+  (`hard_unsupported_reason`).
 
 The base class exposes the nudge through `nudge_hook_template` /
 `nudge_hook_filename` / `nudge_event` / `nudge_message` class attrs
@@ -558,19 +676,69 @@ four class-level attrs.
 ### Sidechain strategy
 
 - **Claude Code**: drop rows where `isSidechain` is true (field-flag).
-- **Codex**: no subagent concept; `collaboration_mode` is `"default"`
-  for every observed turn_context.
-- **Hermes**: **no viable filter on the current payload contract.**
-  `subagent_stop` fires from the parent's process with the parent's
-  `session_id` and no child id (verified at
-  `hermes-agent/tools/delegate_tool.py:2120-2127`); `post_llm_call`
-  doesn't expose `parent_session_id` either. Subagent
-  `post_llm_call` events land under their own session_ids until
-  upstream gives us either `subagent_stop` carrying the child id or
-  `post_llm_call` exposing `parent_session_id` / `is_subagent`.
+- **Codex**: spawned subagent threads (multi-agent mode) run
+  `SubagentStop`, never the root `Stop` (codex PR #22873, May 2026),
+  so the live hook doesn't see them. Their rollouts carry
+  `session_meta.payload.thread_source == "subagent"` (and a `source`
+  object keyed `subagent`); the hook and the backfill both skip such
+  a rollout whole.
+- **Hermes**: **no filter yet.** `post_llm_call` still exposes no
+  `parent_session_id` / `is_subagent`. Since hermes v0.16.0
+  (2026-06-05) `subagent_start` / `subagent_stop` carry
+  `child_session_id`, so a filter is now possible — record child ids
+  from those events, drop `post_llm_call` rows whose `session_id` is
+  one — but it needs state shared across hook processes and isn't
+  built.
+- **Grok**: inside a subagent the gate fires as `SubagentStop`; a
+  `Stop` hook only gates the main agent. The hook still drops a
+  payload carrying `subagentType`. Child sessions live in the normal
+  sessions tree and are listed under the parent's `subagents/`; the
+  backfill skips any session whose id appears there (meta schema
+  undocumented — every dir name and string value counts).
+- **Antigravity**: unverified. The conversation store has a
+  `parent_references` table, which would be the signal to filter on
+  if subagent executions turn out to fire the global `Stop`.
 - **OpenClaw**: tracks `subagent_spawned` / `subagent_ended` runIds
-  in the TS plugin and drops their `llm_output` rows. Cleaner story
-  than the bash providers ship today.
+  in the TS plugin and drops their `llm_output` rows. Unverified
+  against a live OpenClaw (until 2.2 the plugin never loaded — see
+  below). Current OpenClaw names the child in `subagent_ended` by
+  `targetSessionKey` (matching `subagent_spawned.childSessionKey`);
+  keying the set on session keys would be the sturdier filter.
+
+### OpenClaw paths were wrong before 2.2
+
+OpenClaw's global plugin root is `~/.openclaw/extensions/`
+(`resolveDefaultPluginExtensionsDir`, `src/plugins/install-paths.ts`)
+and its config is `~/.openclaw/openclaw.json` (`CONFIG_FILENAME`,
+`src/config/paths.ts`) — already so in OpenClaw v2026.3.1. 1.3.0
+through 2.1.3 wrote `~/.openclaw/plugins/llmoji-kaomoji/` and
+`~/.openclaw/config.json`, neither of which OpenClaw reads, so the
+provider never captured anything. Install and uninstall now delete
+our files and entry at the old paths (and the old config file, once
+nothing else is in it). OpenClaw parses `openclaw.json` as JSON5; a
+hand-commented file is refused with `SettingsCorruptError` rather
+than rewritten without its comments.
+
+### Import dedup and pre-2.2 fire-time rows
+
+Before 2.2 every live hook stamped `ts` with hook fire time, so a
+message's live row and its replay never shared a dedup key: each
+`llmoji import` after install re-added every live-captured message
+(on a9's machine, 773 Claude Code rows and 89 Codex rows were
+doubled this way; the next import would have added 1,329 more).
+`import_provider` now claims exact-key matches first, then folds
+each remaining replayed row into one unclaimed existing row in
+fire-time format (whole seconds, `Z`) with the same
+`(model, kaomoji, assistant_text)` whose `ts` lies in
+`[ts - 5s, ts + 24h]`. Every claim consumes one specific journal
+row, so genuine repeats of a short message survive. The heuristic
+can undercount by one when a live row's own message is no longer
+replayable and an identical message sits within the day before it. Both passes run over the
+whole replay set; `--since` only gates what's appended, so an older
+message keeps its claim on its own row. Adding `cwd` to the identity
+would cost 22 of 885 real folds on a9's Claude Code journal, and
+`cwd` plus `user_text` 35. Duplicates already sitting in a journal aren't
+rewritten.
 
 ### HookInstaller.install refuses to clobber
 
@@ -746,7 +914,14 @@ holds everything except the four reserved top-level keys
 top-level field, NOT under `extra`.
 
 `extra.user_message` is the original pre-injection user message, so
-`system_injected_prefixes` stays `[]`. If real-traffic inspection
+`system_injected_prefixes` stays `[]`.
+
+Hermes stopped writing `~/.hermes/sessions/session_*.json` snapshots
+in v0.21.1 (tag `v2026.9.7`, commit `7a5fc1b2a9`); sessions since live
+only in `state.db`. `llmoji import hermes` therefore replays history
+up to that release and silently misses everything after; a
+`state.db` reader (or `hermes sessions export`) is the fix, not yet
+written. If real-traffic inspection
 later shows leaked prefixes, populate the list and re-render — the
 bash hook picks it up via `${INJECTED_PREFIXES_FILTER}`.
 
@@ -782,6 +957,13 @@ Used to resolve `user_text`. Codex injects AGENTS.md /
 at session start; we walk the rollout to find the latest real user
 turn, dropping those prefixes defensively. `llmoji.backfill` mirrors.
 
+codex-cli zstd-compresses older rollouts in place
+(`rollout-*.jsonl.zst`) and moves archived ones to
+`~/.codex/archived_sessions/`. `llmoji import codex` reads both;
+decoding needs Python 3.14's `compression.zstd` or the `zstandard`
+package (`llmoji[zstd]`), and files it can't decode are counted and
+reported, not silently dropped.
+
 ### Generic JSONL contract for unsupported harnesses
 
 Motivated users on unsupported harnesses can write directly to
@@ -814,8 +996,11 @@ Two coupling points:
 
 ## Conventions
 
-- Single venv at `.venv/`, pip not uv. `pip install -e ../llmoji`
-  during dev.
+- Any Python 3.11+ environment with an editable install
+  (`pip install -e ".[dev]"`, or `uv pip install -e ".[dev]"`). On
+  a9's machines llmoji is an editable install in the shared uv venv,
+  so the live hooks' Path B fallback runs this checkout's
+  `taxonomy.py`.
 - `main` is branch-protected: PR-only (no direct pushes), four CI
   jobs (lint / typecheck / test / build) required green, branch
   up-to-date, conversation resolution required, force-push and

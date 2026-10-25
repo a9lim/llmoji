@@ -18,6 +18,7 @@ body:
         - install
         - uninstall
         - status
+        - import
         - parse
         - analyze
         - upload

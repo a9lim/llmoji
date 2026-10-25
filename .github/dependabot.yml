@@ -5,6 +5,12 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # One PR for every action bump in a week. main requires a branch to
+    # be up to date before merge, so separate PRs go stale on each other
+    # the moment the first one lands.
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: "pip"
     directory: "/"
@@ -12,8 +18,8 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     ignore:
-      # Anthropic and HuggingFace SDKs move fast and the Stage-A and
-      # upload paths are tested manually before a release; bump these
-      # deliberately, not weekly.
+      # The Anthropic and Hugging Face SDKs move fast, and the synthesis
+      # and upload paths that use them are exercised by hand before a
+      # release; bump these deliberately, not weekly.
       - dependency-name: "anthropic"
       - dependency-name: "huggingface_hub"

@@ -6,7 +6,7 @@ body:
     id: harness-name
     attributes:
       label: Harness name
-      placeholder: e.g. openclaw, aider
+      placeholder: e.g. aider, kiro
     validations:
       required: true
 

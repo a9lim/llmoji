@@ -41,9 +41,11 @@ import pytest
 pytestmark = pytest.mark.slow
 
 # Fields the journal row is built from. We compare these between the
-# bash hook output and the backfill output. ``ts`` differs by design
-# (bash stamps now, backfill stamps historical) so it's excluded.
-_PARITY_FIELDS = ("kaomoji", "model", "cwd", "user_text", "assistant_text")
+# bash hook output and the backfill output. Since 2.2 ``ts`` is one of
+# them: the live hooks stamp the message's own transcript time, so a
+# live row and its replay are the same row and ``llmoji import``
+# dedups them exactly.
+_PARITY_FIELDS = ("ts", "kaomoji", "model", "cwd", "user_text", "assistant_text")
 
 # Hermes-specific: the live hook reads ``cwd`` from the post_llm_call
 # payload (= ``Path.cwd()`` of the agent process at fire time); the
@@ -53,7 +55,13 @@ _PARITY_FIELDS = ("kaomoji", "model", "cwd", "user_text", "assistant_text")
 # ``hermes-agent/run_agent.py``). Backfilled rows therefore land with
 # cwd="" by design. The two are divergent on cwd by source design,
 # not bug.
-_HERMES_PARITY_FIELDS = tuple(f for f in _PARITY_FIELDS if f != "cwd")
+#
+# ``ts`` diverges the same way: Hermes session files keep no
+# per-message time, so the live hook stamps fire time and the backfill
+# stamps the session's ``last_updated``.
+_HERMES_PARITY_FIELDS = tuple(
+    f for f in _PARITY_FIELDS if f not in ("cwd", "ts")
+)
 
 
 def _require_tools() -> tuple[str, str]:
@@ -224,18 +232,10 @@ def test_claude_code_hook_and_backfill_agree(
     )
     assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
     bash_rows = _read_jsonl(hook_journal)
-    # Strip the bash-only ``ts`` field so the comparison is on
-    # parity-critical fields. Backfill stamps the historical event
-    # timestamp; bash stamps now-time. Both behaviors are correct
-    # per the journal contract.
-    for row in bash_rows:
-        row.pop("ts", None)
 
     bf_journal = tmp_path / "backfill-journal.jsonl"
     backfill_claude_code(tx_dir, bf_journal)
     bf_rows = _read_jsonl(bf_journal)
-    for row in bf_rows:
-        row.pop("ts", None)
 
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
 
@@ -449,14 +449,10 @@ def test_claude_code_multi_event_turn_shapes(
     )
     assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
     bash_rows = _read_jsonl(hook_journal)
-    for row in bash_rows:
-        row.pop("ts", None)
 
     bf_journal = tmp_path / "backfill-journal.jsonl"
     backfill_claude_code(tx_dir, bf_journal)
     bf_rows = _read_jsonl(bf_journal)
-    for row in bf_rows:
-        row.pop("ts", None)
 
     expect_row = bool(expected_kaomojis)
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
@@ -621,14 +617,10 @@ def test_claude_code_skill_injected_user_filtered(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, f"bash hook failed: {r.stderr}"
     bash_rows = _read_jsonl(hook_journal)
-    for row in bash_rows:
-        row.pop("ts", None)
 
     bf_journal = tmp_path / "backfill-journal.jsonl"
     backfill_claude_code(tx_dir, bf_journal)
     bf_rows = _read_jsonl(bf_journal)
-    for row in bf_rows:
-        row.pop("ts", None)
 
     assert len(bash_rows) == 1, bash_rows
     assert len(bf_rows) == 1, bf_rows
@@ -773,14 +765,10 @@ def test_codex_hook_and_backfill_agree(
     )
     assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
     bash_rows = _read_jsonl(hook_journal)
-    for row in bash_rows:
-        row.pop("ts", None)
 
     bf_journal = tmp_path / "backfill-journal.jsonl"
     backfill_codex(tx_dir, bf_journal)
     bf_rows = _read_jsonl(bf_journal)
-    for row in bf_rows:
-        row.pop("ts", None)
 
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
     if expect_row:
@@ -885,14 +873,10 @@ def test_codex_multi_message_turn_shapes(
     )
     assert r.returncode == 0, f"{desc}: bash hook failed: {r.stderr}"
     bash_rows = _read_jsonl(hook_journal)
-    for row in bash_rows:
-        row.pop("ts", None)
 
     bf_journal = tmp_path / "backfill-journal.jsonl"
     backfill_codex(tx_dir, bf_journal)
     bf_rows = _read_jsonl(bf_journal)
-    for row in bf_rows:
-        row.pop("ts", None)
 
     expect_row = bool(expected_kaomojis)
     _assert_parity(desc, bash_rows, bf_rows, expect_row)
@@ -1213,3 +1197,511 @@ def test_hermes_backfill_walks_every_turn(tmp_path: Path) -> None:
     assert [r["user_text"] for r in rows] == [
         "turn 1", "turn 2", "turn 2",
     ], rows
+
+
+# ---------------------------------------------------------------------------
+# Claude Code — final message missing from the transcript at Stop time
+# ---------------------------------------------------------------------------
+#
+# Claude Code documents that the transcript may not hold the turn's
+# final assistant message yet when Stop fires, and hands the text over
+# as ``last_assistant_message`` instead. On a real corpus the race
+# dropped about a quarter of all kaomoji-led messages, nearly always
+# the closing one.
+
+
+def _fire_claude_hook(
+    bash: str, hook: Path, transcript: Path, last: str | None,
+) -> None:
+    payload: dict[str, Any] = {"transcript_path": str(transcript), "cwd": "/test"}
+    if last is not None:
+        payload["last_assistant_message"] = last
+    r = subprocess.run(
+        [bash, str(hook)], input=json.dumps(payload),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_claude_code_hook_journals_final_message_missing_from_transcript(
+    tmp_path: Path,
+) -> None:
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    transcript = tmp_path / "transcript.jsonl"
+    # The transcript has the turn's first message but not its last.
+    events = _claude_turn_events(blocks=[
+        {"type": "text", "text": "(◕‿◕) starting"},
+        {"type": "tool_use", "id": "t0", "name": "Bash", "input": {}},
+    ])
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    _fire_claude_hook(bash, hook, transcript, "(＾▽＾) all done\n")
+    rows = _read_jsonl(journal)
+    assert [r["kaomoji"] for r in rows] == ["(◕‿◕)", "(＾▽＾)"], rows
+    final = rows[1]
+    assert final["assistant_text"] == "all done"
+    assert final["model"] == "claude-test"
+    assert final["user_text"] == "ping"
+    # No transcript timestamp to borrow yet: fire time, second precision.
+    assert final["ts"].endswith("Z") and "." not in final["ts"]
+
+
+def test_claude_code_hook_does_not_double_a_final_message_already_written(
+    tmp_path: Path,
+) -> None:
+    """When the transcript already holds the final message, the
+    payload copy is the same message and adds nothing — including
+    when the transcript split it across text blocks."""
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    transcript = tmp_path / "transcript.jsonl"
+    events = _claude_turn_events(blocks=[
+        {"type": "text", "text": "(◕‿◕) first half"},
+        {"type": "text", "text": "second half"},
+    ])
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+    _fire_claude_hook(bash, hook, transcript, "(◕‿◕) first half\n\nsecond half")
+    rows = _read_jsonl(journal)
+    assert [r["assistant_text"] for r in rows] == ["first half"], rows
+
+
+# ---------------------------------------------------------------------------
+# Codex — current codex-cli rollouts (item_completed / AgentMessage)
+# ---------------------------------------------------------------------------
+
+
+def _codex_item_events(
+    agent_messages: list[str], *, legacy_too: bool = False,
+) -> list[dict[str, Any]]:
+    """One turn in the codex-cli 0.144+ rollout shape: each agent
+    message is an ``item_completed`` event whose item is an
+    ``AgentMessage``. ``legacy_too`` also writes the old
+    ``agent_message`` event for every message, as a release that
+    wrote both would have."""
+    events: list[dict[str, Any]] = [
+        {"type": "session_meta", "payload": {
+            "cwd": "/test", "thread_source": "user", "source": "exec"}},
+        {"type": "turn_context", "timestamp": "2026-10-25T00:00:00.000Z",
+         "payload": {"turn_id": "t1", "model": "gpt-test", "cwd": "/test"}},
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "do the thing"}]}},
+    ]
+    for i, msg in enumerate(agent_messages):
+        ts = f"2026-10-25T00:00:{i+1:02d}.500Z"
+        events.append({"type": "event_msg", "timestamp": ts, "payload": {
+            "type": "item_completed", "turn_id": "t1",
+            "item": {"type": "AgentMessage", "id": f"msg_{i}",
+                     "content": [{"type": "Text", "text": msg}],
+                     "phase": "commentary"}}})
+        # The model-API mirror Codex also persists; never read.
+        events.append({"type": "response_item", "timestamp": ts, "payload": {
+            "type": "message", "role": "assistant", "id": f"msg_{i}",
+            "content": [{"type": "output_text", "text": msg}]}})
+        if legacy_too:
+            events.append({"type": "event_msg", "timestamp": ts, "payload": {
+                "type": "agent_message", "message": msg}})
+    return events
+
+
+def _run_codex_both(
+    tmp_path: Path, events: list[dict[str, Any]], *, model: str | None = "gpt-test",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    bash, _ = _require_tools()
+    from llmoji.backfill import backfill_codex
+    from llmoji.providers import CodexProvider
+
+    journal = tmp_path / "hook.jsonl"
+    hook = _render_hook(CodexProvider, journal, tmp_path / "hooks")
+    tx_dir = tmp_path / "tx"
+    tx_dir.mkdir()
+    rollout = tx_dir / "rollout-2026-10-25.jsonl"
+    rollout.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    payload: dict[str, Any] = {"transcript_path": str(rollout), "cwd": "/test"}
+    if model is not None:
+        payload["model"] = model
+    r = subprocess.run(
+        [bash, str(hook)], input=json.dumps(payload),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    bf = tmp_path / "bf.jsonl"
+    backfill_codex(tx_dir, bf)
+    return _read_jsonl(journal), _read_jsonl(bf)
+
+
+def test_codex_item_completed_rollout_parity(tmp_path: Path) -> None:
+    """The shape codex-cli has written since 0.144. The pre-2.2 hook
+    matched none of it and journaled nothing."""
+    msgs = ["(◕‿◕) starting", "plain progress note", "(＾▽＾) done"]
+    bash_rows, bf_rows = _run_codex_both(tmp_path, _codex_item_events(msgs))
+    _assert_parity("codex item_completed", bash_rows, bf_rows, True)
+    assert [r["kaomoji"] for r in bash_rows] == ["(◕‿◕)", "(＾▽＾)"]
+    assert [r["ts"] for r in bash_rows] == [
+        "2026-10-25T00:00:01.500Z", "2026-10-25T00:00:03.500Z",
+    ]
+    assert bash_rows[0]["user_text"] == "do the thing"
+
+
+def test_codex_turn_with_both_shapes_counts_each_message_once(
+    tmp_path: Path,
+) -> None:
+    bash_rows, bf_rows = _run_codex_both(
+        tmp_path, _codex_item_events(["(◕‿◕) once"], legacy_too=True),
+    )
+    _assert_parity("codex dual shape", bash_rows, bf_rows, True)
+    assert len(bash_rows) == 1
+
+
+def test_codex_model_falls_back_to_turn_context(tmp_path: Path) -> None:
+    bash_rows, bf_rows = _run_codex_both(
+        tmp_path, _codex_item_events(["(◕‿◕) hi"]), model=None,
+    )
+    _assert_parity("codex no payload model", bash_rows, bf_rows, True)
+    assert bash_rows[0]["model"] == "gpt-test"
+
+
+def test_codex_subagent_rollout_is_skipped(tmp_path: Path) -> None:
+    events = _codex_item_events(["(◕‿◕) from a child thread"])
+    events[0]["payload"]["thread_source"] = "subagent"
+    events[0]["payload"]["source"] = {"subagent": {"thread_spawn": {
+        "parent_thread_id": "p", "depth": 1}}}
+    bash_rows, bf_rows = _run_codex_both(tmp_path, events)
+    _assert_parity("codex subagent", bash_rows, bf_rows, False)
+
+
+def test_codex_backfill_reads_zstd_rollouts(tmp_path: Path) -> None:
+    """codex-cli compresses older rollouts in place to
+    ``rollout-*.jsonl.zst``; the replay reads them when a zstd decoder
+    is installed."""
+    from llmoji.backfill import _zstd_decoder, backfill_codex
+
+    if _zstd_decoder() is None:
+        pytest.skip("no zstd decoder (Python < 3.14 without zstandard)")
+    try:
+        from compression import zstd  # type: ignore[import-not-found]
+        compress = zstd.compress
+    except ImportError:
+        import zstandard  # type: ignore[import-not-found]
+        compress = zstandard.ZstdCompressor().compress
+
+    tx_dir = tmp_path / "tx" / "2026" / "09" / "01"
+    tx_dir.mkdir(parents=True)
+    events = _codex_item_events(["(◕‿◕) archived"])
+    raw = ("\n".join(json.dumps(e) for e in events) + "\n").encode()
+    (tx_dir / "rollout-2026-09-01.jsonl.zst").write_bytes(compress(raw))
+
+    bf = tmp_path / "bf.jsonl"
+    assert backfill_codex(tmp_path / "tx", bf) == 1
+    assert _read_jsonl(bf)[0]["assistant_text"] == "archived"
+
+
+# ---------------------------------------------------------------------------
+# Grok
+# ---------------------------------------------------------------------------
+
+
+def _grok_update(kind: str, *, text: str = "", pid: str = "",
+                 ms: int = 0, **extra: Any) -> dict[str, Any]:
+    meta: dict[str, Any] = {"agentTimestampMs": ms}
+    if pid:
+        meta["promptId"] = pid
+    update: dict[str, Any] = {"sessionUpdate": kind, **extra}
+    if text or kind.endswith("_chunk"):
+        update["content"] = {"type": "text", "text": text}
+    return {"timestamp": ms // 1000, "method": "session/update",
+            "params": {"sessionId": "s1", "update": update, "_meta": meta}}
+
+
+def _grok_session(tmp_path: Path, updates: list[dict[str, Any]],
+                  model: str = "grok-test-build") -> Path:
+    """A Grok session directory: updates.jsonl plus the chat_history
+    and summary files the hook and replay read alongside it."""
+    session = tmp_path / "sessions" / "%2Ftest" / "s1"
+    session.mkdir(parents=True)
+    (session / "updates.jsonl").write_text(
+        "\n".join(json.dumps(u) for u in updates) + "\n")
+    (session / "chat_history.jsonl").write_text(json.dumps(
+        {"type": "assistant", "content": "x", "model_id": model}) + "\n")
+    (session / "summary.json").write_text(json.dumps(
+        {"info": {"id": "s1", "cwd": "/test"}}))
+    return session
+
+
+def _grok_turn(pid: str, user: str, messages: list[str], start_ms: int,
+               model: str = "grok-test-build") -> list[dict[str, Any]]:
+    out = [_grok_update("user_message_chunk", text=user, ms=start_ms)]
+    for i, msg in enumerate(messages):
+        out.append(_grok_update("agent_thought_chunk", text="hmm",
+                                pid=pid, ms=start_ms + 1000 * i + 500))
+        out.append(_grok_update("agent_message_chunk", text=msg,
+                                pid=pid, ms=start_ms + 1000 * (i + 1)))
+        out.append(_grok_update("tool_call", pid=pid, toolCallId=f"c{i}",
+                                ms=start_ms + 1000 * (i + 1) + 10))
+    out.append(_grok_update("turn_completed", prompt_id=pid, ms=start_ms + 9000,
+                            usage={"modelUsage": {model: {"outputTokens": 5}}}))
+    return out
+
+
+def _fire_grok(tmp_path: Path, session: Path, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    bash, _ = _require_tools()
+    from llmoji.providers import GrokProvider
+
+    journal = tmp_path / "hook.jsonl"
+    hook = _render_hook(GrokProvider, journal, tmp_path / "hooks")
+    payload = {"transcript_path": str(session / "updates.jsonl"),
+               "cwd": "/test", **payload}
+    r = subprocess.run([bash, str(hook)], input=json.dumps(payload),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "", "a Grok Stop hook's stdout is a stop decision"
+    return _read_jsonl(journal)
+
+
+def test_grok_hook_and_backfill_agree(tmp_path: Path) -> None:
+    from llmoji.backfill import backfill_grok
+
+    updates = (
+        _grok_turn("p1", "first prompt", ["(◕‿◕) earlier turn"], 1_792_000_000_000)
+        + _grok_turn("p2", "second prompt",
+                     ["(・_・) looking", "no face here", "(＾▽＾) done"],
+                     1_792_000_100_000)
+    )
+    session = _grok_session(tmp_path, updates)
+    bash_rows = _fire_grok(tmp_path, session, {"reason": "end_turn", "promptId": "p2"})
+    bf = tmp_path / "bf.jsonl"
+    backfill_grok(tmp_path / "sessions", bf)
+    # The live hook sees one turn; the replay sees the whole session.
+    bf_rows = [r for r in _read_jsonl(bf) if r["user_text"] == "second prompt"]
+    _assert_parity("grok", bash_rows, bf_rows, True)
+    assert [r["kaomoji"] for r in bash_rows] == ["(・_・)", "(＾▽＾)"]
+    assert bash_rows[0]["ts"] == "2026-10-14T17:48:21Z"  # 1792000101000 ms, floored
+    assert bash_rows[0]["model"] == "grok-test-build"
+    assert len(_read_jsonl(bf)) == 3
+
+
+def test_grok_hook_joins_chunks_of_one_message(tmp_path: Path) -> None:
+    from llmoji.backfill import backfill_grok
+
+    updates = [
+        _grok_update("user_message_chunk", text="hi", ms=1_792_000_000_000),
+        _grok_update("agent_message_chunk", text="(◕‿◕) hel", pid="p1", ms=1_792_000_001_000),
+        _grok_update("agent_message_chunk", text="lo there", pid="p1", ms=1_792_000_001_200),
+        _grok_update("tool_call", pid="p1", ms=1_792_000_002_000),
+        _grok_update("agent_message_chunk", text="(＾▽＾) bye", pid="p1", ms=1_792_000_003_000),
+    ]
+    session = _grok_session(tmp_path, updates)
+    bash_rows = _fire_grok(tmp_path, session, {"reason": "end_turn", "promptId": "p1"})
+    bf = tmp_path / "bf.jsonl"
+    backfill_grok(tmp_path / "sessions", bf)
+    _assert_parity("grok chunks", bash_rows, _read_jsonl(bf), True)
+    assert [r["assistant_text"] for r in bash_rows] == ["hello there", "bye"]
+
+
+def test_grok_hook_ignores_session_end_stop(tmp_path: Path) -> None:
+    """Grok fires a second Stop at teardown; journaling it would land
+    the last turn twice."""
+    session = _grok_session(tmp_path, _grok_turn("p1", "q", ["(◕‿◕) ok"], 1_792_000_000_000))
+    assert _fire_grok(tmp_path, session, {"reason": "shutdown"}) == []
+    assert _fire_grok(tmp_path, session, {"reason": "end_turn", "promptId": "p1",
+                                          "subagentType": "explore"}) == []
+
+
+def test_grok_backfill_skips_subagent_sessions(tmp_path: Path) -> None:
+    from llmoji.backfill import backfill_grok
+
+    parent = _grok_session(tmp_path, _grok_turn("p1", "q", ["(◕‿◕) parent"], 1_792_000_000_000))
+    child = parent.parent / "child-1"
+    child.mkdir()
+    (child / "updates.jsonl").write_text("\n".join(json.dumps(u) for u in _grok_turn(
+        "c1", "task", ["(•̀ᴗ•́) child"], 1_792_000_050_000)) + "\n")
+    (parent / "subagents" / "a1").mkdir(parents=True)
+    (parent / "subagents" / "a1" / "meta.json").write_text(json.dumps({
+        "session_id": "child-1", "parent_session_id": parent.name,
+        "agent_type": "explore",
+    }))
+
+    bf = tmp_path / "bf.jsonl"
+    backfill_grok(tmp_path / "sessions", bf)
+    assert [r["assistant_text"] for r in _read_jsonl(bf)] == ["parent"]
+
+
+def test_claude_code_skill_loaded_mid_turn_keeps_earlier_messages(
+    tmp_path: Path,
+) -> None:
+    """A skill body arrives as a user-role entry partway through a
+    turn. It isn't the user speaking, so it mustn't reset the turn
+    boundary: before the fix every kaomoji-led message ahead of the
+    skill load was dropped from live capture."""
+    bash, _ = _require_tools()
+    from llmoji.backfill import backfill_claude_code
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "hook.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    tx_dir = tmp_path / "tx"
+    tx_dir.mkdir()
+    transcript = tx_dir / "t.jsonl"
+    events = [
+        {"type": "user", "uuid": "u1", "parentUuid": None,
+         "timestamp": "2026-10-25T00:00:00Z", "message": {"content": "real prompt"}},
+        {"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+         "timestamp": "2026-10-25T00:00:01Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "text", "text": "(◕‿◕) before the skill"}]}},
+        {"type": "user", "uuid": "u2", "parentUuid": "a1",
+         "timestamp": "2026-10-25T00:00:02Z",
+         "message": {"content": [{"type": "text",
+                                  "text": "Base directory for this skill: /x\n\n# Skill"}]}},
+        {"type": "assistant", "uuid": "a2", "parentUuid": "u2",
+         "timestamp": "2026-10-25T00:00:03Z", "cwd": "/test",
+         "message": {"model": "claude-test",
+                     "content": [{"type": "text", "text": "(＾▽＾) after the skill"}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    _fire_claude_hook(bash, hook, transcript, None)
+    bf = tmp_path / "bf.jsonl"
+    backfill_claude_code(tx_dir, bf)
+    bash_rows, bf_rows = _read_jsonl(journal), _read_jsonl(bf)
+    _assert_parity("skill mid-turn", bash_rows, bf_rows, True)
+    assert [r["assistant_text"] for r in bash_rows] == [
+        "before the skill", "after the skill",
+    ]
+    assert {r["user_text"] for r in bash_rows} == {"real prompt"}
+
+
+# ---------------------------------------------------------------------------
+# Review regressions (2.2.0 release review)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_code_earlier_message_cannot_hide_a_missing_final_one(
+    tmp_path: Path,
+) -> None:
+    """An earlier message whose text is a prefix of the missing final
+    reply must not count as the final reply being present."""
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    transcript = tmp_path / "transcript.jsonl"
+    events = _claude_turn_events(blocks=[
+        {"type": "text", "text": "(◕‿◕) Done."},
+        {"type": "tool_use", "id": "t0", "name": "Bash", "input": {}},
+    ])
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    _fire_claude_hook(bash, hook, transcript, "(◕‿◕) Done. Here are the results.")
+    assert [r["assistant_text"] for r in _read_jsonl(journal)] == [
+        "Done.", "Done. Here are the results.",
+    ]
+
+
+def test_stop_refire_does_not_rejournal_earlier_messages(tmp_path: Path) -> None:
+    """Another Stop hook blocks, the agent continues under the same
+    turn, Stop fires again: the second walk re-emits the first fire's
+    messages, and they must not land twice."""
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    transcript = tmp_path / "transcript.jsonl"
+    first = _claude_turn_events(blocks=[{"type": "text", "text": "(◕‿◕) part one"}])
+    transcript.write_text("\n".join(json.dumps(e) for e in first) + "\n")
+    _fire_claude_hook(bash, hook, transcript, None)
+    more = _claude_turn_events(blocks=[
+        {"type": "text", "text": "(◕‿◕) part one"},
+        {"type": "text", "text": "(＾▽＾) part two"},
+    ])
+    transcript.write_text("\n".join(json.dumps(e) for e in more) + "\n")
+    _fire_claude_hook(bash, hook, transcript, None)
+    assert [r["assistant_text"] for r in _read_jsonl(journal)] == ["part one", "part two"]
+
+
+def test_grok_stop_refire_does_not_rejournal(tmp_path: Path) -> None:
+    session = _grok_session(tmp_path, _grok_turn("p1", "q", ["(◕‿◕) A"], 1_792_000_000_000))
+    payload = {"reason": "end_turn", "promptId": "p1", "stopHookActive": False}
+    _fire_grok(tmp_path, session, payload)
+    (session / "updates.jsonl").write_text("\n".join(json.dumps(u) for u in (
+        _grok_turn("p1", "q", ["(◕‿◕) A", "(＾▽＾) B"], 1_792_000_000_000)
+    )) + "\n")
+    rows = _fire_grok(tmp_path, session, {**payload, "stopHookActive": True})
+    assert [r["assistant_text"] for r in rows] == ["A", "B"]
+
+
+def test_one_run_keeps_two_identical_rows(tmp_path: Path) -> None:
+    """The re-fire guard compares against the journal as it stood
+    before this run, so a message genuinely repeated within one turn
+    — same text, and for Hermes the same fire-time ts — still lands
+    twice."""
+    bash, _ = _require_tools()
+    from llmoji.providers import HermesProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(HermesProvider, journal, tmp_path / "hooks")
+    payload = _hermes_payload(user_message="go", conversation_history=[
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "(◕‿◕) checking"},
+        {"role": "assistant", "content": "(◕‿◕) checking"},
+    ])
+    r = subprocess.run([bash, str(hook)], input=json.dumps(payload),
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert len(_read_jsonl(journal)) == 2
+
+
+def test_codex_trailing_newlines_match_between_hook_and_replay(tmp_path: Path) -> None:
+    """Command substitution drops trailing newlines in the live hook;
+    the replay must too, or the two copies of a message never dedup."""
+    events = _codex_item_events(["(◕‿◕) done.\n\n"])
+    events[2]["payload"]["content"][0]["text"] = "do the thing\n"
+    bash_rows, bf_rows = _run_codex_both(tmp_path, events)
+    _assert_parity("codex trailing newline", bash_rows, bf_rows, True)
+    assert bash_rows[0]["assistant_text"] == "done."
+    assert bash_rows[0]["user_text"] == "do the thing"
+
+
+def test_codex_turn_without_a_user_message_carries_the_last_prompt(
+    tmp_path: Path,
+) -> None:
+    """A turn Codex starts by itself (a goal step, a subagent's result)
+    has no user message; its rows carry the prompt that set it going,
+    in the hook and the replay alike."""
+    events = _codex_item_events(["(◕‿◕) first turn"])
+    events.append({"type": "turn_context", "timestamp": "2026-10-25T00:01:00.000Z",
+                   "payload": {"turn_id": "t2", "model": "gpt-test", "cwd": "/test"}})
+    events.append({"type": "event_msg", "timestamp": "2026-10-25T00:01:05.000Z", "payload": {
+        "type": "item_completed", "turn_id": "t2",
+        "item": {"type": "AgentMessage", "id": "m2",
+                 "content": [{"type": "Text", "text": "(＾▽＾) goal step"}]}}})
+    bash_rows, bf_rows = _run_codex_both(tmp_path, events)
+    bf_rows = [r for r in bf_rows if r["ts"] >= "2026-10-25T00:01:00"]
+    _assert_parity("codex goal turn", bash_rows, bf_rows, True)
+    assert bash_rows[0]["user_text"] == "do the thing"
+
+
+def test_stop_refire_uses_each_earlier_row_once(tmp_path: Path) -> None:
+    """The re-fire guard matches as a multiset: one earlier copy of a
+    row absorbs one repeat, and a further identical row still lands."""
+    bash, _ = _require_tools()
+    from llmoji.providers import ClaudeCodeProvider
+
+    journal = tmp_path / "journal.jsonl"
+    hook = _render_hook(ClaudeCodeProvider, journal, tmp_path / "hooks")
+    transcript = tmp_path / "transcript.jsonl"
+    events = _claude_turn_events(blocks=[{"type": "text", "text": "(◕‿◕) same"}])
+    transcript.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    _fire_claude_hook(bash, hook, transcript, None)
+    twin = dict(events[-1], uuid="a-twin")  # byte-identical row: same ts, same text
+    transcript.write_text("\n".join(json.dumps(e) for e in [*events, twin]) + "\n")
+    _fire_claude_hook(bash, hook, transcript, None)
+    assert len(_read_jsonl(journal)) == 2

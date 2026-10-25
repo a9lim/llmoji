@@ -20,7 +20,7 @@ The end-user CLI is :mod:`llmoji.cli`. The locked public surface
   - :mod:`llmoji.scrape` — :class:`~llmoji.scrape.ScrapeRow` schema
     (span-only; no `kaomoji` / `kaomoji_label`).
   - :mod:`llmoji.providers` — :class:`~llmoji.providers.HookInstaller`
-    interface and the three first-class providers.
+    interface and the seven first-class providers.
   - The bundle schema written by :func:`llmoji.analyze.run_analyze`
     (top-level ``manifest.json`` carrying ``lexicon_version`` +
     per-source-model ``<slug>.jsonl`` rows shaped
@@ -40,7 +40,7 @@ from __future__ import annotations
 # resolves it dynamically via ``[tool.hatch.version] path =
 # "llmoji/__init__.py"`` (hatch parses the literal without executing
 # the module, so the eager re-exports below don't fire at build time).
-__version__ = "2.1.3"
+__version__ = "2.2.0"
 
 from ._util import flatten_synthesis
 from .scrape import ScrapeRow, iter_all

@@ -4,10 +4,10 @@
 // First-class llmoji adapter for OpenClaw (https://openclaw.ai).
 // OpenClaw exposes a plugin SDK with ``definePluginEntry`` +
 // ``api.on(hookName, handler)``; this file is a real plugin
-// installed at ``~/.openclaw/plugins/llmoji-kaomoji/``. After install,
+// installed at ``~/.openclaw/extensions/llmoji-kaomoji/``. After install,
 // ``llmoji install openclaw`` also flips
 // ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess`` to
-// ``true`` in ``~/.openclaw/config.json`` — ``llm_input`` and
+// ``true`` in ``~/.openclaw/openclaw.json`` — ``llm_input`` and
 // ``llm_output`` are conversation hooks gated behind that
 // per-plugin opt-in for non-bundled plugins.
 //
