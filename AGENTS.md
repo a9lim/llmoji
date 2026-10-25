@@ -596,7 +596,11 @@ tool-heavy turn easily writes 5–10 rows interleaved with tool calls.
   (`modelName`, `lastUserInput` — the latter since agy 1.4.7, with a
   `<USER_REQUEST>`-stripping fallback to the step). The transcript is
   complete when Stop fires (verified live). Hooks answer in JSON on
-  stdout, so the journal hook prints `{}` before anything else.
+  stdout, so the journal hook prints `{}` before anything else. The
+  journal is `~/.gemini/antigravity-cli/kaomoji-journal.jsonl`, inside
+  agy's state dir: gaslamp's Seatbelt profile for Gemini consults
+  allows writes only there (and temp), and the fail-open hook would
+  drop rows anywhere else without a word.
 - **Hermes**: walks `extra.conversation_history` (full message list
   `post_llm_call` carries), slices from the latest user-role message
   to end, emits one row per kaomoji-led non-empty assistant message.

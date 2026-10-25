@@ -43,6 +43,11 @@ Per-provider quirks (vs claude_code / codex):
     global ``Stop`` with its own transcript isn't verified; the
     conversation store's ``parent_references`` table would be the
     signal to filter on.
+  - **The journal lives in agy's state dir,**
+    ``~/.gemini/antigravity-cli/kaomoji-journal.jsonl``. A sandbox that
+    confines agy's writes to its own state (gaslamp runs consults under
+    such a Seatbelt profile) would otherwise deny the append silently,
+    since the hook fails open.
   - **System-prompt doc is ``~/.gemini/GEMINI.md``.** Antigravity
     reads it as global rules; ``~/.gemini/config/`` itself is guarded
     configuration, and its policy checker treats edits there by the
@@ -71,7 +76,10 @@ class AntigravityProvider(HookInstaller):
     name = "antigravity"
     hooks_dir = home_path(".gemini", "config", "plugins", "llmoji")
     settings_path = home_path(".gemini", "config", "plugins", "llmoji", "hooks.json")
-    journal_path = home_path(".gemini", "kaomoji-journal.jsonl")
+    # Inside the CLI's own state dir, as ``~/.codex/kaomoji-journal.jsonl``
+    # sits in Codex's — and the one place a sandbox that confines agy to
+    # its state (gaslamp's Seatbelt profile does) still lets the hook write.
+    journal_path = home_path(".gemini", "antigravity-cli", "kaomoji-journal.jsonl")
     system_prompt_doc_path = home_path(".gemini", "GEMINI.md")
     hook_template = "antigravity.sh.tmpl"
     # Per-message while-loop, like claude_code / codex. The template
