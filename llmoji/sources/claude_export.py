@@ -1,16 +1,13 @@
-"""Claude.ai export source adapter: ``conversations.json``.
+"""Claude.ai data exports.
 
-The export is a single JSON file: a list of conversation objects,
-each with a ``chat_messages`` array. The top-level ``.text`` field on
-each message is the canonical content; ``content[].text`` blocks are
-the fallback (newer exports occasionally null out one or the other).
+Two shapes, told apart per directory: a single ``conversations.json``
+holding every conversation, or one ``<title>.json`` per conversation
+beside an ``export_summary.json``. Both use the same message schema;
+only the per-file shape carries a conversation ``model``.
 
-Anthropic's export endpoint is non-idempotent — repeated exports of
-the same account sometimes return empty content for conversations a
-prior export populated fully. The CLI's ``parse --provider claude.ai``
-takes one or more directories and unions them by conversation UUID,
-preferring whichever copy has more non-empty messages. Public model
-info is not included in the export.
+Conversations are unioned by uuid across directories, the copy with
+more non-empty messages winning: the export endpoint sometimes returns
+empty content for a conversation an earlier export had in full.
 """
 
 from __future__ import annotations
@@ -19,144 +16,76 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from ..scrape import ScrapeRow
-from ._common import (
-    dedup_by_id_keep_richest,
-    kaomoji_lead_strip,
-    walk_parents_for_user_text,
-)
+from ..scrape import ScrapeRow, kaomoji_row
+from ._common import dedup_by_id_keep_richest, walk_parents_for_user_text
 
 
 def _message_text(msg: dict[str, Any]) -> str:
-    """Prefer top-level ``.text``; fall back to ``content[].text`` blocks."""
+    """Top-level ``text``, else the ``content[]`` text blocks: newer
+    exports sometimes null out one or the other."""
     t = msg.get("text")
     if isinstance(t, str) and t.strip():
         return t
-    parts: list[str] = []
-    for block in msg.get("content", []) or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            bt = block.get("text") or ""
-            if bt.strip():
-                parts.append(bt)
-    return "\n".join(parts)
+    return "\n".join(
+        str(b.get("text"))
+        for b in msg.get("content") or []
+        if isinstance(b, dict) and b.get("type") == "text" and str(b.get("text") or "").strip()
+    )
 
 
-def _iter_chat_messages_conversation(
-    conv: dict[str, Any],
-    *,
-    source: str,
-    model: str | None,
-) -> Iterator[ScrapeRow]:
-    """Walk a single conversation's ``chat_messages`` list and yield
-    one :class:`ScrapeRow` per kaomoji-led assistant message.
-
-    Shared between :func:`iter_claude_export` (one ``conversations.json``
-    holding all conversations as a list, no per-message model info)
-    and :func:`llmoji.sources.claude_export_alt.iter_claude_export_alt`
-    (one ``.json`` per conversation, with ``model`` carried at
-    conversation top-level). Both formats use the same per-message
-    shape — ``sender``, ``parent_message_uuid``, ``content[]`` blocks
-    — so the per-message walk is identical; only the file-discovery
-    layer differs.
-    """
-    msgs = conv.get("chat_messages") or []
-    if not msgs:
+def _conversations(export_dir: Path) -> Iterator[dict[str, Any]]:
+    combined = export_dir / "conversations.json"
+    if combined.exists():
+        try:
+            data = json.loads(combined.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        yield from (c for c in data if isinstance(c, dict)) if isinstance(data, list) else ()
         return
-    by_uuid: dict[str, dict[str, Any]] = {
-        m["uuid"]: m for m in msgs if isinstance(m.get("uuid"), str)
-    }
+    for entry in sorted(export_dir.glob("*.json")):
+        if entry.name == "export_summary.json":
+            continue
+        try:
+            conv = json.loads(entry.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(conv, dict):
+            yield conv
+
+
+def _rows(conv: dict[str, Any]) -> Iterator[ScrapeRow]:
+    msgs = [m for m in conv.get("chat_messages") or [] if isinstance(m, dict)]
+    by_uuid = {m["uuid"]: m for m in msgs if isinstance(m.get("uuid"), str)}
+    model = conv.get("model")
     for m in msgs:
         if m.get("sender") != "assistant":
             continue
-        text = _message_text(m)
-        if not text.strip():
-            continue
-        # Validate + strip via the shared helper so this reader and
-        # the ChatGPT one stay in lockstep — see the "Journal-row
-        # contract" gotcha in :file:`CLAUDE.md`.
-        stripped = kaomoji_lead_strip(text)
-        if stripped is None:
-            continue
-        first_word, body = stripped
-        # Walk parent_message_uuid back to the nearest human-authored
-        # message with non-empty text. Routed through the shared
-        # walker in `sources._common` so this reader and the Claude
-        # Code transcript backfill apply identical traversal logic;
-        # only the field name and role check differ.
-        parent_uuid = m.get("parent_message_uuid")
-        user_text = walk_parents_for_user_text(
-            parent_uuid,
-            by_uuid,
-            parent_field="parent_message_uuid",
-            role_check=lambda node: node.get("sender") == "human",
-            text_extractor=_message_text,
-        )
-        yield ScrapeRow(
-            source=source,
-            model=model,
+        row = kaomoji_row(
+            _message_text(m),
+            source="claude_ai_export",
+            model=model if isinstance(model, str) else None,
             timestamp=str(m.get("created_at") or ""),
             cwd=None,
-            assistant_text=body,
-            first_word=first_word,
-            surrounding_user=user_text,
+            user=walk_parents_for_user_text(
+                m.get("parent_message_uuid"),
+                by_uuid,
+                parent_field="parent_message_uuid",
+                role_check=lambda node: node.get("sender") == "human",
+                text_extractor=_message_text,
+            ),
         )
+        if row is not None:
+            yield row
 
 
-def _conv_content_score(conv: dict[str, Any]) -> int:
-    """Count messages with non-empty ``.text`` or ``.content`` blocks.
-
-    Used to rank duplicate conversations across multiple exports —
-    newer Claude.ai exports sometimes drop content for conversations
-    earlier exports returned in full. Prefer the version with more
-    filled-in messages. Caller (:func:`iter_claude_export`) narrows
-    ``conv`` to ``dict`` before invoking.
-    """
-    score = 0
-    for m in conv.get("chat_messages") or []:
-        if not isinstance(m, dict):
-            continue
-        t = m.get("text")
-        if isinstance(t, str) and t.strip():
-            score += 1
-            continue
-        for b in m.get("content") or []:
-            if isinstance(b, dict) and b.get("type") == "text":
-                bt = b.get("text") or ""
-                if bt.strip():
-                    score += 1
-                    break
-    return score
-
-
-def iter_claude_export(
-    export_dirs: Iterable[Path | str],
-) -> Iterator[ScrapeRow]:
-    """Yield kaomoji-bearing assistant messages from one or more
-    Claude.ai export directories.
-
-    Each directory is expected to contain a ``conversations.json``
-    file. Conversations are unioned by UUID across directories; on
-    duplicate UUIDs the version with more non-empty messages wins
-    (via :func:`llmoji.sources._common.dedup_by_id_keep_richest`).
-    """
-    candidates: list[tuple[str, dict[str, Any], int]] = []
-    for export_dir in export_dirs:
-        path = Path(export_dir) / "conversations.json"
-        if not path.exists():
-            continue
-        with path.open() as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            continue
-        for conv in data:
-            if not isinstance(conv, dict):
-                continue
-            uuid = conv.get("uuid")
-            if not isinstance(uuid, str):
-                continue
-            candidates.append((uuid, conv, _conv_content_score(conv)))
-
+def iter_claude_export(export_dirs: Iterable[Path | str]) -> Iterator[ScrapeRow]:
+    """Kaomoji-led assistant messages from one or more export directories."""
+    candidates = [
+        (conv["uuid"], conv, sum(1 for m in conv.get("chat_messages") or []
+                                 if isinstance(m, dict) and _message_text(m).strip()))
+        for d in export_dirs
+        for conv in _conversations(Path(d))
+        if isinstance(conv.get("uuid"), str)
+    ]
     for conv in dedup_by_id_keep_richest(candidates).values():
-        yield from _iter_chat_messages_conversation(
-            conv, source="claude-ai-export", model=None,
-        )
+        yield from _rows(conv)

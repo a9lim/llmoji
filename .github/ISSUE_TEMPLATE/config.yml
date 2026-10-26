@@ -5,4 +5,4 @@ contact_links:
     about: Please report security or privacy issues privately (see SECURITY.md)
   - name: Take down a submitted bundle
     url: mailto:mx@a9l.im
-    about: Please email me with your submitter id and I'll remove your tarballs from the central dataset
+    about: Please email me with your submitter id and I'll remove your bundles from the central dataset

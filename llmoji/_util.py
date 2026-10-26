@@ -1,38 +1,24 @@
-"""Cross-cutting utilities used by analyze, upload, providers, cli.
-
-These helpers were originally in ``llmoji.providers.base`` but they
-have nothing to do with the provider abstraction — ``upload.py``
-shouldn't have to import from ``providers.base`` to write a JSON file
-atomically. Lifting them keeps the dependency graph tree-shaped.
-"""
+"""Small helpers shared across modules."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from .scrape import ScrapeRow
 
 
 def atomic_write_text(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` via tmp-file + rename.
+    """Write via a temp file and ``os.replace``, so an interrupt leaves
+    the old content or the new, never half.
 
-    ``Path.write_text`` truncates and writes in place; an interrupt
-    between truncate and final flush leaves the user's settings file
-    in a partially-written state. ``os.replace`` (the underlying
-    ``Path.replace`` call) is POSIX-atomic on the same filesystem,
-    so the file either has the old content or the new — never half.
-
-    Symlinks are followed, not replaced. Harness config kept in a
-    dotfiles repository reaches ``~/.claude`` and ``~/.codex`` as
-    links, and a rename onto the link path would quietly detach the
-    live file from the repository it is versioned in — the write
-    would appear to succeed while every other machine kept the old
-    content. Resolving first also keeps the temp file beside its real
-    target, so the rename stays on one filesystem and stays atomic.
+    Symlinks are followed, not replaced: harness config kept in a
+    dotfiles repository reaches ``~/.claude`` as links, and renaming
+    onto the link would detach the live file from its repository.
+    Resolving first also keeps the temp file on the target's filesystem.
     """
     target = Path(os.path.realpath(path))
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -46,31 +32,12 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def package_version() -> str:
-    """Resolve the package version.
+    from . import __version__
 
-    Prefers the live ``llmoji.__version__`` string (single source of
-    truth in ``llmoji/__init__.py``) over ``importlib.metadata``: an
-    editable install's metadata only updates on re-``pip install -e .``,
-    so a dev who bumps ``__version__`` and renders a hook template
-    immediately would otherwise stamp the stale metadata version.
-    Falls back to metadata, then to a final ``0.0.0+dev`` sentinel
-    for stripped-down environments where neither resolves.
-    """
-    try:
-        from . import __version__
-        if __version__:
-            return __version__
-    except Exception:
-        pass
-    try:
-        from importlib.metadata import version
-        return version("llmoji")
-    except Exception:
-        return "0.0.0+dev"
+    return __version__
 
 
 def human_bytes(n: int) -> str:
-    """Format a byte count as a human-readable string (B / KB / MB / GB / TB)."""
     size = float(n)
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
@@ -79,121 +46,91 @@ def human_bytes(n: int) -> str:
     return f"{size:.1f} TB"
 
 
-def journal_line_dict(
-    *,
-    ts: str,
-    model: str,
-    cwd: str,
-    kaomoji: str,
-    user_text: str,
-    assistant_text: str,
-) -> dict[str, Any]:
-    """Canonical 6-field on-disk journal row shape.
+JOURNAL_FIELDS = ("ts", "model", "cwd", "kaomoji", "user_text", "assistant_text")
 
-    Single source of truth for the JSONL row that the live bash hook
-    templates (under :mod:`llmoji._hooks`) emit, that the
-    static-export readers persist via the CLI parse path, and that
-    the :mod:`llmoji.backfill` replays match. Every writer routes
-    through this helper so a future schema change touches one
-    function rather than four scattered ``yield {...}`` blocks.
-    """
+
+def journal_line(row: ScrapeRow) -> dict[str, str]:
+    """The 6-field on-disk journal row for ``row``."""
     return {
-        "ts": ts,
-        "model": model,
-        "cwd": cwd,
-        "kaomoji": kaomoji,
-        "user_text": user_text,
-        "assistant_text": assistant_text,
+        "ts": row.timestamp,
+        "model": row.model or "",
+        "cwd": row.cwd or "",
+        "kaomoji": row.first_word,
+        "user_text": row.surrounding_user,
+        "assistant_text": row.assistant_text,
     }
 
 
-def scrape_row_to_journal_line(row: ScrapeRow) -> dict[str, Any]:
-    """Map a :class:`~llmoji.scrape.ScrapeRow` to the canonical
-    6-field journal row dict.
+def _zstd_decoder() -> Callable[[bytes], bytes] | None:
+    """The stdlib ``compression.zstd`` (Python 3.14+), else the
+    ``zstandard`` package (``llmoji[zstd]``), else ``None``."""
+    try:
+        from compression import zstd  # type: ignore[import-not-found]
+    except ImportError:
+        pass
+    else:
+        return zstd.decompress  # type: ignore[no-any-return]
+    try:
+        import zstandard  # type: ignore[import-not-found]
+    except ImportError:
+        return None
 
-    Empty / ``None`` fields normalize to ``""`` so the dict shape is
-    stable regardless of which source produced the row (live hook,
-    static export, backfill). Routes through :func:`journal_line_dict`
-    for the schema definition.
-    """
-    return journal_line_dict(
-        ts=row.timestamp,
-        model=row.model or "",
-        cwd=row.cwd or "",
-        kaomoji=row.first_word,
-        user_text=row.surrounding_user,
-        assistant_text=row.assistant_text,
-    )
+    def decompress(data: bytes) -> bytes:
+        with zstandard.ZstdDecompressor().stream_reader(data) as reader:
+            return reader.read()  # type: ignore[no-any-return]
+
+    return decompress
+
+
+def can_read_zstd() -> bool:
+    return _zstd_decoder() is not None
+
+
+def read_session_text(path: Path) -> str | None:
+    """A session file's text, decompressing ``.zst`` (codex-cli
+    compresses old rollouts in place). ``None`` when it can't be read."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if path.suffix == ".zst":
+        decompress = _zstd_decoder()
+        if decompress is None:
+            return None
+        try:
+            data = decompress(data)
+        except Exception:  # noqa: BLE001 — a corrupt frame skips the file
+            return None
+    return data.decode("utf-8", errors="replace")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """The JSON objects in a JSONL session file, skipping bad lines."""
+    out: list[dict[str, Any]] = []
+    for line in (read_session_text(path) or "").splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
 
 
 def flatten_synthesis(synth_obj: dict[str, Any]) -> str:
-    """Render a v2 synthesis object back to a comma-separated
-    adjective string.
-
-    Useful for downstream consumers that still want a single string
-    view of the synthesis (e.g. ``llmoji-study/scripts/harness/
-    60_corpus_pull.py`` keeps a flat ``description: str`` field
-    alongside the structured ``synthesis: {...}`` so the existing
-    sentence-transformer embedding code in ``claude_faces.py``
-    keeps working without changes), and for the bundle preview
-    inside :func:`llmoji.analyze._print_preview`.
-
-    Order: ``primary_affect`` first (circumplex anchors lead the
-    bag), then ``stance_modality_function`` (extension axes). Empty
-    synthesis (defensive — shouldn't happen at runtime) → empty
-    string.
-    """
-    if not synth_obj:
-        return ""
+    """A synthesis object as one comma-separated adjective string,
+    circumplex anchors first. ``llmoji-study`` keeps this flat view
+    beside the structured one for its embedding code."""
     primary = synth_obj.get("primary_affect") or []
     extension = synth_obj.get("stance_modality_function") or []
     if not isinstance(primary, list) or not isinstance(extension, list):
         return ""
-    return ", ".join(list(primary) + list(extension))
-
-
-def iter_bundle_data_files(
-    bundle_dir: Path,
-) -> Iterator[tuple[Path, list[dict[str, Any]]]]:
-    """Walk the bundle root, yielding ``(path, parsed_rows)`` for
-    every per-source-model ``<slug>.jsonl`` file.
-
-    Manifest.json is excluded — it's bundle metadata, not per-cell
-    data. Callers that need it read it separately. Used by
-    :func:`llmoji.analyze._print_preview` and
-    ``examples/inspect_bundle.py`` so the read-and-parse loop lives
-    in one place.
-
-    Files are sorted by name for deterministic preview ordering.
-    Empty rows skip; malformed JSON raises (these files are
-    written by ``analyze`` and should always parse).
-    """
-    paths = sorted(
-        p for p in bundle_dir.iterdir()
-        if p.is_file() and p.suffix == ".jsonl"
-    )
-    for path in paths:
-        rows = [
-            json.loads(line)
-            for line in path.read_text().splitlines()
-            if line.strip()
-        ]
-        yield path, rows
+    return ", ".join([*primary, *extension])
 
 
 def sanitize_model_id_for_path(model_id: str) -> str:
-    """Subfolder-safe encoding of a model id for the per-source-model
-    bundle layout.
-
-    Rules: lowercase, ``/`` → ``__``, ``:`` → ``-``, dots and digits
-    preserved. Empty / falsy input → ``"unknown"`` (defensive — keeps
-    rows whose ``ScrapeRow.model`` is empty from collapsing into an
-    unnamed top-level path).
-
-    Lives here rather than in ``llmoji.synth`` so ``upload.py``'s
-    allowlist walker can reuse it without dragging in the synthesis
-    backend imports.
-    """
+    """Bundle filename stem for a model id: lowercase, ``/`` → ``__``,
+    ``:`` → ``-``; ``"unknown"`` for an empty id."""
     if not model_id:
         return "unknown"
     return model_id.lower().replace("/", "__").replace(":", "-")

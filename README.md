@@ -7,14 +7,9 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/llmoji/)
 
 > [!WARNING]
-> **Privacy notice** Versions of `llmoji` before 1.2.0 had a potential privacy issue that I managed to catch; I have changed the upload method to mitigate it. You will need to (`pip install --upgrade llmoji`) before you can upload.
-> 
-> **プライバシーに関するお知らせ** `llmoji`のバージョン1.2.0より前の版において、潜在的なプライバシー上の問題が存在する可能性が判明しましたが、現在は修正済みです。この問題を解消するため、アップロード方法を変更いたしました。アップロードを行う前に、(`pip install --upgrade llmoji`) を実行してパッケージを更新する必要があります。
-
-> [!WARNING]
-> **Update Notice** 2.2.0 fixes three capture gaps. Codex logging stopped working when codex-cli switched to a new session format (rolled out between 0.144 and 0.158); Claude Code often missed the last message of each turn; and the OpenClaw plugin was installed somewhere OpenClaw never looks. Please upgrade, then run `llmoji install --soft --yes && llmoji import --yes` (or `--hard`, see below) to reinstall the hooks and recover the missed kaomoji from your session history. 2.2.0 also adds Grok Build and Antigravity.
-> 
-> **更新のお知らせ** バージョン 2.2.0 では、記録漏れの問題を3点修正しました。codex-cli の新しいセッション形式への移行（0.144〜0.158 にかけて段階的に導入）により Codex の記録が停止していた問題、Claude Code で各ターンの最後のメッセージが記録されないことが多かった問題、そして OpenClaw プラグインが OpenClaw の読み込まない場所にインストールされていた問題です。アップグレード後、`llmoji install --soft --yes && llmoji import --yes`（`--hard` も可。詳細は下記をご参照ください）を実行してフックを再インストールし、セッション履歴から記録漏れの顔文字を補完してください。また、2.2.0 で Grok Build と Antigravity に対応しました。
+> **Update Notice** 3.0 is a slimmer llmoji. The hooks now run through Python instead of bash and `jq`, so live capture and `llmoji import` share one implementation. `install` no longer takes `--soft` / `--hard`: it always adds the kaomoji request to the harness's instructions file. Hermes, opencode and OpenClaw support is gone. If you used one of them, please run `llmoji uninstall <provider>` with 2.x before upgrading. After upgrading, please run `llmoji install --yes && llmoji import --yes` to reinstall the hooks and recover anything they missed.
+>
+> **更新のお知らせ** バージョン 3.0 では llmoji を大幅に簡素化しました。フックは bash と `jq` ではなく Python で動作するようになり、リアルタイムの記録と `llmoji import` が同じ実装を共有します。`install` は `--soft` / `--hard` を受け付けなくなり、常にハーネスの指示ファイルへ顔文字のリクエストを追記します。Hermes、opencode、OpenClaw への対応は終了しました。これらをお使いの場合は、アップグレード前に 2.x で `llmoji uninstall <provider>` を実行してください。アップグレード後、`llmoji install --yes && llmoji import --yes` を実行してフックを再インストールし、記録漏れの顔文字を補完してください。
 
 Llmoji is a small CLI that makes your agents cuter. (´-ω-`)
 
@@ -24,13 +19,13 @@ The companion research repo [`llmoji-study`](https://github.com/a9lim/llmoji-stu
 
 There are three main commands:
 
-- **`llmoji install --soft`** or **`--hard`**: installs the journal hook for all detected providers, and either adds a `## Kaomoji` section to the harness's prompt doc (`--soft`), or writes a nudge hook (`--hard`). The flags are mutually exclusive and one is required. Both modes capture journal data.
+- **`llmoji install`**: installs the journal hook for every detected harness and adds a `## Kaomoji` section to its instructions file.
 - **`llmoji analyze`**: scrape and aggregate your logs
-- **`llmoji upload --target {hf,email}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; email: tarball)
+- **`llmoji upload --target {hf,archive}`**: ship the bundle (HF: pushes a per-submission branch on the dataset for the maintainer to review; archive: writes a tarball you can email instead)
 
 `install`, `uninstall`, and `import` all also accept a single explicit `<provider>` arg. Run with no arg to autodetect every harness present on disk and apply to each.
 
-`analyze` needs an llm to synthesize your logs. By default, it uses Anthropic Haiku and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-5.4 mini and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs your HuggingFace token plus an upload password posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji); please see [SECURITY.md](SECURITY.md) for the threat model. The email path tarballs the bundle and has you attach it manually.
+`analyze` needs an llm to synthesize your logs. By default it uses Claude Haiku 5.5 and reads `$ANTHROPIC_API_KEY`; `--backend openai` uses GPT-6 Luna and reads `$OPENAI_API_KEY`; `--backend local` runs against any OpenAI-compatible endpoint (Ollama, vLLM, etc.) and needs `--base-url` and `--model`. `upload --target hf` needs the upload password posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji); please see [SECURITY.md](SECURITY.md) for the threat model.
 
 ---
 
@@ -52,12 +47,12 @@ The shared HuggingFace dataset at [`a9lim/llmoji`](https://huggingface.co/datase
 
 ```bash
 pip install llmoji
-llmoji install --soft           # autodetect
+llmoji install                 # autodetect
 # or, target a single harness explicitly:
-llmoji install claude_code --soft   # or: codex, hermes, grok, antigravity, opencode, openclaw
+llmoji install claude_code     # or: codex, grok, antigravity
 ```
 
-From now on, your agent will use kaomoji at the start of each message. 
+From now on, your agent will use kaomoji at the start of each message.
 
 After letting it run for a week or so:
 
@@ -67,21 +62,21 @@ llmoji status                              # check what's been logged
 llmoji analyze                             # scrape + canonicalize + summarize
 llmoji upload --target hf                  # pushes to a submission branch on a9lim/llmoji
 # or:
-llmoji upload --target email               # opens mailto:
+llmoji upload --target archive             # writes a tarball to email instead
 ```
 
 You can pick a different backend for `analyze`:
 
 ```bash
 export OPENAI_API_KEY=...
-llmoji analyze --backend openai            # GPT-5.4 mini via the Responses API
+llmoji analyze --backend openai            # GPT-6 Luna via the Responses API
 # or:
 llmoji analyze --backend local \           # any OpenAI-compatible endpoint
   --base-url http://localhost:11434/v1 \
   --model llama3.1
 ```
 
-`analyze` caches per-cell adjective bags at `~/.llmoji/cache/per_cell.jsonl` keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. Re-runs that change which rows fall in a cell's sample miss cleanly while stable cells hit. `llmoji cache clear` wipes it (and the legacy v1 `per_instance.jsonl` if still on disk after upgrading from 1.x).
+`llmoji analyze --dry-run` prints how many calls a run would make and roughly how many tokens they'd use, without calling anything. Results are cached at `~/.llmoji/cache/per_cell.jsonl`, so a re-run only pays for cells whose sampled rows changed; `llmoji cache clear` wipes it.
 
 ---
 
@@ -91,7 +86,7 @@ llmoji analyze --backend local \           # any OpenAI-compatible endpoint
 pip install llmoji
 ```
 
-This requires Python 3.11+. The runtime dependency footprint is five packages: `anthropic`, `openai`, `huggingface_hub`, `ruamel.yaml`, and `tqdm`. Hooks run in `bash` and need `jq`.
+This requires Python 3.11+. The runtime dependencies are `anthropic`, `openai`, `huggingface_hub`, and `tqdm`. The hooks are three-line `sh` shims that run the same Python that installed them, so please install llmoji somewhere that persists (`pip`, `pipx`, `uv tool install`), not a throwaway `uvx` environment. If you rebuild that environment, please run `llmoji install` again (`llmoji status` will say so).
 
 codex-cli compresses older sessions to `.jsonl.zst`. To replay those with `llmoji import codex` on Python 3.13 or older, install the `zstd` extra (`pip install 'llmoji[zstd]'`); Python 3.14 reads them out of the box.
 
@@ -100,7 +95,7 @@ From source:
 ```bash
 git clone https://github.com/a9lim/llmoji
 cd llmoji
-pip install -e ".[dev]"      # adds pytest + ruff
+pip install -e ".[dev]"      # adds pytest, ruff, pyright
 ```
 
 ---
@@ -109,43 +104,42 @@ pip install -e ".[dev]"      # adds pytest + ruff
 
 ### Journal capture
 
-Llmoji registers a `Stop` hook that fires once per assistant turn, that extracts the reply, strips the kaomoji from the body, and appends one JSONL row to `~/.<harness>/kaomoji-journal.jsonl`. The schema is the same across every provider:
+Llmoji registers a `Stop` hook. When a turn ends, it reads the harness's transcript, finds every message in the turn that opens with a kaomoji, and appends one JSONL row per message to the harness's journal. The schema is the same across every provider:
 
 ```json
 {"ts": "...", "model": "...", "cwd": "...", "kaomoji": "(◕‿◕)", "user_text": "...", "assistant_text": "..."}
 ```
 
-### Placement: soft or hard
+`assistant_text` is the message with the kaomoji removed. `llmoji import` reads the same transcripts with the same code, so it can fill in anything the hook missed without counting a message twice.
 
-`--hard` is the v1 behavior. It injects the kaomoji reminder as additional context every turn. Grok is the exception: it throws away anything a hook tries to add to the prompt, so Grok only supports `--soft` (`llmoji install --hard` skips it and says so).
+### The kaomoji request
 
-`--soft` instead adds the reminder to the prompt doc:
+`install` appends this to the harness's instructions file, under a `## Kaomoji` heading:
 
-| Provider      | Path                                   |
-|---------------|----------------------------------------|
-| `claude_code` | `~/.claude/CLAUDE.md`                  |
-| `codex`       | `~/.codex/AGENTS.md`                   |
-| `hermes`      | `~/.hermes/SOUL.md`                    |
-| `grok`        | `~/.grok/AGENTS.md`                    |
-| `antigravity` | `~/.gemini/GEMINI.md`                  |
-| `opencode`    | `~/.config/opencode/AGENTS.md`         |
-| `openclaw`    | `~/.openclaw/workspace/SOUL.md`        |
+> Please begin your message with a kaomoji that best represents how you feel. Don't worry if you're not certain — pick whatever face is closest.
 
-Uninstall removes the block by exact string match against the canonical wording (and the wordings shipped by older versions), so a hand-edited body survives uninstall (please re-run `install --soft` if you want to refresh it).
+| Provider      | Instructions file      |
+|---------------|------------------------|
+| `claude_code` | `~/.claude/CLAUDE.md`  |
+| `codex`       | `~/.codex/AGENTS.md`   |
+| `grok`        | `~/.grok/AGENTS.md`    |
+| `antigravity` | `~/.gemini/GEMINI.md`  |
+
+Uninstall removes the block by exact match (including the wordings older versions wrote), so a block you've edited by hand is left alone.
 
 ### Analysis
 
-`llmoji analyze` scrapes every installed provider's journal plus any extra JSONL files under `~/.llmoji/journals/`. For each `(source_model, canonical_kaomoji)` cell, it samples up to 4 representative rows and calls the synthesizer once with all 4 instances visible. The synthesizer returns a structured adjective bag drawn from a locked 50-word lexicon: 1-3 from the PAD-cell circumplex anchors (HP-D / HP-S / LP / NP / HN-D / HN-S / LN / NB / HB) plus 3-5 from extension axes (functional, stance, modality, confidence). This bag is the only thing that ships in the bundle.
+`llmoji analyze` reads every provider's journal plus any JSONL files under `~/.llmoji/journals/`. For each `(source_model, canonical_kaomoji)` cell, it samples up to 4 representative rows and calls the synthesizer once with all 4 instances visible. The synthesizer returns a structured adjective bag drawn from a locked 50-word lexicon: 1-3 from the PAD-cell circumplex anchors (HP-D / HP-S / LP / NP / HN-D / HN-S / LN / NB / HB) plus 3-5 from extension axes (functional, stance, modality, confidence). Every bag is checked against the lexicon before it's cached, and this bag is the only thing that ships in the bundle.
 
-The lexicon is locked under `lexicon_version` in the manifest so cross-corpus aggregation can refuse to mix versions if the vocabulary ever rotates. v2's single-stage shape replaces the v1.x two-stage prose pipeline that produced free-form descriptions per cell — those clustered as noise in PCA because most of their token mass was structural template ("this kaomoji conveys X paired with Y"). Pure adjective bags carry signal-per-token instead.
+The lexicon is locked under `lexicon_version` in the manifest so cross-corpus aggregation can refuse to mix versions if the vocabulary ever rotates.
 
 The synthesizer is one of three backends, chosen via `--backend`. The same synthesizer evaluates everything in a single `analyze` run, so the bags across source models are comparable.
 
-| Backend     | API                                          | Default model                  |
-|-------------|----------------------------------------------|--------------------------------|
-| `anthropic` | Anthropic SDK, `messages.create`             | `claude-haiku-4-5-20251001`    |
-| `openai`    | OpenAI SDK, Responses API                    | `gpt-5.4-mini-2026-03-17`      |
-| `local`     | OpenAI-compatible Chat Completions endpoint  | (set via `--model`)            |
+| Backend     | API                                          | Default model         |
+|-------------|----------------------------------------------|-----------------------|
+| `anthropic` | Anthropic SDK, `messages.create`             | `claude-haiku-5-5`    |
+| `openai`    | OpenAI SDK, Responses API                    | `gpt-6-luna`          |
+| `local`     | OpenAI-compatible Chat Completions endpoint  | (set via `--model`)   |
 
 ### Bundle structure
 
@@ -154,9 +148,8 @@ The synthesizer is one of three backends, chosen via `--backend`. The same synth
 ```
 ~/.llmoji/bundle/
   manifest.json
-  claude-sonnet-4-6.jsonl
-  claude-opus-4-7.jsonl
-  gpt-5.5.jsonl
+  claude-opus-5-5.jsonl
+  gpt-6.1-sol.jsonl
 ```
 
 - **`manifest.json`**: package version, lexicon version, the synthesis backend and model id used, a salted submitter id, generation timestamp, list of providers seen, per-source-model row counts, total synthesized rows, and anything you include as `--notes`.
@@ -178,52 +171,33 @@ Please see [SECURITY.md](SECURITY.md) for the full privacy model.
 
 ## Providers
 
-**Bash hook providers**
+| Provider      | Hook registration                             | Journal                                             | History `import` reads                  |
+|---------------|-----------------------------------------------|-----------------------------------------------------|-----------------------------------------|
+| `claude_code` | `~/.claude/settings.json`                     | `~/.claude/kaomoji-journal.jsonl`                   | `~/.claude/projects/`                   |
+| `codex`       | `~/.codex/hooks.json`                         | `~/.codex/kaomoji-journal.jsonl`                    | `~/.codex/sessions/`, `archived_sessions/` |
+| `grok`        | `~/.grok/hooks/llmoji.json`                   | `~/.grok/kaomoji-journal.jsonl`                     | `~/.grok/sessions/`                     |
+| `antigravity` | plugin at `~/.gemini/config/plugins/llmoji/`  | `~/.gemini/antigravity-cli/kaomoji-journal.jsonl`   | (none: transcripts don't record the model) |
 
-| Provider      | Journal-write event | Hard-mode nudge event | Settings                                        | Soft-doc path             |
-|---------------|---------------------|-----------------------|-------------------------------------------------|---------------------------|
-| `claude_code` | Stop                | UserPromptSubmit      | `~/.claude/settings.json`                       | `~/.claude/CLAUDE.md`     |
-| `codex`       | Stop                | UserPromptSubmit      | `~/.codex/hooks.json`                           | `~/.codex/AGENTS.md`      |
-| `hermes`      | post_llm_call       | pre_llm_call          | `~/.hermes/config.yaml`                         | `~/.hermes/SOUL.md`       |
-| `grok`        | Stop                | (soft only)           | `~/.grok/hooks/llmoji.json`                     | `~/.grok/AGENTS.md`       |
-| `antigravity` | Stop                | PreInvocation         | plugin at `~/.gemini/config/plugins/llmoji/`    | `~/.gemini/GEMINI.md`     |
-
-Subagent traffic on hermes and antigravity is not currently filtered: neither harness marks a subagent's own model calls in the payload the journal hook sees.
+Subagent turns are left out everywhere except Antigravity, where it isn't yet known whether they reach the hook.
 
 If Grok's Claude compatibility is on (its default), Grok also runs the hooks in `~/.claude/settings.json` and reads `~/.claude/CLAUDE.md`. That's harmless: the Claude Code hook finds nothing to log in a Grok session.
 
-**TS plugin providers**
-
-| Provider   | Plugin location                              | Settings format | Soft-doc path                       |
-|------------|----------------------------------------------|-----------------|-------------------------------------|
-| `opencode` | `~/.config/opencode/plugins/llmoji.ts`       | (none)          | `~/.config/opencode/AGENTS.md`      |
-| `openclaw` | `~/.openclaw/extensions/llmoji-kaomoji/`     | JSON            | `~/.openclaw/workspace/SOUL.md`     |
-
-`install` does not clobber existing config. `llmoji uninstall <provider>` removes the hooks (or plugin files), the settings entry, and the soft-doc block if one was appended. `llmoji uninstall` (no provider) autodetects every detected harness and uninstalls from each. Journals and the per-cell synth cache are preserved; wipe the cache with `llmoji cache clear`.
+`install` does not clobber existing config, and refuses to edit a settings file it can't parse. `llmoji uninstall <provider>` removes the hook, its registration, and the kaomoji block; `llmoji uninstall` (no provider) does that for every detected harness. Journals and the synthesis cache are kept.
 
 ---
 
-## Static dumps
+## History and static exports
 
-To pull kaomoji out of a static export:
+For Claude Code, Codex, or Grok history from before you installed the hook, `llmoji import <provider>` replays the harness's own session files into its journal. With no provider it does every importable harness it finds (`--yes` skips the confirmation). Re-runs are safe: every replayed message is matched against the journal, including messages the hook already logged, and a journal row it matches is replaced by the replay's copy, which repairs rows older versions wrote with the hook's time instead of the message's, a missing model, or a notification in place of your prompt.
+
+To pull kaomoji out of a chat-app data export:
 
 ```bash
 llmoji parse --provider claude.ai ~/Downloads/data-...-batch-0000
 llmoji parse --provider chatgpt   ~/Downloads/chatgpt-export
-llmoji parse --provider gemini    ~/Downloads/aistudio-exports
-llmoji parse --provider openhands ~/.openhands/conversations
 ```
 
-| Source      | Shape walked                                                                              | Output journal                          |
-|-------------|-------------------------------------------------------------------------------------------|-----------------------------------------|
-| `claude.ai` | `conversations.json`                                                                      | `claude_ai_export.jsonl`                |
-| `chatgpt`   | `conversations.json`                                                                      | `chatgpt_export.jsonl`                  |
-| `gemini`    | `MyActivity.json`                                                                         | `gemini_aistudio_export.jsonl`          |
-| `openhands` | `<conversation>/events/event-NNNNN-<id>.json`                                             | `openhands_export.jsonl`                |
-
-For Claude Code, Codex, Hermes, or Grok history that predates installing the live hook, the historical transcripts can be replayed into the journals via `llmoji import <provider>`. Run with no provider to autodetect every importable harness present on disk and replay each in one go: `llmoji import` (or `llmoji import --yes` to skip the confirmation prompt). Re-runs are idempotent — every replayed row is dedup'd against the existing journal, including rows the live hook already logged, so it's safe to run after any taxonomy improvement to recover newly-recognized kaomoji.
-
-Hermes stopped writing the session files `import` reads in v0.21.1, so `llmoji import hermes` only covers sessions from before that release. Antigravity can't be imported: its transcripts don't record which model wrote each message.
+`claude.ai` reads either export shape (one `conversations.json`, or one file per conversation); several export directories can be passed at once and are merged by conversation. The rows land in `~/.llmoji/journals/`.
 
 ---
 
@@ -231,28 +205,23 @@ Hermes stopped writing the session files `import` reads in v0.21.1, so `llmoji i
 
 For harnesses we don't ship a first-class adapter for:
 
-- Append one row per kaomoji-bearing assistant turn to `~/.llmoji/journals/<harness>.jsonl`.
+- Append one row per kaomoji-bearing assistant message to `~/.llmoji/journals/<harness>.jsonl`.
 - Use the canonical six-field schema: `{ts, model, cwd, kaomoji, user_text, assistant_text}`.
-- Strip the leading kaomoji from `assistant_text` on the way in (the prefix lives in the `kaomoji` field).
-- Validate the prefix the same way the package does: `llmoji.taxonomy.is_kaomoji_candidate(prefix)`.
+- Split each message with `llmoji.taxonomy.split_leading_kaomoji(text)`, which returns `(face, body)` or `None`; the face goes in `kaomoji` and the body in `assistant_text`.
 
 `llmoji analyze` picks up everything under `~/.llmoji/journals/` automatically.
-
-The Python module `llmoji.taxonomy` is the canonical source for the validator. If you're porting the validator to another language, please mirror the rules in `is_kaomoji_candidate`; the canonical TS port lives at [`llmoji/_plugins/_kaomoji_taxonomy.ts.partial`](llmoji/_plugins/_kaomoji_taxonomy.ts.partial). Bumping any of the rules is a cross-corpus invariant change on the package side and your port needs to follow.
 
 ---
 
 ## Tests
 
 ```bash
-pytest tests/                      # everything
+pytest tests/                      # everything, in about a second
 pytest tests/test_canonicalize.py  # rule-by-rule regression for canonicalize_kaomoji and extract
-pytest tests/test_public_surface.py  # locks the cross-corpus invariant contract
+pytest tests/test_capture.py       # each harness's transcript decoding, and the installed hook end to end
 ```
 
-The full suite runs anywhere. CI runs `ruff check .` and `pytest` on every PR.
-
-The public-surface test exercises taxonomy invariants, synth-prompt content checks, the synthesizer factory dispatch, provider rendering plus `bash -n` validation of every hook template, the bundle allowlist, the corrupt-config refusal paths, and the unified `mask_kaomoji` prepend contract. The canonicalize tests run rule-by-rule.
+CI runs `ruff check .`, `pyright`, `pytest` and a wheel build on every PR.
 
 ---
 

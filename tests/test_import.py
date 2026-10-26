@@ -1,699 +1,236 @@
-"""Tests for ``llmoji import`` (the dedup-aware merge of native
-session files into the live journal).
-
-The user-facing CLI is ``llmoji import <provider>``; the internal
-module name stays :mod:`llmoji.backfill` so the parity tests in
-``test_pipeline_parity.py`` keep working without rename churn.
-These tests focus on the dedup + atomic-merge behavior that
-``import_provider`` adds on top of the existing ``backfill_*``
-iterators.
-"""
+"""``llmoji import``: replaying session history into a journal without
+counting a message twice."""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from llmoji import cli
+from llmoji.capture import import_provider
+from llmoji.providers import Provider
+from llmoji.scrape import ScrapeRow
 
-def _write_journal(path: Path, rows: list[dict[str, object]]) -> None:
-    """Write a JSONL journal with the canonical 6-field shape."""
+
+def _write_journal(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
 
 
-def _row(
-    ts: str = "2026-04-28T00:00:00Z",
-    model: str = "m1",
-    cwd: str = "/tmp",
-    kaomoji: str = "(◕‿◕)",
-    user_text: str = "u",
-    assistant_text: str = "a",
-) -> dict[str, object]:
-    return {
-        "ts": ts, "model": model, "cwd": cwd,
-        "kaomoji": kaomoji, "user_text": user_text,
-        "assistant_text": assistant_text,
-    }
+def _jrow(ts: str, *, kaomoji: str = "(◕‿◕)", text: str = "same words") -> dict[str, Any]:
+    return {"ts": ts, "model": "m1", "cwd": "", "kaomoji": kaomoji, "user_text": "u",
+            "assistant_text": text}
 
 
-# ---------------------------------------------------------------------------
-# dedup key correctness
-# ---------------------------------------------------------------------------
+def _replayed(ts: str, text: str = "same words", face: str = "(◕‿◕)") -> ScrapeRow:
+    return ScrapeRow("claude_code-hook", "m1", ts, None, text, face, "u")
 
 
-def test_dedup_key_same_inputs_collide() -> None:
-    from llmoji.backfill import _dedup_key_for_journal_row
+class _Fake(Provider):
+    name = "fake"
 
-    a = _dedup_key_for_journal_row("ts", "m", "assistant body")
-    b = _dedup_key_for_journal_row("ts", "m", "assistant body")
-    assert a == b
+    def __init__(self, journal: Path, rows: list[ScrapeRow]) -> None:
+        self.journal_path = journal
+        self._rows = rows
 
+    def session_files(self) -> list[Path]:
+        return [Path("session.jsonl")]
 
-def test_dedup_key_different_assistant_differs() -> None:
-    from llmoji.backfill import _dedup_key_for_journal_row
-
-    a = _dedup_key_for_journal_row("ts", "m", "body one")
-    b = _dedup_key_for_journal_row("ts", "m", "body two")
-    assert a != b
+    def replay(self, path: Path) -> Iterator[ScrapeRow]:
+        return iter(self._rows)
 
 
-def test_dedup_key_nul_byte_safety() -> None:
-    """Length-prefixed framing prevents a buried NUL from collapsing
-    field boundaries (mirrors the cache_key invariant)."""
-    from llmoji.backfill import _dedup_key_for_journal_row
-
-    a = _dedup_key_for_journal_row("ts", "m", "a\0b")
-    b = _dedup_key_for_journal_row("ts", "m\0a", "b")
-    assert a != b
+def _import(monkeypatch: pytest.MonkeyPatch, journal: Path, rows: list[ScrapeRow], **kw: Any) -> Any:
+    monkeypatch.setattr("llmoji.providers.get_provider", lambda _n: _Fake(journal, rows))
+    return import_provider("fake", **kw)
 
 
-def test_journal_dedup_keys_round_trips_existing_rows(tmp_path: Path) -> None:
-    """Loading an existing journal should populate the dedup set with
-    a key for every well-formed row."""
-    from llmoji.backfill import _dedup_key_for_journal_row, _journal_dedup_keys
+def _lines(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
-    j = tmp_path / "journal.jsonl"
+
+def test_appends_only_novel_rows_and_is_rerunnable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T10:00:00.000Z")])
+    rows = [_replayed("2026-04-29T10:00:00.000Z"), _replayed("2026-04-29T11:00:00.000Z", "new")]
+    r = _import(monkeypatch, journal, rows)
+    assert (r.rows_seen, r.rows_novel) == (2, 1)
+    assert [row["assistant_text"] for row in _lines(journal)] == ["same words", "new"]
+    assert _import(monkeypatch, journal, rows).rows_novel == 0
+
+
+def test_dry_run_counts_without_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    r = _import(monkeypatch, journal, [_replayed("2026-04-29T10:00:00.000Z")], dry_run=True)
+    assert r.rows_novel == 1 and not journal.exists()
+
+
+def test_matching_ignores_where_an_older_splitter_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Before 3.0 the face could swallow markdown (``(•ᴗ•) **``). The
+    whitespace-free message text is the same however it was split."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T10:00:00.000Z", kaomoji="(•ᴗ•) **", text="Task 1** done")])
+    r = _import(monkeypatch, journal, [_replayed("2026-04-29T10:00:00.000Z", "**Task 1** done", "(•ᴗ•)")])
+    assert r.rows_novel == 0
+
+
+def test_folds_a_fire_time_live_row_into_its_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T17:35:53Z")])
+    assert _import(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")]).rows_novel == 0
+
+
+def test_fold_ignores_live_rows_outside_the_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T17:00:00Z"), _jrow("2026-05-02T17:00:00Z")])
+    assert _import(monkeypatch, journal, [_replayed("2026-04-29T18:00:00.000Z")]).rows_novel == 1
+
+
+def test_fold_needs_the_same_face(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T17:35:53Z", kaomoji="(╥﹏╥)")])
+    assert _import(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")]).rows_novel == 1
+
+
+def test_only_whole_second_stamps_are_fold_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A millisecond row came from a replay; if its message isn't
+    replayed any more it still mustn't absorb an earlier message."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T11:00:00.000Z")])
+    assert _import(monkeypatch, journal, [_replayed("2026-04-29T10:00:00.000Z")]).rows_novel == 1
+
+
+def test_one_live_row_stands_in_for_one_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T18:00:10Z")])
+    rows = [_replayed("2026-04-29T17:00:00.000Z"), _replayed("2026-04-29T18:00:00.000Z")]
+    assert _import(monkeypatch, journal, rows).rows_novel == 1
+
+
+def test_exact_matches_are_claimed_before_folding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A row an earlier import wrote matches its replay exactly; the
+    fold mustn't hand it to an earlier copy of the same words first."""
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T18:00:00.000Z")])
+    rows = [_replayed("2026-04-29T17:00:00.000Z"), _replayed("2026-04-29T18:00:00.000Z")]
+    assert _import(monkeypatch, journal, rows).rows_novel == 1
+
+
+def test_a_forked_sessions_copy_is_a_duplicate_not_a_fold_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "j.jsonl"
+    _write_journal(journal, [_jrow("2026-04-29T17:00:00.000Z"), _jrow("2026-04-29T19:00:00Z")])
     rows = [
-        _row(ts="t1", assistant_text="a1"),
-        _row(ts="t2", assistant_text="a2"),
-    ]
-    _write_journal(j, rows)
-    keys = _journal_dedup_keys(j)
-    expected = {
-        _dedup_key_for_journal_row("t1", "m1", "a1"),
-        _dedup_key_for_journal_row("t2", "m1", "a2"),
-    }
-    assert keys == expected
-
-
-def test_journal_dedup_keys_skips_malformed_lines(tmp_path: Path) -> None:
-    """Malformed rows are tolerated — the journal walk doesn't choke
-    on a borked line."""
-    from llmoji.backfill import _journal_dedup_keys
-
-    j = tmp_path / "journal.jsonl"
-    j.parent.mkdir(parents=True, exist_ok=True)
-    with j.open("w") as f:
-        f.write(json.dumps(_row(ts="t1")) + "\n")
-        f.write("{not valid json\n")
-        f.write(json.dumps(_row(ts="t2", assistant_text="a2")) + "\n")
-    keys = _journal_dedup_keys(j)
-    assert len(keys) == 2  # the two valid rows
-
-
-# ---------------------------------------------------------------------------
-# import_provider — happy path + dedup + atomicity
-# ---------------------------------------------------------------------------
-
-
-def test_import_provider_appends_novel_rows_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Running import twice on the same source files results in zero
-    novel rows on the second pass — dedup catches every row the first
-    run already wrote."""
-    from llmoji import backfill
-    from llmoji.scrape import ScrapeRow
-
-    journal = tmp_path / "kaomoji-journal.jsonl"
-
-    # Stub the source iterator + journal_for resolver so we don't
-    # touch real ~/.claude/.codex/.hermes paths.
-    fake_rows = [
-        ScrapeRow(
-            source="claude_code", model="m1",
-            timestamp=f"2026-04-28T00:00:0{i}Z", cwd="/tmp",
-            first_word="(◕‿◕)",
-            assistant_text=f"text {i}",
-            surrounding_user="u",
-        )
-        for i in range(5)
-    ]
-    def _fake_iter(_name: str):
-        _ = _name
-        return iter(fake_rows)
-
-    def _fake_journal(_name: str) -> Path:
-        _ = _name
-        return journal
-
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", _fake_iter)
-    monkeypatch.setattr(backfill, "_journal_for", _fake_journal)
-
-    # First run: empty journal, all 5 rows novel.
-    r1 = backfill.import_provider("claude_code")
-    assert r1.rows_seen == 5
-    assert r1.rows_novel == 5
-    assert journal.exists()
-    n_lines = sum(
-        1 for line in journal.read_text().splitlines() if line.strip()
-    )
-    assert n_lines == 5
-
-    # Second run: same 5 rows, all dedup hits, journal unchanged.
-    r2 = backfill.import_provider("claude_code")
-    assert r2.rows_seen == 5
-    assert r2.rows_novel == 0
-    n_lines2 = sum(
-        1 for line in journal.read_text().splitlines() if line.strip()
-    )
-    assert n_lines2 == 5  # unchanged
-
-
-def test_import_provider_preserves_existing_live_hook_rows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pre-existing journal content (from the live hook) survives the
-    merge. Novel rows are appended; existing rows stay where they are.
-    Critical because the user runs `import` AFTER install, with weeks
-    of live-hook rows already in the journal.
-    """
-    from llmoji import backfill
-    from llmoji.scrape import ScrapeRow
-
-    journal = tmp_path / "kaomoji-journal.jsonl"
-    # Plant 2 pre-existing live-hook rows.
-    _write_journal(journal, [
-        _row(ts="2026-04-01T00:00:00Z", assistant_text="live-1"),
-        _row(ts="2026-04-02T00:00:00Z", assistant_text="live-2"),
-    ])
-
-    fake_rows = [
-        # One overlapping row — should dedup against live-1.
-        ScrapeRow(
-            source="claude_code", model="m1",
-            timestamp="2026-04-01T00:00:00Z", cwd="/tmp",
-            first_word="(◕‿◕)", assistant_text="live-1",
-            surrounding_user="u",
-        ),
-        # One genuinely novel historical row.
-        ScrapeRow(
-            source="claude_code", model="m1",
-            timestamp="2026-03-15T00:00:00Z", cwd="/tmp",
-            first_word="(◕‿◕)", assistant_text="historical-1",
-            surrounding_user="u",
-        ),
-    ]
-    def _fake_iter(_name: str):
-        _ = _name
-        return iter(fake_rows)
-
-    def _fake_journal(_name: str) -> Path:
-        _ = _name
-        return journal
-
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", _fake_iter)
-    monkeypatch.setattr(backfill, "_journal_for", _fake_journal)
-
-    r = backfill.import_provider("claude_code")
-    assert r.rows_seen == 2
-    assert r.rows_novel == 1  # only the historical-1 row
-
-    # Read back — live rows preserved, historical row appended.
-    rows = [
-        json.loads(line)
-        for line in journal.read_text().splitlines()
-        if line.strip()
-    ]
-    bodies = [row["assistant_text"] for row in rows]
-    assert "live-1" in bodies
-    assert "live-2" in bodies
-    assert "historical-1" in bodies
-    assert len(rows) == 3
-
-
-def test_import_provider_dry_run_does_not_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``dry_run=True`` walks the source + counts but never touches the
-    journal."""
-    from llmoji import backfill
-    from llmoji.scrape import ScrapeRow
-
-    journal = tmp_path / "kaomoji-journal.jsonl"
-    fake_rows = [
-        ScrapeRow(
-            source="claude_code", model="m1",
-            timestamp="2026-04-28T00:00:00Z", cwd="/tmp",
-            first_word="(◕‿◕)", assistant_text="x",
-            surrounding_user="u",
-        ),
-    ]
-    def _fake_iter(_name: str):
-        _ = _name
-        return iter(fake_rows)
-
-    def _fake_journal(_name: str) -> Path:
-        _ = _name
-        return journal
-
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", _fake_iter)
-    monkeypatch.setattr(backfill, "_journal_for", _fake_journal)
-
-    r = backfill.import_provider("claude_code", dry_run=True)
-    assert r.rows_seen == 1
-    assert r.rows_novel == 1
-    assert not journal.exists()
-
-
-def test_import_provider_since_filter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``--since`` drops rows whose ts is lexicographically less than
-    the cutoff. ISO-8601-with-Z compares correctly under str ordering."""
-    from llmoji import backfill
-    from llmoji.scrape import ScrapeRow
-
-    journal = tmp_path / "kaomoji-journal.jsonl"
-    fake_rows = [
-        ScrapeRow(
-            source="claude_code", model="m1",
-            timestamp=ts, cwd="/tmp",
-            first_word="(◕‿◕)", assistant_text=f"row-{ts}",
-            surrounding_user="u",
-        )
-        for ts in (
-            "2026-01-01T00:00:00Z",
-            "2026-04-01T00:00:00Z",
-            "2026-06-01T00:00:00Z",
-        )
-    ]
-    def _fake_iter(_name: str):
-        _ = _name
-        return iter(fake_rows)
-
-    def _fake_journal(_name: str) -> Path:
-        _ = _name
-        return journal
-
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", _fake_iter)
-    monkeypatch.setattr(backfill, "_journal_for", _fake_journal)
-
-    r = backfill.import_provider(
-        "claude_code", since="2026-03-15T00:00:00Z",
-    )
-    # 2 rows pass the cutoff (2026-04 + 2026-06).
-    assert r.rows_seen == 2
-    assert r.rows_novel == 2
-
-
-def test_import_provider_unknown_name_raises() -> None:
-    from llmoji.backfill import import_provider
-
-    with pytest.raises(ValueError, match="unknown provider"):
-        import_provider("nonexistent")
-
-
-# ---------------------------------------------------------------------------
-# CLI dispatch
-# ---------------------------------------------------------------------------
-
-
-def test_cli_import_dispatches_to_import_provider(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``llmoji import claude_code --dry-run`` calls
-    ``import_provider`` with dry_run=True."""
-    from llmoji import backfill, cli
-
-    captured: dict[str, object] = {}
-
-    def fake_import(name: str, *, since: str | None = None,
-                    dry_run: bool = False) -> backfill.ImportResult:
-        captured["name"] = name
-        captured["since"] = since
-        captured["dry_run"] = dry_run
-        return backfill.ImportResult(rows_seen=10, rows_novel=4)
-
-    monkeypatch.setattr(backfill, "import_provider", fake_import)
-
-    parser = cli._build_parser()
-    args = parser.parse_args(["import", "claude_code", "--dry-run"])
-    rc = cli._cmd_import(args)
-
-    assert rc == 0
-    assert captured == {"name": "claude_code", "since": None, "dry_run": True}
-    out = capsys.readouterr().out
-    assert "saw 10" in out
-    assert "would append 4" in out
-    assert "skipped 6" in out
-
-
-# ---------------------------------------------------------------------------
-# CLI autodetect path — no-arg ``llmoji import``
-# ---------------------------------------------------------------------------
-
-
-def _always_present(_self: object) -> bool:
-    _ = _self
-    return True
-
-
-def _never_present(_self: object) -> bool:
-    _ = _self
-    return False
-
-
-def test_import_no_args_zero_detected_exits_2(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """No detected importable harnesses → exit 2 with a message naming
-    the parent dirs we looked at."""
-    from llmoji import cli
-    from llmoji.providers import HookInstaller
-
-    monkeypatch.setattr(HookInstaller, "is_present", _never_present)
-
-    parser = cli._build_parser()
-    args = parser.parse_args(["import"])
-    rc = cli._cmd_import(args)
-
-    assert rc == 2
-    err = capsys.readouterr().err
-    assert "no importable harnesses detected" in err
-
-
-def test_import_no_args_with_yes_imports_all_detected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``--yes`` skips the prompt; every detected importable provider
-    runs through ``import_provider``."""
-    from llmoji import cli
-    from llmoji.backfill import IMPORTABLE_PROVIDERS
-    from llmoji.providers import PROVIDERS, HookInstaller
-
-    # Patch the base + every concrete provider class so subclasses
-    # with their own ``is_present`` override don't bypass the patch.
-    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
-    for _cls in PROVIDERS.values():
-        monkeypatch.setattr(_cls, "is_present", _always_present)
-
-    imported: list[tuple[str, bool]] = []
-
-    def fake_import_one(
-        name: str, *, since: str | None, dry_run: bool,
-    ) -> tuple[bool, str | None]:
-        _ = since  # captured by signature; not used in this assertion
-        imported.append((name, dry_run))
-        return True, None
-
-    monkeypatch.setattr(cli, "_import_one", fake_import_one)
-
-    parser = cli._build_parser()
-    args = parser.parse_args(["import", "--yes"])
-    rc = cli._cmd_import(args)
-
-    assert rc == 0
-    # Every IMPORTABLE_PROVIDERS entry ran (and ONLY those — no
-    # opencode / openclaw which can't be replayed).
-    assert {name for name, _ in imported} == set(IMPORTABLE_PROVIDERS)
-    # dry_run defaulted to False.
-    assert all(dr is False for _, dr in imported)
-
-
-def test_import_no_args_passes_since_and_dry_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``--since`` and ``--dry-run`` propagate to every per-provider
-    call in the autodetect batch."""
-    from llmoji import cli
-    from llmoji.providers import PROVIDERS, HookInstaller
-
-    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
-    for _cls in PROVIDERS.values():
-        monkeypatch.setattr(_cls, "is_present", _always_present)
-
-    seen: list[dict[str, object]] = []
-
-    def fake_import_one(
-        name: str, *, since: str | None, dry_run: bool,
-    ) -> tuple[bool, str | None]:
-        seen.append({"name": name, "since": since, "dry_run": dry_run})
-        return True, None
-
-    monkeypatch.setattr(cli, "_import_one", fake_import_one)
-
-    parser = cli._build_parser()
-    args = parser.parse_args([
-        "import", "--yes", "--dry-run", "--since", "2026-01-01T00:00:00Z",
-    ])
-    rc = cli._cmd_import(args)
-
-    assert rc == 0
-    assert seen, "no providers were imported"
-    for entry in seen:
-        assert entry["since"] == "2026-01-01T00:00:00Z"
-        assert entry["dry_run"] is True
-
-
-def test_import_no_args_partial_failure_returns_1(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A single provider failing doesn't abort the rest of the batch.
-    Exit 1 reports the failure(s) on stderr."""
-    from llmoji import cli
-    from llmoji.providers import PROVIDERS, HookInstaller
-
-    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
-    for _cls in PROVIDERS.values():
-        monkeypatch.setattr(_cls, "is_present", _always_present)
-
-    def fake_import_one(
-        name: str, *, since: str | None, dry_run: bool,
-    ) -> tuple[bool, str | None]:
-        _ = since, dry_run  # signature-only; failure dispatch is by name
-        if name == "codex":
-            return False, "RuntimeError: simulated"
-        return True, None
-
-    monkeypatch.setattr(cli, "_import_one", fake_import_one)
-
-    parser = cli._build_parser()
-    args = parser.parse_args(["import", "--yes"])
-    rc = cli._cmd_import(args)
-
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "codex" in err
-    assert "simulated" in err
-
-
-def test_import_no_args_prompt_n_aborts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No ``--yes``, answering 'n' to the prompt aborts before any
-    import runs."""
-    from llmoji import cli
-    from llmoji.providers import PROVIDERS, HookInstaller
-
-    monkeypatch.setattr(HookInstaller, "is_present", _always_present)
-    for _cls in PROVIDERS.values():
-        monkeypatch.setattr(_cls, "is_present", _always_present)
-
-    imported: list[str] = []
-
-    def fake_import_one(
-        name: str, *, since: str | None, dry_run: bool,
-    ) -> tuple[bool, str | None]:
-        _ = since, dry_run  # signature-only
-        imported.append(name)
-        return True, None
-
-    monkeypatch.setattr(cli, "_import_one", fake_import_one)
-    monkeypatch.setattr("builtins.input", lambda _: "n")
-
-    parser = cli._build_parser()
-    args = parser.parse_args(["import"])
-    rc = cli._cmd_import(args)
-
-    assert rc == 1
-    assert imported == []
-
-
-def test_import_rejects_non_importable_providers_at_argparse(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``llmoji import opencode`` is rejected at argparse time —
-    ``opencode`` and ``openclaw`` are installable but not importable
-    (no replayable transcript shape on disk). Tightening ``choices=``
-    to ``IMPORTABLE_PROVIDERS`` means the user gets a clear argparse
-    error instead of a runtime ``ValueError`` from
-    ``import_provider``."""
-    from llmoji import cli
-
-    parser = cli._build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["import", "opencode"])
-    err = capsys.readouterr().err
-    assert "invalid choice" in err
-    assert "opencode" in err
-
-
-# ---------------------------------------------------------------------------
-# pre-2.2 live rows stamped with hook fire time
-# ---------------------------------------------------------------------------
-#
-# Before 2.2 a live hook wrote ``ts`` = the moment the hook ran (turn
-# end, whole seconds) while the replay stamps the message's own time.
-# The two copies of one message never shared a dedup key, so every
-# import after install counted live-captured messages twice — 13% of
-# the rows in one real Claude Code journal.
-
-
-def _replayed(ts: str, text: str = "same words") -> object:
-    from llmoji.scrape import ScrapeRow
-
-    return ScrapeRow(
-        source="claude_code", model="m1", timestamp=ts, cwd="/tmp",
-        first_word="(◕‿◕)", assistant_text=text, surrounding_user="u",
-    )
-
-
-def _import_with(
-    monkeypatch: pytest.MonkeyPatch, journal: Path, rows: list[object],
-) -> object:
-    from llmoji import backfill
-
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", lambda _n: iter(rows))
-    monkeypatch.setattr(backfill, "_journal_for", lambda _n: journal)
-    return backfill.import_provider("claude_code")
-
-
-def test_import_folds_a_fire_time_live_row_into_its_replay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T17:35:53Z", assistant_text="same words")])
-    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")])
-    assert (r.rows_seen, r.rows_novel) == (1, 0)
-
-
-def test_import_keeps_genuine_repeats_of_a_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One live row can stand in for one replayed row only: the same
-    short message said twice, with only one live copy, lands as two."""
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T18:00:10Z", assistant_text="same words")])
-    r = _import_with(monkeypatch, journal, [
         _replayed("2026-04-29T17:00:00.000Z"),
-        _replayed("2026-04-29T18:00:00.000Z"),
-    ])
-    assert r.rows_novel == 1
-    assert len(journal.read_text().splitlines()) == 2
-
-
-def test_import_ignores_live_rows_outside_the_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [
-        _row(ts="2026-04-29T17:00:00Z", assistant_text="same words"),  # before the message
-        _row(ts="2026-05-02T17:00:00Z", assistant_text="same words"),  # days after
-    ])
-    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T18:00:00.000Z")])
-    assert r.rows_novel == 1
-
-
-def test_import_claims_exact_matches_before_folding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A row an earlier import wrote matches its replay exactly. The
-    fold must not hand that row to an earlier replayed copy first, or
-    the earlier message would be dropped."""
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T18:00:00.000Z", assistant_text="same words")])
-    r = _import_with(monkeypatch, journal, [
-        _replayed("2026-04-29T17:00:00.000Z"),
-        _replayed("2026-04-29T18:00:00.000Z"),
-    ])
-    assert r.rows_novel == 1
-
-
-def test_import_duplicate_replay_copy_cannot_steal_a_live_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A replayed row repeated in the sources (a forked session
-    replays its parent) is a duplicate of the row its key already
-    matched, not a candidate for another message's live row."""
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [
-        _row(ts="2026-04-29T17:00:00.000Z", assistant_text="same words"),
-        _row(ts="2026-04-29T19:00:00Z", assistant_text="same words"),  # live, fire time
-    ])
-    r = _import_with(monkeypatch, journal, [
-        _replayed("2026-04-29T17:00:00.000Z"),
-        _replayed("2026-04-29T17:00:00.000Z"),
+        _replayed("2026-04-29T17:00:00.000Z"),  # the fork's copy
         _replayed("2026-04-29T18:55:00.000Z"),
-    ])
+    ]
+    r = _import(monkeypatch, journal, rows)
     assert (r.rows_seen, r.rows_novel) == (3, 0)
 
 
-def test_import_since_cannot_free_a_row_for_a_newer_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The journal holds message one exactly. With --since past it,
-    message one isn't appended — but it still claims its own row, so
-    the identical message four seconds later isn't folded into it."""
-    from llmoji import backfill
-
+def test_since_gates_appends_but_not_claims(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Message one is in the journal and before --since. It still claims
+    its own row, so the same words four seconds later aren't folded into
+    it."""
     journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T10:00:00.000Z", assistant_text="Done.")])
-    rows = [
-        _replayed("2026-04-29T10:00:00.000Z", "Done."),
-        _replayed("2026-04-29T10:00:04.000Z", "Done."),
-    ]
-    monkeypatch.setattr(backfill, "_iter_rows_for_provider", lambda _n: iter(rows))
-    monkeypatch.setattr(backfill, "_journal_for", lambda _n: journal)
-    r = backfill.import_provider("claude_code", since="2026-04-29T10:00:01.000Z")
+    _write_journal(journal, [_jrow("2026-04-29T10:00:00.000Z", text="Done.")])
+    rows = [_replayed("2026-04-29T10:00:00.000Z", "Done."), _replayed("2026-04-29T10:00:04.000Z", "Done.")]
+    r = _import(monkeypatch, journal, rows, since="2026-04-29T10:00:01.000Z")
     assert (r.rows_seen, r.rows_novel) == (1, 1)
 
 
-def test_import_fold_needs_the_same_face(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_matched_rows_are_replaced_by_their_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The replay is authoritative: a fire-time row gets its message time
+    and model, an old split and an injected prompt are repaired, and
+    lines that aren't rows are kept."""
     journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(
-        ts="2026-04-29T17:35:53Z", kaomoji="(╥﹏╥)", assistant_text="same words",
-    )])
-    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T17:35:27.011Z")])
-    assert r.rows_novel == 1
-
-
-def test_import_exact_claim_uses_up_the_row_it_matched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The exact key ignores the face; the fold doesn't. An exact claim
-    must consume the very row it matched, so the fold can't hand that
-    row out a second time."""
-    from llmoji.scrape import ScrapeRow
-
-    journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T10:00:00Z", kaomoji="(◕‿◕)", assistant_text="Done.")])
+    _write_journal(journal, [
+        {**_jrow("2026-04-29T17:35:53Z"), "model": ""},
+        _jrow("2026-04-29T18:00:00.000Z", kaomoji="(•ᴗ•) **", text="Task** done"),
+    ])
+    with journal.open("a") as f:
+        f.write("not json\n")
     rows = [
-        ScrapeRow(source="claude_code", model="m1", timestamp="2026-04-29T10:00:00Z",
-                  cwd="/tmp", first_word="(╥﹏╥)", assistant_text="Done.",
-                  surrounding_user="u"),
-        _replayed("2026-04-29T09:00:00.000Z", "Done."),
+        _replayed("2026-04-29T17:35:27.011Z"),
+        _replayed("2026-04-29T18:00:00.000Z", "**Task** done", "(•ᴗ•)"),
     ]
-    r = _import_with(monkeypatch, journal, rows)
-    assert (r.rows_seen, r.rows_novel) == (2, 1)
+    r = _import(monkeypatch, journal, rows)
+    assert (r.rows_novel, r.rows_updated) == (0, 2)
+    lines = journal.read_text().splitlines()
+    assert lines[2] == "not json"
+    first, second = (json.loads(line) for line in lines[:2])
+    assert (first["ts"], first["model"]) == ("2026-04-29T17:35:27.011Z", "m1")
+    assert (second["kaomoji"], second["assistant_text"]) == ("(•ᴗ•)", "**Task** done")
+    assert _import(monkeypatch, journal, rows).rows_updated == 0
 
 
-def test_import_rows_an_earlier_import_wrote_are_not_fold_candidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only whole-second ``...Z`` stamps can be pre-2.2 fire times. A
-    millisecond row came from a replay; if its message isn't replayed
-    any more, it still mustn't absorb a different, earlier message."""
+def test_dry_run_and_since_gate_repairs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     journal = tmp_path / "j.jsonl"
-    _write_journal(journal, [_row(ts="2026-04-29T11:00:00.000Z", assistant_text="same words")])
-    r = _import_with(monkeypatch, journal, [_replayed("2026-04-29T10:00:00.000Z")])
-    assert r.rows_novel == 1
+    _write_journal(journal, [{**_jrow("2026-04-29T10:00:00.000Z"), "user_text": "<task-notification>x"}])
+    before = journal.read_text()
+    rows = [_replayed("2026-04-29T10:00:00.000Z")]
+    assert _import(monkeypatch, journal, rows, dry_run=True).rows_updated == 1
+    assert _import(monkeypatch, journal, rows, since="2026-05-01T00:00:00Z").rows_updated == 0
+    assert journal.read_text() == before
+    assert _import(monkeypatch, journal, rows).rows_updated == 1
+    assert _lines(journal)[0]["user_text"] == "u"
+
+
+def test_non_importable_provider_is_refused() -> None:
+    with pytest.raises(ValueError, match="replayable"):
+        import_provider("antigravity")
+
+
+def test_end_to_end_with_a_real_transcript(sandbox_home: Path) -> None:
+    transcript = sandbox_home / ".claude" / "projects" / "p" / "s.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("".join(json.dumps(e) + "\n" for e in [
+        {"type": "user", "uuid": "u", "parentUuid": None, "timestamp": "2026-10-25T00:00:00.000Z",
+         "message": {"content": "hi"}},
+        {"type": "assistant", "uuid": "a", "parentUuid": "u", "timestamp": "2026-10-25T00:00:01.000Z",
+         "cwd": "/w", "message": {"model": "claude-test", "content": [{"type": "text", "text": "(◕‿◕) hey"}]}},
+    ]))
+    assert import_provider("claude_code").rows_novel == 1
+    journal = sandbox_home / ".claude" / "kaomoji-journal.jsonl"
+    assert _lines(journal) == [{
+        "ts": "2026-10-25T00:00:01.000Z", "model": "claude-test", "cwd": "/w",
+        "kaomoji": "(◕‿◕)", "user_text": "hi", "assistant_text": "hey",
+    }]
+    assert import_provider("claude_code").rows_novel == 0
+
+
+# --- CLI ---
+
+
+def test_cli_without_a_harness_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["import", "--yes"]) == 2
+    assert "no harnesses detected" in capsys.readouterr().err
+
+
+def test_cli_imports_every_detected_importable_harness(
+    sandbox_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for d in (".claude", ".codex", ".gemini/antigravity-cli"):
+        (sandbox_home / d).mkdir(parents=True)
+    seen: list[tuple[str, Any, bool]] = []
+
+    def fake(name: str, *, since: Any, dry_run: bool) -> Any:
+        from llmoji.capture import ImportResult
+
+        seen.append((name, since, dry_run))
+        return ImportResult(0, 0)
+
+    monkeypatch.setattr("llmoji.capture.import_provider", fake)
+    assert cli.main(["import", "--yes", "--dry-run", "--since", "2026-01-01T00:00:00Z"]) == 0
+    assert seen == [("claude_code", "2026-01-01T00:00:00Z", True), ("codex", "2026-01-01T00:00:00Z", True)]
+
+
+def test_cli_rejects_a_harness_with_no_history() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["import", "antigravity"])

@@ -1,49 +1,26 @@
-"""Encrypted shared HuggingFace credential for submission branch
-pushes on ``a9lim/llmoji``.
+"""Encrypted shared HuggingFace credential for submission pushes to
+``a9lim/llmoji``.
 
-The shared credential is what authenticates the actual ``upload_folder``
-call. The user's own HF token is touched only once for a
-``whoami()`` proof-of-life check (see :mod:`llmoji.upload`); the
-push itself goes through this credential so the user's HF account
-stays off the dataset's commit history. See ``SECURITY.md`` for
-the full threat model and ``CLAUDE.md`` for the operational
-checklist.
+:mod:`llmoji.upload` pushes each submission branch with this credential, so
+the contributor's HF account stays off the dataset's history. ``SECURITY.md``
+has the threat model, ``AGENTS.md`` the rotation steps.
 
-What this defends against:
+The token is encrypted under a password that is posted publicly (dataset
+card, Twitter). That keeps it out of casual reach: grepping the wheel for
+``hf_`` finds nothing, secret scanners see no plaintext token, and using it
+takes a deliberate password lookup. It does not stop anyone who reads the
+dataset card. That is accepted: the maintainer reviews every submission
+branch by diff before merging, and that review is the actual abuse
+mitigation.
 
-  - ``pip download llmoji && grep hf_ wheel-contents`` returns
-    nothing usable (token is opaque base64).
-  - Automated supply-chain scanners that flag plaintext API
-    tokens in package source.
-  - Incidental misuse — a user who finds the package source has
-    to deliberately go look up the password to reach the token.
-
-What this does NOT defend against:
-
-  - Anyone who reads the dataset card or follows ``@a9lim``.
-    They can find the password trivially. We accept this; the
-    PR review path on the dataset (the maintainer reviews each
-    submission branch by diff before merging) is the actual
-    abuse mitigation.
-
-Encryption layout, base64-decoded:
+Layout of the base64-decoded blob:
 
     [16 bytes salt][32 bytes HMAC-SHA256 mac][N bytes ciphertext]
 
-Where:
-
-  - ``key = pbkdf2_hmac('sha256', password, salt, ITERATIONS)``
-  - ``ciphertext = plaintext XOR keystream`` and
-    ``keystream = concat(HMAC(key, counter_be64) for counter in 0,1,2,...)``
-  - ``mac = HMAC(key, ciphertext)`` — encrypt-then-MAC
-
-This is a homemade HMAC-based stream cipher with HMAC integrity.
-Stdlib only (no ``cryptography`` dep). Not as strong as AES-GCM
-or ChaCha20-Poly1305, but adequate for the paper-thin threat
-model and crypto-doctrine-clean (PBKDF2 → HMAC-keystream →
-HMAC-MAC, encrypt-then-authenticate).
-
-Rotation is one command. See :func:`encrypt_for_release`.
+with ``key = pbkdf2_hmac('sha256', password, salt, ITERATIONS)``, ciphertext
+= plaintext XOR keystream (``HMAC(key, counter_be64)`` blocks for counter 0,
+1, 2, ...) and ``mac = HMAC(key, ciphertext)``: encrypt-then-MAC. The cipher
+is homemade but stdlib-only; weaker than AES-GCM, adequate here.
 """
 
 from __future__ import annotations
@@ -54,50 +31,33 @@ import hmac
 import os
 import secrets
 
-# PBKDF2-SHA256 iteration count. 200k is around the high end of
-# OWASP's 2023 recommendation (210k) and takes ~50ms on a modern
-# laptop. Brute-forcing a random 16-character base32 password
-# (~80 bits) at 50ms/attempt is infeasible; the random-string
-# password format (see CLAUDE.md ops checklist) is well past
-# anything reasonable.
+# PBKDF2-SHA256 rounds: about OWASP's 2023 figure (210k) and ~50 ms on a
+# laptop. A random ~96-bit password (see :func:`generate_password`) is out
+# of brute-force reach at that cost.
 ITERATIONS = 200_000
 
-# Encrypted blob; replace at every release with the output of
-# ``encrypt_for_release(real_token, password)``. A wheel that ships
-# with the placeholder string is detected by
-# :data:`PLACEHOLDER_BLOB_PREFIX` and bails loudly at decrypt time.
+# Output of ``encrypt_for_release(real_token, password)``, replaced at every
+# release. A wheel that ships the placeholder is caught by
+# :data:`PLACEHOLDER_BLOB_PREFIX` and fails loudly at decrypt time.
 ENCRYPTED_TOKEN_B64: str = (
     "YttXqY2EWF9EHdyHWFOqrWtA6tekNKDzScfJYhnsLqxNsjqsVwwZmBsJV4K1m3m7"
     "31vfaTkRDiWePIMLyHR3pUMsvpa9hZye8zM9aQIJRLlcHmJaiw=="
 )
 
-# Marker prefix so the runtime can tell "this is a release that
-# forgot to rotate the token" from "this is a real encrypted
-# blob." The prefix is intentionally not valid base64 padding so
-# real blobs (always valid base64) can't accidentally start with
-# this string.
+# A blob starting with this marker is a release that skipped rotation. A
+# real blob is random bytes, so it can't plausibly start with it.
 PLACEHOLDER_BLOB_PREFIX = "PLACEHOLDER"
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
-    """PBKDF2-SHA256 with :data:`ITERATIONS` rounds. Returns a
-    32-byte key suitable for use as both the keystream PRF key
-    and the MAC key (the construction is encrypt-then-MAC with
-    domain-separated calls, so reusing the key across both is
-    safe).
-    """
+    """PBKDF2-SHA256 key (32 bytes), used for both the keystream and the MAC."""
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt, ITERATIONS,
     )
 
 
 def _hmac_keystream(key: bytes, length: int) -> bytes:
-    """Generate ``length`` bytes of keystream by concatenating
-    ``HMAC-SHA256(key, counter_be64)`` for counter = 0, 1, 2, ...
-
-    Truncates at ``length`` bytes; counters above what's needed
-    are not computed.
-    """
+    """``length`` bytes of HMAC-SHA256 counter keystream."""
     out = bytearray()
     counter = 0
     while len(out) < length:
@@ -109,12 +69,8 @@ def _hmac_keystream(key: bytes, length: int) -> bytes:
 
 
 def encrypt_for_release(plaintext_token: str, password: str) -> str:
-    """Encrypt ``plaintext_token`` under ``password``. Returns the
-    base64 string to paste into :data:`ENCRYPTED_TOKEN_B64` at
-    release time.
-
-    Run once per release / token rotation; not called on the
-    runtime path.
+    """Encrypt ``plaintext_token``; returns the base64 blob for
+    :data:`ENCRYPTED_TOKEN_B64`. Run at release time, never at runtime.
     """
     salt = os.urandom(16)
     key = _derive_key(password, salt)
@@ -127,14 +83,10 @@ def encrypt_for_release(plaintext_token: str, password: str) -> str:
 
 
 def decrypt_with_password(password: str) -> str:
-    """Decrypt :data:`ENCRYPTED_TOKEN_B64` using ``password``.
+    """Decrypt :data:`ENCRYPTED_TOKEN_B64` with ``password``.
 
-    Raises :class:`ValueError` on:
-
-      - placeholder blob (the wheel didn't get the release
-        rotation step)
-      - corrupt / truncated blob
-      - wrong password (HMAC mismatch — constant-time compare)
+    Raises :class:`ValueError` for the placeholder blob, a corrupt or
+    truncated blob, or a wrong password (MAC mismatch).
     """
     if ENCRYPTED_TOKEN_B64.startswith(PLACEHOLDER_BLOB_PREFIX):
         raise ValueError(
@@ -161,8 +113,7 @@ def decrypt_with_password(password: str) -> str:
     key = _derive_key(password, salt)
     actual_mac = hmac.new(key, ciphertext, "sha256").digest()
     if not hmac.compare_digest(actual_mac, expected_mac):
-        # Constant-time compare so a timing-attack adversary can't
-        # learn how many leading bytes of the MAC matched.
+        # Constant-time, so timing doesn't reveal how much of the MAC matched.
         raise ValueError(
             "wrong password (or corrupt encrypted token). The "
             "current upload password is posted on the dataset "
@@ -175,20 +126,9 @@ def decrypt_with_password(password: str) -> str:
 
 
 def generate_password(num_bytes: int = 12) -> str:
-    """Generate a random password to use for token encryption at
-    release / rotation time. Returns a URL-safe base64 string;
-    12 bytes = 16 base64 characters = ~96 bits of entropy.
-
-    Run once at rotation time:
-
-        from llmoji._shared_token import (
-            encrypt_for_release, generate_password,
-        )
-        password = generate_password()
-        blob = encrypt_for_release("hf_real_token", password)
-        # paste blob into ENCRYPTED_TOKEN_B64
-        # post password on dataset card + Twitter
+    """A random 16-character URL-safe password (about 96 bits) for rotation:
+    encrypt the token with it via :func:`encrypt_for_release`, paste the blob
+    into ``ENCRYPTED_TOKEN_B64`` and post the password publicly.
     """
-    # ``token_urlsafe`` returns base64url; strip padding so the
-    # password copy-pastes cleanly out of a tweet.
+    # Drop any base64 padding so the password copies cleanly out of a tweet.
     return secrets.token_urlsafe(num_bytes).rstrip("=")

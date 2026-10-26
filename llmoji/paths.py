@@ -1,9 +1,5 @@
-"""Filesystem layout the package writes to.
-
-Single source of truth for every path the CLI touches outside of
-provider-specific harness directories. Tests can override the home
-root by setting ``LLMOJI_HOME`` in the environment.
-"""
+"""Where llmoji keeps its own state: ``$LLMOJI_HOME``, default
+``~/.llmoji``. Harness-side paths live on each provider."""
 
 from __future__ import annotations
 
@@ -12,38 +8,17 @@ from pathlib import Path
 
 
 def llmoji_home() -> Path:
-    """Resolve the package's home directory.
-
-    Override with ``$LLMOJI_HOME`` for tests / non-default installs.
-    Defaults to ``~/.llmoji``.
-    """
     override = os.environ.get("LLMOJI_HOME")
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".llmoji"
+    return Path(override).expanduser() if override else Path.home() / ".llmoji"
 
 
 def cache_dir() -> Path:
     return llmoji_home() / "cache"
 
 
-def cache_per_cell_path() -> Path:
-    """Per-(source_model, canonical_kaomoji) synthesis cache, v2.
-
-    One row per cell — the v2 single-stage pipeline has no
-    per-instance step, so the per-cell granularity matches the
-    actual unit of synthesis. Key shape includes ``sample_set_hash``
-    so corpus growth that changes a cell's sampled rows misses the
-    cache cleanly.
-    """
+def cache_path() -> Path:
+    """The per-cell synthesis cache (``llmoji.synth``)."""
     return cache_dir() / "per_cell.jsonl"
-
-
-def cache_per_instance_path() -> Path:
-    """Legacy v1 per-instance cache path. Orphaned by v2 — kept here
-    only so the first v2 ``analyze`` run can detect it and surface
-    a one-line cleanup notice (``llmoji cache clear`` wipes both)."""
-    return cache_dir() / "per_instance.jsonl"
 
 
 def bundle_dir() -> Path:
@@ -51,45 +26,31 @@ def bundle_dir() -> Path:
 
 
 def journals_dir() -> Path:
-    """Generic JSONL-append landing zone for harnesses we don't ship
-    a first-class provider for. End-users on OpenClaw and similar
-    write directly here against the documented schema."""
+    """Journals llmoji didn't capture itself: parsed exports, and any
+    harness writing the 6-field schema directly."""
     return llmoji_home() / "journals"
 
 
 def salt_path() -> Path:
-    """Per-machine random salt, persisted at ``~/.llmoji/.salt``.
-
-    Holds 64 hex characters (32 bytes of entropy) — the seed for
-    :func:`llmoji.upload.submitter_id`. The hash is what lands on
-    HF; the salt itself never leaves the user's machine.
-
-    Pre Wave 6 the same byte was wrapped in a JSON envelope at
-    ``state.json`` keyed under ``"submission_token"``; the envelope
-    paid for nothing and a flat ``.salt`` is honest about what's
-    on disk. The dotfile prefix keeps `ls ~/.llmoji` clean.
-
-    HookInstaller install state is read live from each harness's
-    own settings file — this isn't an install registry.
-    """
+    """Per-machine random salt behind the submitter id. Never leaves the
+    machine."""
     return llmoji_home() / ".salt"
 
 
-def ensure_home() -> Path:
-    """Create the home dir + first-run ``.gitignore`` (so users who
-    rsync their home into a dotfiles repo don't accidentally publish
-    the cache or local journals).
+def hook_errors_path() -> Path:
+    return llmoji_home() / "hook-errors.log"
 
-    Idempotent.
-    """
+
+def ensure_home() -> Path:
+    """Create the home dir with a ``.gitignore`` that keeps the cache
+    and journals out of a dotfiles repository synced from ``$HOME``."""
     home = llmoji_home()
     home.mkdir(parents=True, exist_ok=True)
     gi = home / ".gitignore"
     if not gi.exists():
         gi.write_text(
-            "# llmoji cache + bundle hold per-turn paraphrases and\n"
-            "# scrape outputs derived from your local conversation\n"
-            "# history. Don't sync them to a public dotfiles repo.\n"
+            "# llmoji's cache, bundle and journals derive from your\n"
+            "# conversation history. Don't sync them to a public repo.\n"
             "*\n"
             "!.gitignore\n"
         )

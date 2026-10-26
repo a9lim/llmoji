@@ -1,49 +1,27 @@
-"""llmoji — provider-agnostic kaomoji journal collection + canonical
-synthesis + privacy-preserving aggregate submission.
+"""llmoji — collect kaomoji journals from coding agents, describe each
+(model, face) cell with a locked adjective lexicon, and submit the
+aggregates to a shared dataset.
 
-The end-user CLI is :mod:`llmoji.cli`. The locked public surface
-(invariants for cross-corpus aggregation):
+The cross-corpus surface (changing any of it changes what submissions
+mean, so it wants a major version and a dataset-card update):
 
-  - :mod:`llmoji.taxonomy` — :data:`~llmoji.taxonomy.KAOMOJI_START_CHARS`,
-    :func:`~llmoji.taxonomy.is_kaomoji_candidate`,
-    :func:`~llmoji.taxonomy.extract` (span-only),
-    :class:`~llmoji.taxonomy.KaomojiMatch`,
-    :func:`~llmoji.taxonomy.canonicalize_kaomoji` (rules A–P).
-    Pilot-specific affect labels (TAXONOMY / ANGRY_CALM_TAXONOMY /
-    label_on / pole) live research-side at
-    ``llmoji_study.taxonomy_labels``.
-  - :mod:`llmoji.synth_prompts` — :data:`LEXICON`,
-    :data:`LEXICON_VERSION`, :data:`SYNTHESIS_SCHEMA`,
-    :data:`CIRCUMPLEX_ANCHORS`, :data:`EXTENSION_AXES`,
-    :data:`SYNTHESIZE_PROMPT`, :data:`DEFAULT_ANTHROPIC_MODEL_ID`,
-    :data:`DEFAULT_OPENAI_MODEL_ID`.
-  - :mod:`llmoji.scrape` — :class:`~llmoji.scrape.ScrapeRow` schema
-    (span-only; no `kaomoji` / `kaomoji_label`).
-  - :mod:`llmoji.providers` — :class:`~llmoji.providers.HookInstaller`
-    interface and the seven first-class providers.
-  - The bundle schema written by :func:`llmoji.analyze.run_analyze`
-    (top-level ``manifest.json`` carrying ``lexicon_version`` +
-    per-source-model ``<slug>.jsonl`` rows shaped
-    ``{kaomoji, count, synthesis: {primary_affect,
-    stance_modality_function}}``) and enforced by
-    :data:`llmoji.upload.BUNDLE_TOPLEVEL_ALLOWLIST` +
-    :data:`llmoji.upload.BUNDLE_DATA_SUFFIX`.
-
-Bumping any of those changes the cross-corpus invariant; treat as
-a major version bump (and bump :data:`LEXICON_VERSION` if the
-lexicon or schema rotates).
+- :mod:`llmoji.taxonomy` — :data:`KAOMOJI_START_CHARS`,
+  :func:`is_kaomoji_candidate`, :func:`split_leading_kaomoji` (how a
+  message divides into face and body), :func:`extract` and
+  :func:`canonicalize_kaomoji` (how a face is bucketed).
+- :mod:`llmoji.synth_prompts` — the lexicon, schema, prompt, pinned
+  synthesis models and the kaomoji request (:data:`NUDGE_MESSAGE`).
+- The 6-field journal row and the bundle layout written by
+  :mod:`llmoji.analyze`.
 """
 
 from __future__ import annotations
 
-# Single source of truth for the package version. ``pyproject.toml``
-# resolves it dynamically via ``[tool.hatch.version] path =
-# "llmoji/__init__.py"`` (hatch parses the literal without executing
-# the module, so the eager re-exports below don't fire at build time).
-__version__ = "2.2.0"
+# Single source of the version; hatch reads this literal at build time.
+__version__ = "3.0.0"
 
 from ._util import flatten_synthesis
-from .scrape import ScrapeRow, iter_all
+from .scrape import ScrapeRow
 from .synth_prompts import (
     CIRCUMPLEX_ANCHORS,
     DEFAULT_ANTHROPIC_MODEL_ID,
@@ -61,25 +39,26 @@ from .taxonomy import (
     canonicalize_kaomoji,
     extract,
     is_kaomoji_candidate,
+    split_leading_kaomoji,
 )
 
 __all__ = [
-    "KAOMOJI_START_CHARS",
-    "KaomojiMatch",
-    "canonicalize_kaomoji",
-    "extract",
-    "is_kaomoji_candidate",
-    "ScrapeRow",
-    "iter_all",
-    "LEXICON",
-    "LEXICON_VERSION",
-    "SYNTHESIS_SCHEMA",
     "CIRCUMPLEX_ANCHORS",
-    "EXTENSION_AXES",
-    "SYNTHESIZE_PROMPT",
     "DEFAULT_ANTHROPIC_MODEL_ID",
     "DEFAULT_OPENAI_MODEL_ID",
+    "EXTENSION_AXES",
+    "KAOMOJI_START_CHARS",
+    "LEXICON",
+    "LEXICON_VERSION",
     "NUDGE_MESSAGE",
-    "flatten_synthesis",
+    "SYNTHESIS_SCHEMA",
+    "SYNTHESIZE_PROMPT",
+    "KaomojiMatch",
+    "ScrapeRow",
     "__version__",
+    "canonicalize_kaomoji",
+    "extract",
+    "flatten_synthesis",
+    "is_kaomoji_candidate",
+    "split_leading_kaomoji",
 ]
