@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-import httpx
 import openai
 import pytest
 
@@ -76,8 +75,13 @@ def _local(*results: Any) -> LocalSynthesizer:
 
 
 def _http_error(cls: type[openai.APIStatusError], status: int) -> openai.APIStatusError:
-    response = httpx.Response(status, request=httpx.Request("POST", "http://localhost/v1"))
-    return cls(message="response_format not supported", response=response, body=None)
+    """An instance of the SDK's error class without building an HTTP
+    response: openai 3.x uses httpx2 and the 1.66 floor httpx, and
+    neither is llmoji's own dependency."""
+    err = cls.__new__(cls)
+    Exception.__init__(err, "response_format not supported")
+    err.status_code = status
+    return err
 
 
 # --- request shapes ---------------------------------------------------------
