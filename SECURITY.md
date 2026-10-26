@@ -13,10 +13,6 @@ Please include a description, steps to reproduce, and the version you are on. I'
 
 Only the latest minor version on PyPI receives security and privacy fixes. If you're on an older version, please upgrade.
 
-## Privacy notice for upgraders (1.2.0)
-
-Versions of llmoji before 1.2.0 would have leaked your HuggingFace username on submission. 1.2.0 patches this. Please upgrade (`pip install --upgrade llmoji`).
-
 ## Privacy model
 
 llmoji is a privacy-sensitive tool. The package ships aggregates from your machine to a shared corpus so privacy is important here.
@@ -24,7 +20,7 @@ llmoji is a privacy-sensitive tool. The package ships aggregates from your machi
 ### What stays on your machine
 
 - **Raw `user_text` or `assistant_text`** at `~/.<harness>/kaomoji-journal.jsonl`. These hold the raw data for every kaomoji-bearing turn. They never leave your machine.
-- **Per-cell synthesizer cache** at `~/.llmoji/cache/per_cell.jsonl`. Each row holds a structured adjective bag (`primary_affect` + `stance_modality_function`) drawn from the locked LEXICON, keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. The bag itself contains no free-form text and no journal content — only adjectives from the corpus vocabulary — so the cache is materially less leak-prone than v1's per-turn paraphrase cache. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe (and removes the orphaned legacy v1 `per_instance.jsonl` if still on disk after upgrading from 1.x).
+- **Per-cell synthesizer cache** at `~/.llmoji/cache/per_cell.jsonl`. Each row holds a structured adjective bag (`primary_affect` + `stance_modality_function`) drawn from the locked LEXICON, keyed by the synthesis model id, backend, base URL, source model, canonical kaomoji, and a hash of the sampled (user, assistant) pairs that fed the call. The bag itself contains no free-form text and no journal content, only adjectives from the corpus vocabulary; every bag is checked against the lexicon before it is cached. The cache is never bundled and never shipped. `llmoji status` prints its size; `llmoji cache clear` is the explicit wipe.
 - **Submission token** at `~/.llmoji/.salt`. A 256-bit random token generated on first `upload`, used as the salt for the submitter id. Never sent anywhere.
 
 ### What ships when you `upload`
@@ -38,18 +34,18 @@ The submitter id is a 32-hex-char (128-bit) salted hash of the per-machine token
 
 ### Singleton kaomoji caveat
 
-In v1.x the per-face summary was free-form prose, and for a kaomoji that appeared once, the synthesized line was effectively a paraphrase of that one turn — a small singleton-leak surface. v2 removed this surface entirely: the row carries only adjectives from a 48-word locked vocabulary, so a singleton kaomoji's row is a bag like `{primary_affect: ["frustrated"], stance_modality_function: ["wry", "self-correcting", "tender"]}` rather than a paraphrase of the underlying turn. Even so, please continue to review the bundle before uploading:
+In v1.x the per-face summary was free-form prose, and for a kaomoji that appeared once, the synthesized line was effectively a paraphrase of that one turn — a small singleton-leak surface. v2 removed this surface entirely: the row carries only adjectives from a 50-word locked vocabulary, and llmoji refuses any synthesis that strays outside it (a local model decoding without constraints could otherwise echo journal text). A singleton kaomoji's row is a bag like `{primary_affect: ["frustrated"], stance_modality_function: ["wry", "self-correcting", "tender"]}` rather than a paraphrase of the underlying turn. Even so, please continue to review the bundle before uploading:
 
 - `analyze` prints a per-face preview before declaring done.
 - `upload` re-prompts before committing.
 - The bundle is inspectable in `~/.llmoji/bundle/`.
-- The bundle is allowlisted: top-level `manifest.json` plus per-model `.jsonl` files at the root. Both `upload --target hf` and `tar_bundle` (used for email) refuse to ship if anything else is in the bundle dir.
+- The bundle is allowlisted: top-level `manifest.json` plus per-model `.jsonl` files at the root. Both upload targets refuse to ship if anything else is in the bundle dir.
 
 Please review every `~/.llmoji/bundle/<source-model>.jsonl` before running `upload`.
 
 ### Hooks are read-only
 
-The bash hooks shipped with each provider append one row to a journal. They never block the turn, modify the reply, or call out to the network. 
+The hook installed for each provider appends rows to that harness's journal. It never blocks the turn, modifies the reply, or calls out to the network, and it always exits successfully; anything that goes wrong is logged to `~/.llmoji/hook-errors.log`.
 
 ## Model and API trust
 
@@ -59,11 +55,11 @@ The bash hooks shipped with each provider append one row to a journal. They neve
 - **`--backend openai`**: calls the OpenAI Responses API with your `$OPENAI_API_KEY`. Your journal text goes to OpenAI for paraphrasing.
 - **`--backend local`**: calls a local OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp's HTTP server, etc.) at the `--base-url` you pass. Your journal text stays on whatever machine the endpoint runs on; nothing is sent to a third party.
 
-`llmoji upload --target hf` reads your HuggingFace token from `$HF_TOKEN` or `~/.cache/huggingface/token` once for an `HfApi.whoami()` proof-of-life check, then discards it. Your token is never used besides this. The push uses a shared submission credential, so your personal HF account never appears on the dataset's commit history or branch list.
+`llmoji upload --target hf` doesn't use your HuggingFace account at all. The push uses a shared submission credential, so nothing about you appears on the dataset's commit history or branch list beyond the salted submitter id.
 
-The submission credential is gated behind an upload password. Llmoji reads the password from `$LLMOJI_UPLOAD_PASSWORD` or prompts you interactively; the current password is posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji).
+The submission credential ships encrypted in the package and is unlocked by an upload password, read from `$LLMOJI_UPLOAD_PASSWORD` or prompted for; the current password is posted on the [dataset card](https://huggingface.co/datasets/a9lim/llmoji). Since the password is public, the credential is effectively a public write token for the dataset, scoped to it alone. The encryption only keeps the token out of plain sight in the package source. What protects the dataset is review: every submission lands on its own branch, and nothing reaches `main` until the maintainer has read the diff and merged it.
 
-`llmoji upload --target email` builds a `mailto:` URI with the bundle path printed in the body and asks you to attach the tarball manually.
+`llmoji upload --target archive` writes the same allowlisted files to a tarball and prints its path, for anyone who would rather email it.
 
 ## Receiving end
 

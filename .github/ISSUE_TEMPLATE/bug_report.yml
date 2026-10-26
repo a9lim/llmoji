@@ -34,8 +34,9 @@ body:
       options:
         - claude_code
         - codex
-        - hermes
-        - generic JSONL contract (custom harness)
+        - grok
+        - antigravity
+        - generic JSONL journal (custom harness)
         - not provider-specific
 
   - type: input
@@ -43,7 +44,7 @@ body:
     attributes:
       label: llmoji version
       description: Output of `pip show llmoji | grep Version`
-      placeholder: "1.0.0"
+      placeholder: "3.0.0"
     validations:
       required: true
 

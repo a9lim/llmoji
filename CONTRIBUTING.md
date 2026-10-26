@@ -10,91 +10,38 @@ cd llmoji
 pip install -e ".[dev]"
 ```
 
-The dev extras pull in `pytest` and `ruff`. There is no GPU dependency or network requirement for tests.
+The dev extras pull in `pytest`, `ruff` and `pyright`. There is no GPU dependency or network requirement for tests.
 
 ## Running tests
 
 ```bash
-pytest tests/                            # everything
+pytest tests/                            # everything, in about a second
 pytest tests/test_canonicalize.py -v     # rule-by-rule taxonomy regression
-pytest tests/test_public_surface.py -v   # cross-corpus invariant contract
-pytest tests/test_install_autodetect.py  # install + uninstall no-arg dispatch
-pytest tests/test_import.py              # import dedup + autodetect
-pytest -m "not slow"                     # skip the bash + jq parity gate
+pytest tests/test_capture.py -v          # transcript decoding + the installed hook
 ```
 
-The full suite runs anywhere with Python 3.11+ in under a few seconds, and is what CI exercises on every PR. The bash + jq parity tests in `tests/test_pipeline_parity.py` are marked `slow` because they fork subprocess for every case. Skip them with `-m "not slow"` while iterating on something unrelated; CI keeps running the full suite. Tests use `$LLMOJI_HOME` to override the on-disk root, so they don't touch your real `~/.llmoji`.
-
-## Lint
-
-CI runs `ruff check .` on every PR. Please run it locally first:
-
-```bash
-ruff check .
-ruff check . --fix      # auto-fix what's fixable
-```
+CI runs `ruff check .`, `pyright` and `pytest` on every PR. Tests point `HOME` and `$LLMOJI_HOME` at temp directories, so they never touch your real harness config or `~/.llmoji`.
 
 ## Adding a new provider
 
-llmoji ships two kinds of installers.
+A provider is one `Provider` subclass under `llmoji/providers/`, registered in `llmoji.providers.PROVIDERS`. `llmoji/providers/base.py` documents the interface; `grok.py` and `antigravity.py` are small examples of a harness with its own registration file. A provider declares:
 
-### Bash hook providers
+- `home_dir`, `hooks_dir`, `settings_path`, `journal_path` and `doc_path` (the harness's global instructions file), each with `home_path(...)`. A class-body `Path.home() / ...` is evaluated at import and escapes the test suite's `HOME` sandbox.
+- `live_rows(payload)`: the kaomoji-led messages of the turn a Stop hook fired on, decoded from the transcript the payload points at. Build rows with `llmoji.scrape.kaomoji_row`, and stamp each with the message's own timestamp when the transcript has one, so the live row and its replay are the same row.
+- If the harness keeps replayable history: `session_files()` and `replay(path)`, sharing the decoder `live_rows` uses. That makes it importable.
+- If its registration isn't Claude Code's `hooks[<event>][i].hooks[j].command` shape: `_register`, `_unregister` and `_is_registered`. Settings writes go through `atomic_write_text` or `write_json`.
+- `hook_stdout`, if the harness reads the hook's stdout as its reply.
 
-For harnesses that expose shell hooks (Claude Code, Codex, Hermes, Grok, Antigravity), a first-class provider is one bash hook template under `llmoji/_hooks/` plus one `HookInstaller` subclass under `llmoji/providers/`. The abstraction in `llmoji/providers/base.py:HookInstaller` documents what the subclass needs. Please keep the following in mind:
+Please include in the PR fixture-based tests in `tests/test_capture.py` for the transcript shapes (one turn, several messages in a turn, the turn boundary, subagents), an install round trip (covered automatically by `tests/test_install.py` once it's in `PROVIDERS`), and a short note on the harness version you checked against.
 
-1. Where the harness keeps its hooks dir and settings file.
-2. The harness's stop-event payload shape (kaomoji on first or last text block per turn, or single-text-field).
-3. How to filter sidechain dispatches (none, field-flag, or session-id correlation).
+## Adding a static-export source
 
-If the harness's settings format isn't already in `base.py` (we have JSON for Claude Code, Codex and Grok, YAML for Hermes; Antigravity writes its own plugin directory), please add a new format alongside. Declare path defaults with `home_path(...)`, not `Path.home() / ...` in the class body — the latter is evaluated at import and escapes the test suite's `HOME` sandbox. The settings writer must go through `atomic_write_text`. Additionally wire up the nudge: set `nudge_hook_template`, `nudge_hook_filename`, and `nudge_event`, then override `_check_registrations` if the format isn't JSON-shaped. If the harness has no way to put text in front of the model each turn, set `hard_unsupported_reason` instead (see `GrokProvider`). Leave `nudge_message` alone — it's inherited from `HookInstaller` (the single canonical `NUDGE_MESSAGE`); re-stating it per provider is the cross-corpus drift bug 2.1 removed. Please also set `system_prompt_doc_path` to the harness's system prompt doc.
-
-Please include in the PR:
-
-- The hook template (`llmoji/_hooks/<provider>.sh.tmpl`), plus a nudge template if the response shape differs from the existing `claude_codex_nudge.sh.tmpl`, `hermes_nudge.sh.tmpl` or `antigravity_nudge.sh.tmpl`. Set `ROW_TS` per row to the message's own transcript timestamp when the source has one, so live rows match what `llmoji import` replays.
-- The `HookInstaller` subclass with `system_injected_prefixes` (empty if the harness doesn't inject system-role-as-user-text payloads) and `system_prompt_doc_path`.
-- Test cases in `test_public_surface.py` for the rendered hook plus any new corruption-refusal path, and a hook-vs-backfill case in `test_pipeline_parity.py` if the harness keeps replayable transcripts. The existing `test_nudge_install_uninstall_roundtrip` picks up a new JSON-shaped nudge automatically; YAML-shaped providers want their own coverage. 
-- A short note on the harness's docs version and where the kaomoji lands in the stop payload.
-
-### TS plugin providers
-
-For harnesses with a TypeScript-only plugin SDK (opencode, openclaw), a first-class provider is one or more TS templates under `llmoji/_plugins/` plus one `PluginInstaller` subclass under `llmoji/providers/`. Both shipped TS providers are reasonable starting points to copy from. Each template needs the following:
-
-1. A `// BEGIN SHARED TAXONOMY` / `// END SHARED TAXONOMY` marker pair somewhere in the file. The body between them is left empty in the template. `render_plugin_template` splices in the canonical TS port from `_kaomoji_taxonomy.ts.partial` at install time. Don't paste the validator inline.
-2. A `__LLMOJI_VERSION__` token wherever you want the package version stamped.
-3. A `__NUDGE_LITERAL__` token where the canonical nudge wording gets inlined. `render_plugin_template` JSON-escapes the wording, so the placeholder is a value in any context where a TS string literal is valid.
-4. A `// BEGIN NUDGE HOOK` / `// END NUDGE HOOK` marker pair around the per-turn nudge code.
-5. The actual harness-side hook registration: a per-turn nudge injection between the NUDGE HOOK markers, and a per-message journal write (one row per kaomoji-led assistant message, written to `~/.llmoji/journals/<harness>.jsonl` against the canonical schema) outside the markers.
-
-The `PluginInstaller` subclass needs:
-
-- `plugin_dir`: where on disk the rendered files land (typically inside `~/.<harness>/plugins/` or similar).
-- `plugin_files`: list of `(template_name, dest_filename)` tuples; the first entry is the "main artifact" whose path is reused as `hook_path` for status reporting.
-- `journal_path`: `~/.llmoji/journals/<harness>.jsonl` by convention.
-- `system_prompt_doc_path`: the harness's identity or global-instructions file. `install --soft` appends a `## Kaomoji` heading and the nudge wording there.
-- `home_dir`: by default `plugin_dir.parent`, which `is_present` checks; override if the harness's home dir lives elsewhere (openclaw points at `settings_path.parent` so the check matches the bash providers).
-- `_register` / `_unregister` / `_check_registrations` only need overrides if the harness needs an explicit registration step beyond file presence (e.g. flipping a config flag; see `OpenclawProvider`). If file presence is enough, inherit the defaults. The base `_register` accepts `include_nudge`.
-
-Please include in the PR:
-
-- The TS template(s) under `llmoji/_plugins/<provider>*.ts.tmpl` (and `.json.tmpl` if the harness needs a manifest).
-- The `PluginInstaller` subclass under `llmoji/providers/<provider>.py`, with `system_prompt_doc_path` set.
-- An entry in `llmoji.providers.PROVIDERS` and the `__all__` re-export.
-- A round-trip install/uninstall test in `test_public_surface.py` (the existing `test_plugin_install_uninstall_roundtrip` is a template).
-
-The journal schema does not change for a new provider, of either flavor.
-
-## Adding a static-dump source
-
-Static-dump readers live under `llmoji/sources/`. They convert a specific provider's export format into the canonical six-field schema. The reader is plain Python and does not interact with the harnesses.
-
-Please strip the leading kaomoji from `assistant_text` on parse, the same way the bash hooks do (the prefix lives in the row's `kaomoji` field).
+Export readers live under `llmoji/sources/` and turn one export format into rows; the CLI's `parse` writes them to `~/.llmoji/journals/`. Build rows with `kaomoji_row`, which splits the face from the body for you.
 
 ## PRs
 
 - Please don't bump the version in your PR unless the change is intended to ship as a release. The PyPI publish workflow is triggered by a version update.
-- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, `HookInstaller`, the journal schema, or the bundle schema is a cross-corpus invariant change. Please flag it explicitly in the PR body. Those affect the HF dataset and need an edit on the dataset card too. The taxonomy is currently locked at the 2.0.0 sweep (broader `KAOMOJI_START_CHARS` plus the paired-arm/wing-hand/raised-hands/box-drawing-pose strip set); adding a leader char or arm modifier is itself a cross-corpus change and needs a major version bump.
-- If you're porting the validator to another language for an unsupported harness, the canonical TS port at [`llmoji/_plugins/_kaomoji_taxonomy.ts.partial`](llmoji/_plugins/_kaomoji_taxonomy.ts.partial) is the reference shape. The Python module `llmoji.taxonomy` is the actual single source of truth — bash hooks render the leading-glyph case from `KAOMOJI_START_CHARS` at install time, and the TS partial gets spliced into both shipped TS plugins by `render_plugin_template`. A `test_plugin_taxonomy_block_matches` test asserts the splice is byte-identical, so a stale hand-edit on either side fails CI.
-- The hermes provider in particular wants real-traffic validation. If you run hermes and are willing to share what `extra.*` keys actually arrive on `post_llm_call` and whether `subagent_stop` correlation filters cleanly, please open an issue.
+- Anything that touches `llmoji.taxonomy`, `llmoji.synth_prompts`, the journal schema, or the bundle schema is a cross-corpus change. Please flag it explicitly in the PR body. Those affect the HF dataset and need an edit on the dataset card too; a lexicon or schema change also bumps `LEXICON_VERSION`.
 
 ## Questions
 

@@ -1,82 +1,67 @@
-"""Unified kaomoji-scrape schema and journal iterator.
+"""The in-memory row every reader produces.
 
-Concrete sources live under ``llmoji.sources``:
-
-  - ``llmoji.sources.journal`` — read any provider's
-    ``~/.<harness>/kaomoji-journal.jsonl`` (the canonical 6-field
-    unified row format the bash hook templates emit).
-  - ``llmoji.sources.claude_export`` — read a Claude.ai data-export
-    ``conversations.json`` and yield kaomoji-bearing assistant
-    messages.
-
-Kaomoji extraction uses :func:`llmoji.taxonomy.extract` (balanced-paren
-span fallback; no dialect-specific dict required at scrape time).
+The on-disk contract is the 6-field journal row (``ts``, ``model``,
+``cwd``, ``kaomoji``, ``user_text``, ``assistant_text``);
+:class:`ScrapeRow` is its in-memory form and free to evolve.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Any, Iterable, Iterator
+from dataclasses import dataclass
+
+from .taxonomy import split_leading_kaomoji
+
+# User-role text a harness injects rather than a person or an agent
+# writing: completion notices, reminders, slash-command output, skill
+# bodies. Never a row's ``user_text``.
+INJECTED_USER_PREFIXES = (
+    "<task-notification>",
+    "<system-reminder>",
+    "<subagent_notification>",
+    "<skill>",
+    "<codex_internal_context",
+    "<local-command-caveat>",
+    "<local-command-stdout>",
+)
+
+
+def is_injected(text: str) -> bool:
+    return text.lstrip().startswith(INJECTED_USER_PREFIXES)
 
 
 @dataclass
 class ScrapeRow:
-    """One kaomoji-bearing assistant message, source-agnostic.
+    """One kaomoji-led assistant message."""
 
-    Sources fill the fields they have evidence for and leave the
-    others empty / ``None``. The downstream :mod:`llmoji.analyze`
-    pipeline reads ``first_word``, ``assistant_text``,
-    ``surrounding_user``, and ``model`` (with fallback to
-    ``source``); the rest is provenance for the on-disk journal
-    row.
-
-    The cross-corpus invariant is the on-disk 6-field journal row
-    (``ts``, ``model``, ``cwd``, ``kaomoji``, ``user_text``,
-    ``assistant_text``), not this dataclass — ``ScrapeRow`` is
-    in-memory only and free to evolve. Pre-1.1.x versions carried
-    richer metadata (``session_id``, ``parent_uuid``,
-    ``project_slug``, ``assistant_uuid``, ``git_branch``,
-    ``turn_index``, ``had_thinking``) for would-be research-side
-    consumers. Nothing in the v1 pipeline reads them, and
-    ``llmoji-study`` reads bundles + journals (not ``ScrapeRow``
-    directly), so they're dropped in 1.1.x to keep the dataclass
-    honest.
-
-    Pre-v1.0 versions also carried ``kaomoji`` (TAXONOMY-registered
-    form) and ``kaomoji_label`` (+1/-1/0 affect pole) fields. Those
-    were gemma-tuned and have moved to the research-side schema in
-    ``llmoji_study.taxonomy_labels.LabeledScrapeRow``; the public
-    schema is span-only.
-    """
-
-    # --- provenance ---
-    source: str                 # e.g. "claude_code-hook", "codex-hook",
-                                #      "hermes-hook", "claude-ai-export"
-
-    # --- context ---
-    model: str | None           # active model slug, if reported
-    timestamp: str              # ISO-8601
-    cwd: str | None             # working directory at hook fire
-
-    # --- content ---
-    assistant_text: str         # full assistant message text (kaomoji stripped)
-    first_word: str             # canonical leading kaomoji span — the
-                                # unified-schema kaomoji identifier
-
-    # --- upstream ---
-    surrounding_user: str       # latest preceding user-authored text
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    source: str  # journal it came from: "claude_code-hook", "chatgpt_export", ...
+    model: str | None
+    timestamp: str  # ISO-8601
+    cwd: str | None
+    assistant_text: str  # the message with its leading kaomoji removed
+    first_word: str  # the leading kaomoji
+    surrounding_user: str  # the user prompt the message answers
 
 
-def iter_all(*sources: Iterable[ScrapeRow]) -> Iterator[ScrapeRow]:
-    """Chain multiple :class:`ScrapeRow` iterators.
-
-    The end-user CLI calls this with whatever sources the local
-    installation has (one journal per installed provider, plus any
-    static dumps the user has parsed). Pure plumbing — no I/O, no
-    canonicalization.
-    """
-    for src in sources:
-        yield from src
+def kaomoji_row(
+    text: str,
+    *,
+    source: str,
+    model: str | None,
+    timestamp: str,
+    cwd: str | None,
+    user: str,
+) -> ScrapeRow | None:
+    """A row for ``text`` if it opens with a kaomoji, else ``None``."""
+    split = split_leading_kaomoji(text)
+    if split is None:
+        return None
+    face, body = split
+    return ScrapeRow(
+        source=source,
+        model=model or None,
+        timestamp=timestamp,
+        cwd=cwd or None,
+        assistant_text=body,
+        first_word=face,
+        surrounding_user=user.strip(),
+    )

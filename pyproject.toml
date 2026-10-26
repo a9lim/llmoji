@@ -16,11 +16,8 @@ keywords = [
     "claude",
     "claude-code",
     "codex",
-    "hermes",
     "grok",
     "antigravity",
-    "opencode",
-    "openclaw",
     "emoticons",
     "agents",
     "interpretability",
@@ -45,31 +42,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Lean by design. The package is provider-agnostic data collection
-# plus canonical synthesis plus bundle/upload. Heavier ML deps
-# (torch, sentence-transformers, matplotlib, saklas) live in the
-# research-side `llmoji-study` repo.
-#
-# Three SDKs are runtime deps so any of the three synthesis backends
-# (anthropic, openai-Responses, OpenAI-compatible local Chat
-# Completions) Just Works out of `pip install llmoji`. The local
-# backend reuses the openai SDK with a base_url override.
+# Lean by design: the three synthesis SDKs (openai also serves the
+# local backend), the HF client, tqdm. Embedding and figure work lives
+# in llmoji-study.
 dependencies = [
-    "anthropic>=0.40",
-    "openai>=1.55",
+    "anthropic>=0.77",  # output_config structured outputs
+    "openai>=1.66",  # Responses API
     "huggingface_hub>=0.25",
-    # tqdm drives the analyze progress bars in :mod:`llmoji.analyze`.
-    # Already a transitive dep via huggingface_hub and openai, listed
-    # explicitly so the surface stays honest if either upstream drops it.
     "tqdm>=4.65",
-    # ruamel.yaml drives the hermes provider's settings-file merge in
-    # :mod:`llmoji.providers.hermes`: ``~/.hermes/config.yaml`` lands
-    # in arbitrary user shapes (empty placeholder, populated `hooks:`
-    # block, custom hand-curated config), and merging our two entries
-    # without clobbering the user's surrounding YAML needs a real
-    # round-trip parser. PyYAML alone loses comments and key order on
-    # dump; ruamel's rt mode preserves both. ~118 KB wheel.
-    "ruamel.yaml>=0.18",
 ]
 
 [project.optional-dependencies]
@@ -96,27 +76,18 @@ Dataset = "https://huggingface.co/datasets/a9lim/llmoji"
 [project.scripts]
 llmoji = "llmoji.cli:main"
 
-# Single source of truth for the version is ``__version__`` in
-# llmoji/__init__.py. Hatch's default regex source parses the literal
-# from the file without executing it, so the eager re-exports at
-# import time don't fire at build time.
+# Hatch reads the __version__ literal without importing the package.
 [tool.hatch.version]
 path = "llmoji/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llmoji"]
-# The bash hook templates under llmoji/_hooks/ ship as part of the
-# package directory automatically; no force-include needed (and a
-# force-include would duplicate them in the wheel zip).
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
-]
-markers = [
-    "slow: bash + jq subprocess parity tests; skip with -m 'not slow' for fast local iteration",
 ]
 
 [tool.ruff]
@@ -127,28 +98,8 @@ target-version = "py311"
 select = ["E", "F", "W"]
 ignore = ["E501", "E741", "E402", "E731"]
 
-# Pyright is scoped to the v1.0 frozen public API surface. Internal
-# helpers (cli argparse plumbing, analyze pipeline glue, provider
-# config writers, the backfill module's transcript walkers) lean on
-# argparse + third-party SDK shapes whose stubs are uneven; running
-# the checker over them is all noise. The contract users import from
-# ``llmoji`` is the real surface, so it's what we hold to a type
-# checker.
 [tool.pyright]
-include = [
-    "llmoji/__init__.py",
-    "llmoji/taxonomy.py",
-    "llmoji/synth_prompts.py",
-    "llmoji/synth.py",
-    "llmoji/scrape.py",
-    "llmoji/providers/__init__.py",
-    "llmoji/providers/base.py",
-    "llmoji/providers/grok.py",
-    "llmoji/providers/antigravity.py",
-    "llmoji/providers/opencode.py",
-    "llmoji/providers/openclaw.py",
-    "llmoji/upload.py",
-]
+include = ["llmoji"]
 exclude = ["**/__pycache__"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"

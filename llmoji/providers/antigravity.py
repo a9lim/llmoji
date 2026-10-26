@@ -1,185 +1,134 @@
-"""Antigravity provider (Google's ``agy`` CLI).
+"""Antigravity, Google's ``agy`` CLI (``~/.gemini``).
 
-Antigravity loads plugins from ``plugins/<name>/`` under each
-customization root; the global root is ``~/.gemini/config/``. A plugin
-is a directory holding a ``plugin.json`` marker and an optional
-``hooks.json``, so llmoji owns one outright —
-``~/.gemini/config/plugins/llmoji/`` with both files plus the two hook
-scripts — and uninstall removes the directory. Contract source: the
-``agy-customizations`` skill Antigravity bundles at
-``~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/``
-(agy 1.4.7), cross-checked against live payloads.
+agy loads plugins from ``~/.gemini/config/plugins/<name>/``: a
+``plugin.json`` marker plus a ``hooks.json`` keyed by hook name, each
+mapping events to a flat handler list. llmoji owns the ``llmoji`` plugin
+outright and removes it on uninstall. Contract source: the
+``agy-customizations`` skill agy bundles (agy 1.4.7), cross-checked
+against live payloads.
 
-``hooks.json`` is keyed by hook *name*, each mapping events to
-handlers; ``Stop`` and ``PreInvocation`` take a flat handler list, not
-the matcher groups tool events use::
-
-    {"llmoji": {"Stop": [{"type": "command", "command": "..."}],
-                "PreInvocation": [{"type": "command", "command": "..."}]}}
-
-Per-provider quirks (vs claude_code / codex):
-
-  - **Every payload names the model.** Hook stdin carries
-    ``modelName`` (the resolved id, e.g. ``gemini-4-argon-medium``),
-    ``transcriptPath`` (``brain/<id>/.system_generated/logs/
-    transcript_full.jsonl``), ``workspacePaths`` and, since agy 1.4.7,
-    ``lastUserInput`` — the raw prompt, without the ``<USER_REQUEST>``
-    wrapper the transcript stores it in.
-  - **Transcript steps, not messages.** Each line is a step;
-    ``type == "PLANNER_RESPONSE"`` with non-empty ``content`` is a
-    model message, ``USER_INPUT`` opens a turn. The transcript is
-    complete when ``Stop`` fires (verified live).
-  - **The nudge is a per-invocation ephemeral message.** Under
-    ``--hard`` a ``PreInvocation`` hook returns ``{"injectSteps":
-    [{"ephemeralMessage": ...}]}`` before every model call — each call
-    can open a new message, and ephemeral steps are transient by
-    design (Antigravity's own docs use exactly this for a reminder).
-  - **Hooks speak JSON on stdout.** Both scripts print a JSON object
-    (``{}`` from the Stop hook: no ``decision`` lets the agent stop).
-  - **No replay.** Transcripts carry no per-step model id (it lives in
-    protobuf blobs in the conversation SQLite store), so ``llmoji
-    import`` doesn't cover Antigravity; live capture is the path.
-  - **Subagents unfiltered.** Whether a subagent execution fires the
-    global ``Stop`` with its own transcript isn't verified; the
-    conversation store's ``parent_references`` table would be the
-    signal to filter on.
-  - **The journal lives in agy's state dir,**
-    ``~/.gemini/antigravity-cli/kaomoji-journal.jsonl``. A sandbox that
-    confines agy's writes to its own state (gaslamp runs consults under
-    such a Seatbelt profile) would otherwise deny the append silently,
-    since the hook fails open.
-  - **System-prompt doc is ``~/.gemini/GEMINI.md``.** Antigravity
-    reads it as global rules; ``~/.gemini/config/`` itself is guarded
-    configuration, and its policy checker treats edits there by the
-    agent as tampering — ``llmoji install`` runs outside the agent.
+- Every Stop payload carries ``modelName``, ``transcriptPath`` (the
+  step list ``brain/<id>/.system_generated/logs/transcript_full.jsonl``),
+  ``workspacePaths`` and, since 1.4.7, ``lastUserInput`` — the prompt
+  without the ``<USER_REQUEST>`` wrapper the transcript stores it in.
+- ``PLANNER_RESPONSE`` steps with text are model messages and
+  ``USER_INPUT`` opens a turn. The transcript is complete when Stop
+  fires.
+- Hooks answer on stdout, so the shim prints ``{}`` (no ``decision``
+  lets the agent stop) before Python runs.
+- No replay: transcripts carry no per-step model id, and every bundle
+  row is keyed by model.
+- The journal sits in agy's state dir, the one place a sandbox that
+  confines agy to its own state (gaslamp's Seatbelt profile does)
+  still lets the hook write.
+- The kaomoji block goes in ``~/.gemini/GEMINI.md``; agy's policy
+  checker guards ``~/.gemini/config/`` itself against agent edits.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
-from .._util import write_json
-from .base import (
-    HookInstaller,
-    SettingsCorruptError,
-    _load_json_strict,
-    _same_hook_command,
-    home_path,
-)
+from .._util import read_jsonl, write_json
+from ..scrape import ScrapeRow, kaomoji_row
+from .base import Provider, SettingsCorruptError, home_path, load_json_strict
 
-# Hook name under which our handlers live in the plugin's hooks.json.
-HOOK_NAME = "llmoji"
+PLUGIN = "llmoji"
+_USER_REQUEST = re.compile(r"<USER_REQUEST>\n?([\s\S]*?)\n?</USER_REQUEST>")
 
 
-class AntigravityProvider(HookInstaller):
+class AntigravityProvider(Provider):
     name = "antigravity"
-    hooks_dir = home_path(".gemini", "config", "plugins", "llmoji")
-    settings_path = home_path(".gemini", "config", "plugins", "llmoji", "hooks.json")
-    # Inside the CLI's own state dir, as ``~/.codex/kaomoji-journal.jsonl``
-    # sits in Codex's — and the one place a sandbox that confines agy to
-    # its state (gaslamp's Seatbelt profile does) still lets the hook write.
+    home_dir = home_path(".gemini")
+    hooks_dir = home_path(".gemini", "config", "plugins", PLUGIN)
+    settings_path = home_path(".gemini", "config", "plugins", PLUGIN, "hooks.json")
     journal_path = home_path(".gemini", "antigravity-cli", "kaomoji-journal.jsonl")
-    system_prompt_doc_path = home_path(".gemini", "GEMINI.md")
-    hook_template = "antigravity.sh.tmpl"
-    # Per-message while-loop, like claude_code / codex. The template
-    # prints ``{}`` before the walk, so a skipped row needs no output.
-    skip_action = "continue"
-    # ``lastUserInput`` is the raw prompt; nothing injected to strip.
-    system_injected_prefixes: list[str] = []
-    nudge_hook_template = "antigravity_nudge.sh.tmpl"
-    nudge_hook_filename = "kaomoji-nudge.sh"
-    nudge_event = "PreInvocation"
+    doc_path = home_path(".gemini", "GEMINI.md")
+    hook_stdout = "{}"
 
     @property
-    def home_dir(self) -> Path:
-        return Path.home() / ".gemini"
-
-    @property
-    def plugin_manifest_path(self) -> Path:
-        return self.settings_path.parent / "plugin.json"
+    def manifest_path(self) -> Path:
+        return self.hooks_dir / "plugin.json"
 
     def is_present(self) -> bool:
-        """``~/.gemini`` alone is also Gemini CLI's home, so look for
-        a directory only Antigravity creates."""
-        return (
-            (self.home_dir / "antigravity-cli").exists()
-            or (self.home_dir / "config").exists()
+        # ~/.gemini alone is also Gemini CLI's home.
+        return (self.home_dir / "antigravity-cli").exists() or (
+            self.home_dir / "config"
+        ).exists()
+
+    def live_rows(self, payload: dict[str, Any]) -> list[ScrapeRow]:
+        path = Path(str(payload.get("transcriptPath") or ""))
+        steps = read_jsonl(path) if path.is_file() else []
+        start = max(
+            (i for i, s in enumerate(steps) if s.get("type") == "USER_INPUT"),
+            default=0,
         )
+        user = str(payload.get("lastUserInput") or "")
+        if not user and steps and isinstance(steps[start].get("content"), str):
+            content = steps[start]["content"]
+            m = _USER_REQUEST.search(content)
+            user = m.group(1) if m else content
+        workspaces = payload.get("workspacePaths")
+        rows = []
+        for step in steps[start:]:
+            content = step.get("content")
+            if step.get("type") != "PLANNER_RESPONSE" or not isinstance(content, str):
+                continue
+            row = kaomoji_row(
+                content,
+                source=f"{self.name}-hook",
+                model=str(payload.get("modelName") or ""),
+                timestamp=str(step.get("created_at") or ""),
+                cwd=str(workspaces[0]) if isinstance(workspaces, list) and workspaces else "",
+                user=user,
+            )
+            if row is not None:
+                rows.append(row)
+        return rows
 
     # --- registration: our own plugin.json + hooks.json ---
 
-    def _register(self, *, include_nudge: bool = True) -> None:
-        """Write the plugin marker and set our named hook in
-        ``hooks.json``: ``Stop`` always, ``PreInvocation`` under
-        ``--hard``. Any other hook names a user added to the file are
-        kept; a ``--soft`` re-install drops a ``PreInvocation`` an
-        earlier ``--hard`` left."""
-        cfg = _load_json_strict(self.settings_path)
-        spec: dict[str, Any] = {
-            "Stop": [{"type": "command", "command": str(self.hook_path)}],
-        }
-        if include_nudge and self.nudge_hook_path is not None:
-            spec[self.nudge_event] = [
-                {"type": "command", "command": str(self.nudge_hook_path)},
-            ]
-        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        if cfg.get(HOOK_NAME) != spec:
-            cfg[HOOK_NAME] = spec
+    def _spec(self) -> dict[str, Any]:
+        return {self.hook_event: [{"type": "command", "command": str(self.hook_path)}]}
+
+    def _register(self) -> None:
+        cfg = load_json_strict(self.settings_path)
+        if cfg.get(PLUGIN) != self._spec():
+            cfg[PLUGIN] = self._spec()
             write_json(self.settings_path, cfg)
-        if not self.plugin_manifest_path.exists():
-            write_json(self.plugin_manifest_path, {"name": HOOK_NAME})
+        if not self.manifest_path.exists():
+            write_json(self.manifest_path, {"name": PLUGIN})
 
     def _unregister(self) -> None:
-        """Drop our named hook; once ``hooks.json`` holds nothing else,
-        remove it and the plugin marker. A corrupt file is left alone."""
-        if self.settings_path.exists():
-            try:
-                cfg = _load_json_strict(self.settings_path)
-            except SettingsCorruptError:
-                return
-            if HOOK_NAME in cfg:
-                cfg.pop(HOOK_NAME)
-                if cfg:
-                    write_json(self.settings_path, cfg)
-                else:
-                    self.settings_path.unlink()
-        if not self.settings_path.exists() and self.plugin_manifest_path.exists():
-            self.plugin_manifest_path.unlink()
+        try:
+            cfg = load_json_strict(self.settings_path)
+        except SettingsCorruptError:
+            return
+        if cfg.pop(PLUGIN, None) is not None:
+            if cfg:
+                write_json(self.settings_path, cfg)
+            else:
+                self.settings_path.unlink()
+        if not self.settings_path.exists():
+            self.manifest_path.unlink(missing_ok=True)
+
+    def _is_registered(self) -> bool:
+        try:
+            spec = load_json_strict(self.settings_path).get(PLUGIN)
+        except SettingsCorruptError:
+            return False
+        handlers = spec.get(self.hook_event) if isinstance(spec, dict) else None
+        return self.manifest_path.exists() and isinstance(handlers, list) and any(
+            self._is_ours(h) for h in handlers
+        )
 
     def uninstall(self) -> None:
         super().uninstall()
-        # The plugin dir, then ``plugins/`` if install created it and
-        # nothing else lives there. A missing or non-empty dir stays.
+        # The plugin dir, then plugins/ if nothing else lives there.
         for d in (self.hooks_dir, self.hooks_dir.parent):
             try:
                 d.rmdir()
             except OSError:
                 break
-
-    def _check_registrations(self) -> tuple[bool, bool]:
-        if not self.plugin_manifest_path.exists():
-            return False, False
-        try:
-            cfg = _load_json_strict(self.settings_path)
-        except SettingsCorruptError:
-            return False, False
-        spec = cfg.get(HOOK_NAME)
-        if not isinstance(spec, dict):
-            return False, False
-
-        def registered(event: str, path: Path | None) -> bool:
-            handlers = spec.get(event)
-            if path is None or not isinstance(handlers, list):
-                return False
-            return any(
-                isinstance(h, dict)
-                and isinstance(h.get("command"), str)
-                and _same_hook_command(h["command"], str(path))
-                for h in handlers
-            )
-
-        return (
-            registered("Stop", self.hook_path),
-            registered(self.nudge_event, self.nudge_hook_path),
-        )

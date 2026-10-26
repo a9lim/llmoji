@@ -1,32 +1,13 @@
-"""Generic kaomoji-journal reader.
+"""Reading journals: the hooks' own and any in ``~/.llmoji/journals/``.
 
-Every provider's ``install`` writes a bash hook that appends one row
-per kaomoji-bearing assistant turn to a journal at
-``~/.<harness>/kaomoji-journal.jsonl``. The schema is uniform across
-providers (this is the one piece of public API every harness's hook
-must produce, locked in v1.0):
+Every journal row has six string fields::
 
-    {
-      "ts":             ISO-8601 UTC timestamp,
-      "model":          active model slug,
-      "cwd":            working directory at hook fire,
-      "kaomoji":        leading non-letter prefix (≥2 bytes, validated),
-      "user_text":      latest real user message (system-injection filtered),
-      "assistant_text": last assistant text MINUS the leading kaomoji
-    }
+    {"ts", "model", "cwd", "kaomoji", "user_text", "assistant_text"}
 
-The ``kaomoji`` field is already the leading prefix the shell hook
-captured; we still pipe it through :func:`~llmoji.taxonomy.extract` to
-recover a clean balanced-paren ``first_word`` (and a taxonomy match
-when one happens to exist) and to defensively reject any legacy null
-or shape-incorrect rows that slipped past the hook's own filters.
-
-This is the preferred path for every harness whose hook is
-provider-managed. For motivated users on harnesses we don't ship a
-first-class adapter for (e.g. OpenClaw — TS-shaped hooks), the
-contract is "write a JSONL line in this exact schema to
-``~/.llmoji/journals/<name>.jsonl`` and ``analyze`` will pick it up."
-The same iterator handles both cases.
+``kaomoji`` is the face that opened the message and ``assistant_text``
+the rest of it. A harness llmoji has no provider for can append rows in
+this schema to ``~/.llmoji/journals/<name>.jsonl`` and ``analyze`` reads
+them like any other.
 """
 
 from __future__ import annotations
@@ -35,66 +16,51 @@ import json
 from pathlib import Path
 from typing import Iterator
 
-from ..scrape import ScrapeRow
-from ..taxonomy import extract
+from ..scrape import ScrapeRow, is_injected
+from ..taxonomy import extract, split_leading_kaomoji
+
+# Model ids that name no model: Claude Code stamps ``<synthetic>`` on
+# entries it writes itself, and on some resumed sessions' messages.
+_NOT_A_MODEL = frozenset({"<synthetic>"})
 
 
-def iter_journal(
-    path: Path | str,
-    *,
-    source: str,
-) -> Iterator[ScrapeRow]:
-    """Yield :class:`ScrapeRow` per kaomoji-bearing journal line.
+def iter_journal(path: Path | str, *, source: str) -> Iterator[ScrapeRow]:
+    """One :class:`ScrapeRow` per row with a valid face.
 
-    Parameters
-    ----------
-    path :
-        Filesystem path to the JSONL journal. Missing files yield no
-        rows (no error — a never-installed provider is a valid
-        steady-state).
-    source :
-        Stable name for the originating journal. Used verbatim as
-        ``ScrapeRow.source``. Live-hook callers in
-        :func:`llmoji.cli._gather_rows` pass the ``-hook`` suffix
-        themselves (``"claude_code-hook"``); static-export
-        ``~/.llmoji/journals/<name>.jsonl`` callers pass the bare
-        stem (``"claude_ai_export"``) so the bundle subfolder names
-        don't lie about whether a row came from a live hook.
+    The stored face is re-split, so rows from a writer that let markdown
+    or prose into the ``kaomoji`` field (llmoji before 3.0 did, for
+    ``(•ᴗ•) **Done**``) get it back in the body. ``first_word`` is the
+    face's bucketing span (:func:`~llmoji.taxonomy.extract`). A
+    ``user_text`` that is harness-injected text (a task notification, a
+    reminder; earlier hooks stored those) reads as empty.
     """
     p = Path(path)
     if not p.exists():
         return
-    turn = 0
-    # Stream line-by-line — journals grow monotonically and a heavy
-    # user's file can hit 100s of MB. Reading + splitlines materialized
-    # the whole file in memory; the iter form scales with row count.
     with p.open() as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
+        for line in f:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            prefix = row.get("kaomoji")
-            if not prefix:
+            if not isinstance(row, dict):
                 continue
-            match = extract(str(prefix))
-            # ``extract`` runs the candidate filter (start-char set +
-            # length + bracket balance) internally; a non-empty
-            # ``first_word`` is already validated. Single source of
-            # truth lives in ``taxonomy``.
-            if not match.first_word:
+            split = split_leading_kaomoji(str(row.get("kaomoji") or ""))
+            if split is None:
                 continue
-            cwd = row.get("cwd")
+            face, tail = split
+            first_word = extract(face).first_word
+            if not first_word:
+                continue
+            body = str(row.get("assistant_text") or "")
+            model = str(row.get("model") or "")
+            user = str(row.get("user_text") or "")
             yield ScrapeRow(
                 source=source,
-                model=str(row.get("model") or "") or None,
+                model=None if model in _NOT_A_MODEL else model or None,
                 timestamp=str(row.get("ts") or ""),
-                cwd=str(cwd) if cwd else None,
-                assistant_text=str(row.get("assistant_text") or ""),
-                first_word=match.first_word,
-                surrounding_user=str(row.get("user_text") or ""),
+                cwd=str(row.get("cwd") or "") or None,
+                assistant_text=f"{tail} {body}".strip() if tail else body,
+                first_word=first_word,
+                surrounding_user="" if is_injected(user) else user,
             )
-            turn += 1

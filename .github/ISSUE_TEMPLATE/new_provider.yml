@@ -14,7 +14,7 @@ body:
     id: docs-link
     attributes:
       label: Hook contract docs link
-      description: Where the harness documents its stop-event hook (or post-LLM-call hook) contract
+      description: Where the harness documents its Stop hook contract, and where it keeps session transcripts
     validations:
       required: true
 
@@ -32,8 +32,6 @@ body:
       label: Settings file format
       options:
         - JSON
-        - TOML
-        - YAML
         - other (please describe)
     validations:
       required: true
@@ -54,4 +52,4 @@ body:
     id: notes
     attributes:
       label: Anything else
-      description: System-injection prefixes, multimodal text extraction, FP8 quirks, anything that makes this harness nonstandard
+      description: System-injected user messages, a global instructions file, anything that makes this harness nonstandard

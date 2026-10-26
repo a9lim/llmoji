@@ -1,21 +1,40 @@
-"""Lock the public surface (1.1.0 amended from the 1.0 freeze:
-manifest schema, descriptions row schema, the two pinned default
-model ids, and the per-source-model bundle layout were all bumped).
+"""Lock the public surface (3.0.0).
 
 If any test in this file fails, that's an aggregation-invariant
-event — the HF dataset's aggregation rules pin against these
-schemas, and changing one wants a hand-edit on the dataset card to
-match.
+event: the HF dataset's aggregation rules pin against the lexicon,
+schema, pinned models and the taxonomy, and changing one wants a
+hand-edit on the dataset card to match. Also locked here: the provider
+roster and interface, and the retired 2.x modules staying retired.
 
-The tests are intentionally conservative — they spot-check shape
-and a few specific values rather than fingerprinting every glyph.
-The fingerprint is documented in CLAUDE.md.
+The bundle layout, hook rendering, install/uninstall and the synth
+backends have their own test files.
+
+The tests are intentionally conservative: they spot-check shape and a
+few specific values rather than fingerprinting every glyph.
 """
 
 from __future__ import annotations
 
-import json
+import importlib
+from pathlib import Path
 from typing import Any
+
+import pytest
+
+import llmoji
+
+
+def test_all_exports_resolve_and_version_is_3_0_0():
+    assert llmoji.__version__ == "3.0.0"
+    assert len(set(llmoji.__all__)) == len(llmoji.__all__)
+    for name in llmoji.__all__:
+        assert hasattr(llmoji, name), f"llmoji.__all__ lists missing {name!r}"
+    # Everything the docstring calls cross-corpus is exported.
+    assert {
+        "KAOMOJI_START_CHARS", "is_kaomoji_candidate", "split_leading_kaomoji",
+        "extract", "canonicalize_kaomoji", "LEXICON", "SYNTHESIS_SCHEMA",
+        "NUDGE_MESSAGE", "ScrapeRow", "flatten_synthesis",
+    } <= set(llmoji.__all__)
 
 
 def test_taxonomy_surface_present():
@@ -25,24 +44,37 @@ def test_taxonomy_surface_present():
         canonicalize_kaomoji,
         extract,
         is_kaomoji_candidate,
+        split_leading_kaomoji,
     )
-    # KAOMOJI_START_CHARS — frozen set of leading-glyph chars.
+    # KAOMOJI_START_CHARS: frozen set of leading-glyph chars.
     assert isinstance(KAOMOJI_START_CHARS, frozenset)
     assert "(" in KAOMOJI_START_CHARS and "[" in KAOMOJI_START_CHARS
-    # canonicalize_kaomoji — idempotent on the empty string.
+    # canonicalize_kaomoji: idempotent on the empty string and on a sample.
     assert canonicalize_kaomoji("") == ""
-    # And idempotent on a sample.
     once = canonicalize_kaomoji("(；´Д｀)")
     assert canonicalize_kaomoji(once) == once
-    # is_kaomoji_candidate basic positive + negative.
+    # is_kaomoji_candidate: basic positive + negative.
     assert is_kaomoji_candidate("(｡◕‿◕｡)")
     assert not is_kaomoji_candidate("hi")
-    # extract returns a KaomojiMatch with the public field set
-    # (post-v1.0: span-only; gemma-tuned label dict moved to
+    # extract returns a span-only KaomojiMatch (the label dict lives in
     # llmoji_study.taxonomy_labels).
     m = extract("(｡◕‿◕｡) hi")
     assert isinstance(m, KaomojiMatch)
     assert m.first_word == "(｡◕‿◕｡)"
+    # split_leading_kaomoji: the one face/body splitter; None without a face.
+    assert split_leading_kaomoji("(｡◕‿◕｡) hi") == ("(｡◕‿◕｡)", "hi")
+    assert split_leading_kaomoji("(•ᴗ•) **Done**") == ("(•ᴗ•)", "**Done**")
+    assert split_leading_kaomoji("hi (｡◕‿◕｡)") is None
+
+
+def test_flatten_synthesis():
+    synth = {
+        "primary_affect": ["cheerful"],
+        "stance_modality_function": ["warm", "sincere"],
+    }
+    assert llmoji.flatten_synthesis(synth) == "cheerful, warm, sincere"
+    assert llmoji.flatten_synthesis({}) == ""
+    assert llmoji.flatten_synthesis({"primary_affect": "cheerful"}) == ""
 
 
 def test_no_pilot_labels_in_public():
@@ -58,15 +90,12 @@ def test_no_pilot_labels_in_public():
 
 
 def test_sanitize_model_id_for_path():
-    """Subfolder-name sanitization rule: lowercase, ``/`` → ``__``,
-    ``:`` → ``-``, dots and digits preserved. Empty → ``"unknown"``
-    (defensive — keeps rows with empty ``ScrapeRow.model`` from
-    collapsing into an unnamed top-level path)."""
+    """Bundle filename stem rule: lowercase, ``/`` → ``__``, ``:`` →
+    ``-``, dots and digits preserved. Empty → ``"unknown"`` so a row
+    with no model can't collapse into an unnamed path."""
     from llmoji._util import sanitize_model_id_for_path
     assert sanitize_model_id_for_path("") == "unknown"
-    assert sanitize_model_id_for_path("claude-haiku-4-5-20251001") == (
-        "claude-haiku-4-5-20251001"
-    )
+    assert sanitize_model_id_for_path("claude-haiku-5-5") == "claude-haiku-5-5"
     assert sanitize_model_id_for_path("gpt-5.4-mini-2026-03-17") == (
         "gpt-5.4-mini-2026-03-17"
     )
@@ -78,65 +107,6 @@ def test_sanitize_model_id_for_path():
     assert sanitize_model_id_for_path(once) == once
 
 
-def test_make_synthesizer_dispatches():
-    """Factory must return a backend-correct Synthesizer subclass
-    with the pinned default model id (anthropic, openai) or the
-    explicit one (local). Construction must NOT make a network
-    call — these objects sit on the call site for the duration of
-    a Stage A pass.
-    """
-    from llmoji.synth import (
-        AnthropicSynthesizer,
-        LocalSynthesizer,
-        OpenAISynthesizer,
-        make_synthesizer,
-    )
-    from llmoji.synth_prompts import (
-        DEFAULT_ANTHROPIC_MODEL_ID,
-        DEFAULT_OPENAI_MODEL_ID,
-    )
-
-    # Anthropic — pinned snapshot.
-    s = make_synthesizer("anthropic")
-    assert isinstance(s, AnthropicSynthesizer)
-    assert s.backend == "anthropic"
-    assert s.model_id == DEFAULT_ANTHROPIC_MODEL_ID
-
-    # OpenAI — pinned snapshot.
-    s = make_synthesizer("openai")
-    assert isinstance(s, OpenAISynthesizer)
-    assert s.backend == "openai"
-    assert s.model_id == DEFAULT_OPENAI_MODEL_ID
-
-    # Local — explicit base_url + model_id required.
-    s = make_synthesizer(
-        "local",
-        base_url="http://localhost:11434/v1",
-        model_id="llama3.1",
-    )
-    assert isinstance(s, LocalSynthesizer)
-    assert s.backend == "local"
-    assert s.model_id == "llama3.1"
-
-    # Local without --base-url / --model → ValueError (CLI converts
-    # to argparse-level error in real flow; the factory raises
-    # directly).
-    try:
-        make_synthesizer("local")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("local backend without args didn't raise")
-
-    # Unknown backend → ValueError.
-    try:
-        make_synthesizer("nonsense")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("unknown backend didn't raise")
-
-
 def test_synth_prompts_locked():
     from llmoji.synth_prompts import (
         CIRCUMPLEX_ANCHORS,
@@ -145,6 +115,7 @@ def test_synth_prompts_locked():
         EXTENSION_AXES,
         LEXICON,
         LEXICON_VERSION,
+        NUDGE_MESSAGE,
         SYNTHESIS_SCHEMA,
         SYNTHESIZE_PROMPT,
     )
@@ -152,12 +123,17 @@ def test_synth_prompts_locked():
     # point and the [FACE] mask token reference.
     assert "{samples}" in SYNTHESIZE_PROMPT
     assert "[FACE]" in SYNTHESIZE_PROMPT
-    # Locked default model ids per backend. Bumping either is a
-    # cross-corpus invariant change — the dataset's submitted
-    # adjective bags depend on which snapshot produced them.
-    assert DEFAULT_ANTHROPIC_MODEL_ID == "claude-haiku-4-5-20251001"
-    assert DEFAULT_OPENAI_MODEL_ID == "gpt-5.4-mini-2026-03-17"
-    # Lexicon shape — every adjective is a unique lowercase string,
+    # Locked default model ids per backend (3.0 moved them off
+    # claude-haiku-4-5-20251001 / gpt-5.4-mini-2026-03-17). Bumping
+    # either is a cross-corpus invariant change: the dataset's
+    # submitted adjective bags depend on which model produced them.
+    assert DEFAULT_ANTHROPIC_MODEL_ID == "claude-haiku-5-5"
+    assert DEFAULT_OPENAI_MODEL_ID == "gpt-6-luna"
+    assert llmoji.DEFAULT_ANTHROPIC_MODEL_ID == DEFAULT_ANTHROPIC_MODEL_ID
+    assert llmoji.DEFAULT_OPENAI_MODEL_ID == DEFAULT_OPENAI_MODEL_ID
+    # The kaomoji request ``llmoji install`` appends to instructions files.
+    assert isinstance(NUDGE_MESSAGE, str) and "kaomoji" in NUDGE_MESSAGE
+    # Lexicon shape: every adjective is a unique lowercase string,
     # quadrant tags are constrained, families are non-empty.
     seen: set[str] = set()
     quadrants = {"HP-D", "HP-S", "LP", "NP", "HN-D", "HN-S", "LN", "NB", "HB"}
@@ -181,14 +157,12 @@ def test_synth_prompts_locked():
     for q in quadrants:
         floor = 2 if q == "NB" else 3
         assert quadrant_counts.get(q, 0) >= floor, (q, quadrant_counts)
-    # Each extension family carries at least 2 entries (otherwise
-    # the schema's minItems=2 on stance_modality_function can't be
-    # satisfied if the model picks all from one family).
+    # Each extension family carries at least 2 entries, so a reply can
+    # draw its stance/modality words from more than one family.
     for fam in families - {"circumplex"}:
         assert family_counts.get(fam, 0) >= 2, (fam, family_counts)
-    # Schema enums match the LEXICON partition exactly.
-    # Pyright doesn't track nested types through ``dict[str, object]``,
-    # so cast to Any for the property/items/enum chain.
+    # Schema enums match the LEXICON partition exactly. Pyright doesn't
+    # track nested types through ``dict[str, object]``, so cast to Any.
     schema: Any = SYNTHESIS_SCHEMA
     primary_enum = schema["properties"]["primary_affect"]["items"]["enum"]
     extension_enum = schema["properties"][
@@ -199,10 +173,10 @@ def test_synth_prompts_locked():
     assert not (set(primary_enum) & set(extension_enum))
     # Schema is a strict object with no free-form keys.
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {
+    assert set(schema["properties"]) == set(schema["required"]) == {
         "primary_affect", "stance_modality_function",
     }
-    # LEXICON_VERSION must be a positive int — bundles stamp it.
+    # LEXICON_VERSION must be a positive int: bundles stamp it.
     assert isinstance(LEXICON_VERSION, int) and LEXICON_VERSION >= 1
 
 
@@ -210,16 +184,11 @@ def test_scrape_row_schema():
     from dataclasses import fields
     from llmoji.scrape import ScrapeRow
 
-    # The lean 1.1.x ScrapeRow — only fields the v1 pipeline reads.
     # NOTE: ``ScrapeRow`` is in-memory only; the cross-corpus
     # invariant is the on-disk 6-field journal row, not this
     # dataclass. Adding fields is forward-compat; removing or
     # renaming is fine because no external consumer reads the
-    # dataclass directly. Pre-1.1.x carried richer metadata
-    # (``session_id``, ``parent_uuid``, ``project_slug``,
-    # ``assistant_uuid``, ``git_branch``, ``turn_index``,
-    # ``had_thinking``); they're dropped because nothing in v1
-    # reads them and ``llmoji-study`` reads bundles + journals.
+    # dataclass directly.
     expected = {
         "source", "model", "timestamp", "cwd",
         "assistant_text", "first_word", "surrounding_user",
@@ -228,1038 +197,78 @@ def test_scrape_row_schema():
     assert got == expected, (
         f"ScrapeRow shape drifted; expected {expected}, got {got}"
     )
+    assert llmoji.ScrapeRow is ScrapeRow
+
+
+PROVIDER_INTERFACE = (
+    "install", "uninstall", "status", "live_rows", "replay", "session_files",
+    "importable", "render_hook", "hook_path", "doc_path", "journal_path",
+)
 
 
 def test_provider_interface():
-    from llmoji.providers import PROVIDERS, get_provider
-    from llmoji.providers.base import HookInstaller, PluginInstaller
+    from llmoji.providers import PROVIDERS, Provider, get_provider
 
-    # All seven first-class providers register: five bash-hook
-    # (2.2 added grok + antigravity) + two TS-plugin (1.3 promoted
-    # opencode + openclaw from generic-JSONL examples).
-    assert set(PROVIDERS) == {
-        "claude_code", "codex", "hermes", "grok", "antigravity",
-        "opencode", "openclaw",
-    }
-    for name in PROVIDERS:
+    # Four first-class providers; 3.0 retired hermes, opencode and openclaw.
+    assert set(PROVIDERS) == {"claude_code", "codex", "grok", "antigravity"}
+    for name, cls in PROVIDERS.items():
+        assert issubclass(cls, Provider)
+        for attr in PROVIDER_INTERFACE:
+            assert hasattr(cls, attr), f"{name} lacks {attr}"
         p = get_provider(name)
-        assert isinstance(p, HookInstaller)
+        assert isinstance(p, cls)
         assert p.name == name
-        assert p.journal_path
-        rendered = p.render_hook()
-        if isinstance(p, PluginInstaller):
-            # Plugin providers render TS — no bash placeholders to
-            # check, and the bash-side attrs (hook_template, hooks_dir,
-            # settings_path) are unused. Verify the version stamp got
-            # substituted and the canonical taxonomy block landed
-            # inside the BEGIN/END markers.
-            assert "__LLMOJI_VERSION__" not in rendered
-            assert "// BEGIN SHARED TAXONOMY" in rendered
-            assert "// END SHARED TAXONOMY" in rendered
-            # The taxonomy block carries the validator constants —
-            # spot-check that the splice happened (not just the markers
-            # rendering with an empty body).
-            assert "KAOMOJI_START_CHARS" in rendered
-            assert "isKaomojiCandidate" in rendered
-        else:
-            # Bash-hook providers — the historical shape.
-            assert p.hooks_dir
-            assert p.settings_path
-            assert p.hook_template
-            assert "$JOURNAL_PATH" not in rendered
-            assert "$KAOMOJI_START_CASE" not in rendered
-            assert "$INJECTED_PREFIXES_FILTER" not in rendered
-            assert "$LLMOJI_VERSION" not in rendered
-
-
-def test_bundle_schema():
-    """The bundle is the only thing that leaves the user's machine.
-    Lock the schema by writing a fake bundle and re-reading it.
-
-    Manifest must be well-formed JSON with the documented keys.
-    Per-source-model ``<sanitized>.jsonl`` files at the bundle
-    root each carry one row per canonical kaomoji; row keys =
-    ``{kaomoji, count, synthesis}``, with ``synthesis`` carrying
-    the v2 structured ``{primary_affect, stance_modality_function}``.
-    """
-    from llmoji.analyze import _write_bundle
-    from llmoji.synth_prompts import LEXICON_VERSION
-    from pathlib import Path
-    import tempfile
-
-    synth_a = {
-        "primary_affect": ["cheerful"],
-        "stance_modality_function": ["warm", "sincere"],
-    }
-    synth_b = {
-        "primary_affect": ["sad"],
-        "stance_modality_function": ["dramatic", "deferential"],
-    }
-    synth_c = {
-        "primary_affect": ["satisfied"],
-        "stance_modality_function": ["eager", "performative"],
+        for method in ("install", "uninstall", "status", "live_rows",
+                       "replay", "session_files", "render_hook"):
+            assert callable(getattr(p, method)), (name, method)
+        assert isinstance(p.render_hook(), str)
+        assert isinstance(p.importable, bool)
+        for path in (p.hook_path, p.doc_path, p.journal_path):
+            assert isinstance(path, Path) and path.is_absolute(), (name, path)
+    # Antigravity's transcripts carry no per-step model id, so it has
+    # no replay; the other three feed ``llmoji import``.
+    assert {n for n, c in PROVIDERS.items() if get_provider(n).importable} == {
+        "claude_code", "codex", "grok",
     }
 
-    with tempfile.TemporaryDirectory() as td:
-        bundle = Path(td)
-        _write_bundle(
-            bundle,
-            counts_by_cell={
-                "claude-sonnet-4-5-20250929": {"(｡◕‿◕｡)": 12, "(╥﹏╥)": 3},
-                "gpt-5.4-mini-2026-03-17": {"(｡◕‿◕｡)": 7},
-            },
-            synthesized_by_cell={
-                "claude-sonnet-4-5-20250929": {
-                    "(｡◕‿◕｡)": synth_a,
-                    "(╥﹏╥)": synth_b,
-                },
-                "gpt-5.4-mini-2026-03-17": {
-                    "(｡◕‿◕｡)": synth_c,
-                },
-            },
-            providers_seen=["claude_code-hook", "codex-hook"],
-            model_counts={
-                "claude-sonnet-4-5-20250929": 15,
-                "gpt-5.4-mini-2026-03-17": 7,
-            },
-            submitter_id="0" * 32,
-            synth_backend="anthropic",
-            synth_model_id="claude-haiku-4-5-20251001",
-            notes="test",
-        )
-        manifest = json.loads((bundle / "manifest.json").read_text())
-        for k in (
-            "llmoji_version", "lexicon_version",
-            "synthesis_model_id", "synthesis_backend",
-            "submitter_id", "generated_at", "providers_seen",
-            "model_counts", "total_synthesized_rows", "notes",
-        ):
-            assert k in manifest, f"missing manifest key: {k}"
-        # Removed keys must NOT come back.
-        for gone in (
-            "haiku_model_id", "journal_counts", "total_rows_scraped",
-            "total_kaomoji_unique_canonical",
-        ):
-            assert gone not in manifest, (
-                f"{gone!r} should be removed but still present"
-            )
-        # total_synthesized_rows = sum across folders (face appearing
-        # in 2 folders contributes 2).
-        assert manifest["total_synthesized_rows"] == 3
-        assert manifest["synthesis_backend"] == "anthropic"
-        assert manifest["synthesis_model_id"] == "claude-haiku-4-5-20251001"
-        assert manifest["lexicon_version"] == LEXICON_VERSION
 
-        # One .jsonl per source model at the bundle root, sanitized
-        # name.
-        data_files = sorted(
-            p.name for p in bundle.iterdir()
-            if p.is_file() and p.suffix == ".jsonl"
-        )
-        assert data_files == [
-            "claude-sonnet-4-5-20250929.jsonl",
-            "gpt-5.4-mini-2026-03-17.jsonl",
-        ]
-        # No subdirectories under the flat layout.
-        assert not [p for p in bundle.iterdir() if p.is_dir()]
-        for name in data_files:
-            data = bundle / name
-            rows = [
-                json.loads(line)
-                for line in data.read_text().splitlines()
-                if line.strip()
-            ]
-            assert rows, f"empty {name}"
-            for r in rows:
-                assert set(r) == {
-                    "kaomoji", "count", "synthesis",
-                }, f"unexpected row keys in {name}: {set(r)}"
-                assert isinstance(r["synthesis"], dict)
-                assert set(r["synthesis"]) == {
-                    "primary_affect", "stance_modality_function",
-                }, f"unexpected synthesis keys: {set(r['synthesis'])}"
-                assert isinstance(r["synthesis"]["primary_affect"], list)
-                assert isinstance(
-                    r["synthesis"]["stance_modality_function"], list,
-                )
+@pytest.mark.parametrize("name", ["hermes", "opencode", "openclaw"])
+def test_retired_providers_are_unknown(name: str):
+    from llmoji.providers import get_provider
+    with pytest.raises(KeyError):
+        get_provider(name)
 
 
-def test_bundle_allowlist_rejects_extras():
-    """`tar_bundle` must refuse to ship anything outside the flat
-    allowlist (top-level ``manifest.json`` plus per-source-model
-    ``*.jsonl`` files). Loud failure beats silent leak — covered
-    for an extra top-level file of the wrong type AND a stray
-    subdirectory.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.analyze import _write_bundle
-    from llmoji.upload import (
-        BUNDLE_DATA_SUFFIX,
-        BUNDLE_TOPLEVEL_ALLOWLIST,
-        BundleAllowlistError,
-        tar_bundle,
+def _survives(module: str) -> bool:
+    """Whether ``module`` still imports as code. A pre-3.0 checkout can
+    leave a directory of compiled ``__pycache__`` behind, which Python
+    imports as an empty namespace package; that is not the module."""
+    try:
+        mod = importlib.import_module(module)
+    except ImportError:
+        return False
+    if getattr(mod, "__file__", None):
+        return True
+    return any(
+        entry.name != "__pycache__"
+        for root in getattr(mod, "__path__", [])
+        for entry in Path(root).iterdir()
     )
 
-    def _fresh_bundle(td: Path) -> Path:
-        bundle = td / "bundle"
-        _write_bundle(
-            bundle,
-            counts_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": 1}},
-            synthesized_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": {
-                "primary_affect": ["cheerful"],
-                "stance_modality_function": ["warm", "sincere"],
-            }}},
-            providers_seen=[],
-            model_counts={},
-            submitter_id="0" * 32,
-            synth_backend="anthropic",
-            synth_model_id="claude-haiku-4-5-20251001",
-            notes="",
-        )
-        return bundle
 
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        # 1. extra top-level file of the wrong type
-        bundle = _fresh_bundle(td)
-        (bundle / "stray.txt").write_text("would leak")
-        try:
-            tar_bundle(bundle, out_path=td / "out1.tgz")
-        except BundleAllowlistError:
-            pass
-        else:
-            raise AssertionError(
-                "tar_bundle didn't refuse extra top-level file",
-            )
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        # 2. stray subdirectory (not allowed under the flat shape)
-        bundle = _fresh_bundle(td)
-        (bundle / "stray-subdir").mkdir()
-        (bundle / "stray-subdir" / "anything.jsonl").write_text("\n")
-        try:
-            tar_bundle(bundle, out_path=td / "out2.tgz")
-        except BundleAllowlistError:
-            pass
-        else:
-            raise AssertionError(
-                "tar_bundle didn't refuse stray subdirectory",
-            )
-
-    # Allowlist constants are the frozen shape.
-    assert BUNDLE_TOPLEVEL_ALLOWLIST == ("manifest.json",)
-    assert BUNDLE_DATA_SUFFIX == ".jsonl"
-
-
-def test_bundle_allowlist_rejects_symlinks():
-    """Symlinks bypass the file-type contract because ``Path.is_file``
-    follows them; the allowlist must explicitly reject symlinks
-    whether they point at the manifest or at a per-source-model
-    data file.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.analyze import _write_bundle
-    from llmoji.upload import BundleAllowlistError, tar_bundle
-
-    def _fresh(td: Path) -> Path:
-        bundle = td / "bundle"
-        _write_bundle(
-            bundle,
-            counts_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": 1}},
-            synthesized_by_cell={"claude-haiku-4-5-20251001": {"(◕‿◕)": {
-                "primary_affect": ["cheerful"],
-                "stance_modality_function": ["warm", "sincere"],
-            }}},
-            providers_seen=[],
-            model_counts={},
-            submitter_id="0" * 32,
-            synth_backend="anthropic",
-            synth_model_id="claude-haiku-4-5-20251001",
-            notes="",
-        )
-        return bundle
-
-    # 1. Symlinked manifest at top level.
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        bundle = _fresh(td)
-        target = td / "leak.json"
-        target.write_text("{}")
-        (bundle / "manifest.json").unlink()
-        (bundle / "manifest.json").symlink_to(target)
-        try:
-            tar_bundle(bundle, out_path=td / "out.tgz")
-        except BundleAllowlistError:
-            pass
-        else:
-            raise AssertionError(
-                "tar_bundle didn't refuse symlinked manifest",
-            )
-
-    # 2. Symlinked source-model .jsonl.
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        bundle = _fresh(td)
-        target = td / "leak.jsonl"
-        target.write_text("{}\n")
-        sym = bundle / "extra-model.jsonl"
-        sym.symlink_to(target)
-        try:
-            tar_bundle(bundle, out_path=td / "out.tgz")
-        except BundleAllowlistError:
-            pass
-        else:
-            raise AssertionError(
-                "tar_bundle didn't refuse symlinked .jsonl",
-            )
-
-
-def test_write_bundle_rejects_slug_collision():
-    """Two distinct ``ScrapeRow.model`` strings that sanitize to
-    the same filename slug must NOT both write to the same
-    ``<slug>.jsonl`` — that would silently overwrite. Loud
-    failure beats a half-shipped bundle.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.analyze import _write_bundle
-
-    with tempfile.TemporaryDirectory() as td:
-        bundle = Path(td) / "bundle"
-        try:
-            _write_bundle(
-                bundle,
-                counts_by_cell={
-                    "Some-Model:Tag": {"(◕‿◕)": 1},
-                    "some-model-tag": {"(◕‿◕)": 1},
-                },
-                synthesized_by_cell={
-                    "Some-Model:Tag": {"(◕‿◕)": {
-                        "primary_affect": ["cheerful"],
-                        "stance_modality_function": ["warm", "sincere"],
-                    }},
-                    "some-model-tag": {"(◕‿◕)": {
-                        "primary_affect": ["cheerful"],
-                        "stance_modality_function": ["warm", "sincere"],
-                    }},
-                },
-                providers_seen=[],
-                model_counts={},
-                submitter_id="0" * 32,
-                synth_backend="anthropic",
-                synth_model_id="claude-haiku-4-5-20251001",
-                notes="",
-            )
-        except ValueError as e:
-            assert "slug collision" in str(e), str(e)
-        else:
-            raise AssertionError(
-                "_write_bundle didn't refuse slug collision",
-            )
-
-
-def test_corrupt_settings_refused():
-    """HookInstaller.install must refuse to mutate a corrupt-but-
-    existing settings file. Silently wiping a user's config is a regression
-    we never want to ship."""
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import get_provider
-    from llmoji.providers.base import SettingsCorruptError
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        # Claude Code: malformed JSON
-        cc = get_provider("claude_code")
-        cc.hooks_dir = td / "claude" / "hooks"
-        cc.settings_path = td / "claude" / "settings.json"
-        cc.journal_path = td / "claude" / "journal.jsonl"
-        cc.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        cc.settings_path.write_text("{ not json")
-        try:
-            cc.install_hard()
-        except SettingsCorruptError:
-            pass
-        else:
-            raise AssertionError("claude_code didn't refuse corrupt JSON")
-        assert cc.settings_path.read_text() == "{ not json", (
-            "corrupt config was modified"
-        )
-
-        # Codex: malformed hooks.json (mirrors claude_code; both providers
-        # now route through the JSON helpers and Codex stores its hook
-        # registrations at ~/.codex/hooks.json).
-        cx = get_provider("codex")
-        cx.hooks_dir = td / "codex" / "hooks"
-        cx.settings_path = td / "codex" / "hooks.json"
-        cx.journal_path = td / "codex" / "journal.jsonl"
-        cx.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        original = "{ also not json"
-        cx.settings_path.write_text(original)
-        try:
-            cx.install_hard()
-        except SettingsCorruptError:
-            pass
-        else:
-            raise AssertionError("codex didn't refuse corrupt JSON")
-        assert cx.settings_path.read_text() == original, (
-            "corrupt config was modified"
-        )
-
-
-def test_mask_kaomoji_prepends_face_token():
-    """By v1.0 journal contract every source — live hooks, the
-    Claude.ai export reader, the generic-JSONL contract — strips
-    the leading kaomoji from ``assistant_text`` before yielding a
-    ScrapeRow; the prefix lives in the row's ``kaomoji`` field.
-    ``mask_kaomoji`` therefore just prepends ``[FACE] `` so Haiku
-    sees the ``[FACE] <body>`` shape the DESCRIBE prompts promise.
-    """
-    from llmoji.synth import MASK_TOKEN, mask_kaomoji
-
-    # Stripped-body row (the only journal-row shape under the v1.0
-    # contract): mask token gets prepended with a separating space.
-    masked = mask_kaomoji("I think we should refactor.", "(◕‿◕)")
-    assert masked.startswith(MASK_TOKEN + " "), masked
-    assert "I think we should refactor." in masked
-
-    # Leading whitespace on the body is normalized away — Haiku
-    # shouldn't see ``[FACE]   body``.
-    masked = mask_kaomoji("   leading spaces.", "(◕‿◕)")
-    assert masked == MASK_TOKEN + " leading spaces."
-
-    # Empty first_word — defensive pass-through.
-    assert mask_kaomoji("hello", "") == "hello"
-
-
-def test_hook_templates_render_to_valid_bash_substitutions():
-    """The base renderer should ignore unknown $VARS in the template
-    body (so embedded jq / sed `$KAOMOJI` etc. aren't eaten by the
-    Python Template substitution). string.Template's safe_substitute
-    handles this — verify. Also bash -n the rendered output so a
-    template syntax error fails CI rather than failing silently
-    inside the user's harness post-install.
-
-    Same checks apply to the secondary nudge templates — providers
-    that opt into a nudge get bash -n'd on the rendered output too,
-    so a quoting regression on ``$NUDGE_MESSAGE_QUOTED`` fails CI
-    rather than landing as a no-op in the user's harness.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-    from llmoji.providers import get_provider
-    bash = shutil.which("bash")
-
-    def _bash_n(label: str, rendered: str) -> None:
-        if not bash:
-            return
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".sh", delete=False,
-        ) as f:
-            f.write(rendered)
-            tmp = f.name
-        r = subprocess.run(
-            [bash, "-n", tmp], capture_output=True, text=True,
-        )
-        assert r.returncode == 0, (
-            f"{label} failed bash -n: {r.stderr}"
-        )
-
-    for name in ("claude_code", "codex", "hermes", "grok", "antigravity"):
-        p = get_provider(name)
-        rendered = p.render_hook()
-        # The rendered hook still contains shell-side $KAOMOJI refs
-        # (they're bash variables, not Python placeholders).
-        assert "KAOMOJI" in rendered
-        # And no Python Template placeholder leaked.
-        for placeholder in (
-            "${JOURNAL_PATH}", "${KAOMOJI_START_CASE}",
-            "${INJECTED_PREFIXES_FILTER}", "${LLMOJI_VERSION}",
-        ):
-            assert placeholder not in rendered, (
-                f"{name} kept literal {placeholder}; "
-                "did substitution drop the placeholder?"
-            )
-        _bash_n(f"{name} main hook", rendered)
-
-        if p.has_nudge:
-            nudge = p.render_nudge_hook()
-            for placeholder in (
-                "${NUDGE_MESSAGE_QUOTED}", "${LLMOJI_VERSION}",
-            ):
-                assert placeholder not in nudge, (
-                    f"{name} nudge kept literal {placeholder}"
-                )
-            # The nudge message is substituted shell-quoted (embedded
-            # single quotes escaped as ``'\''``); the fully-quoted
-            # bash literal must round-trip verbatim into the rendered
-            # hook. Checking the quoted form (not the raw message)
-            # keeps the assertion correct for messages that contain
-            # apostrophes.
-            from llmoji.providers.base import _shell_quote
-
-            quoted = f"'{_shell_quote(p.nudge_message)}'"
-            assert quoted in nudge, "nudge message lost in template rendering"
-            _bash_n(f"{name} nudge hook", nudge)
-
-
-def test_nudge_install_uninstall_roundtrip():
-    """Nudge hooks install and uninstall cleanly alongside the main
-    hook — no orphan files, no orphan settings entries. Idempotent
-    re-install is a no-op (same as the main-hook contract).
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import get_provider
-
-    for provider_name in ("claude_code", "codex"):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            p = get_provider(provider_name)
-            assert p.has_nudge, (
-                f"{provider_name} should ship a nudge in v1.0"
-            )
-            p.hooks_dir = td / provider_name / "hooks"
-            p.settings_path = td / provider_name / "settings.json"
-            p.journal_path = td / provider_name / "journal.jsonl"
-            # Fourth path, and the one this test used to forget:
-            # uninstall() strips the soft-doc block, so leaving this
-            # at its default edited the real ~/.claude/CLAUDE.md.
-            p.system_prompt_doc_path = td / provider_name / "DOC.md"
-
-            p.install_hard()
-            nudge_path = p.nudge_hook_path
-            assert nudge_path is not None
-            assert p.hook_path.exists()
-            assert nudge_path.exists()
-            s = p.status()
-            assert s.installed
-            assert s.nudge_installed
-            assert s.nudge_hook_path == nudge_path
-
-            # Idempotent: install twice should yield the same file.
-            settings_after_first = p.settings_path.read_text()
-            p.install_hard()
-            assert p.settings_path.read_text() == settings_after_first
-
-            p.uninstall()
-            assert not p.hook_path.exists()
-            assert not nudge_path.exists()
-            s = p.status()
-            assert not s.installed
-            assert not s.nudge_installed
-
-
-def test_hermes_install_into_empty_or_missing_file():
-    """Empty / missing ``~/.hermes/config.yaml`` is the simplest case:
-    install writes a minimal valid YAML doc with both hook entries
-    under ``hooks:``, status reports both registered, uninstall
-    removes the file (since hooks was the only top-level key)."""
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-
-    for seed in (None, "", "\n\n  \n"):
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            p = HermesProvider()
-            p.hooks_dir = td / "agent-hooks"
-            p.settings_path = td / "config.yaml"
-            p.journal_path = td / "kaomoji-journal.jsonl"
-            if seed is not None:
-                p.settings_path.write_text(seed)
-            p.install_hard()
-            assert p.settings_path.exists()
-            text = p.settings_path.read_text()
-            assert "post_llm_call:" in text
-            assert "pre_llm_call:" in text
-            s = p.status()
-            assert s.installed
-            assert s.nudge_installed
-            p.uninstall()
-            # No surviving top-level keys → file is unlinked.
-            assert not p.settings_path.exists()
-
-
-def test_hermes_install_replaces_placeholder_hooks_shapes():
-    """The Hermes default config ships ``hooks: {}``; some users
-    write ``hooks: []`` or ``hooks: ~``. All three are functionally
-    equivalent to "no hooks configured" and get replaced with our
-    populated mapping in place. Neighboring prose + comments survive
-    the round-trip.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-
-    placeholders = [
-        "hooks: {}\n",
-        "hooks: []\n",
-        "hooks: ~\n",
-        "hooks:\n",          # bare key → null value
-    ]
-    for placeholder in placeholders:
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            p = HermesProvider()
-            p.hooks_dir = td / "agent-hooks"
-            p.settings_path = td / "config.yaml"
-            p.journal_path = td / "kaomoji-journal.jsonl"
-            p.settings_path.write_text(
-                "# top comment\n"
-                "model:\n  default: foo\n"
-                + placeholder
-                + "hooks_auto_accept: false\n"
-                "# trailing comment\n"
-            )
-            p.install_hard()
-            text = p.settings_path.read_text()
-            # Placeholder is gone, our hooks present, neighbors intact.
-            assert "hooks: {}" not in text
-            assert "hooks: []" not in text
-            assert "post_llm_call:" in text
-            assert "pre_llm_call:" in text
-            assert "hooks_auto_accept: false" in text
-            assert "default: foo" in text
-            assert "# top comment" in text
-            assert "# trailing comment" in text
-
-            s = p.status()
-            assert s.installed
-            assert s.nudge_installed
-
-            p.uninstall()
-            cleaned = p.settings_path.read_text()
-            assert "post_llm_call:" not in cleaned
-            assert "pre_llm_call:" not in cleaned
-            assert "hooks_auto_accept: false" in cleaned
-            assert "default: foo" in cleaned
-            assert "# top comment" in cleaned
-            assert "# trailing comment" in cleaned
-
-
-def test_hermes_install_merges_into_populated_hooks_block():
-    """A populated ``hooks:`` block with the user's own pre_llm_call
-    and a third event we don't touch: install merges our entries
-    into the existing structure rather than refusing.
-
-    Specifically:
-      - our ``pre_llm_call`` command is appended to the existing list
-        (next to the user's command, not replacing it)
-      - our ``post_llm_call`` is added as a new key with our entry
-      - the user's unrelated ``tool_call`` block is preserved verbatim
-
-    Uninstall is the inverse: removes only our entries, leaves the
-    user's surrounding hooks intact.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = HermesProvider()
-        p.hooks_dir = td / "agent-hooks"
-        p.settings_path = td / "config.yaml"
-        p.journal_path = td / "kaomoji-journal.jsonl"
-        p.settings_path.write_text(
-            "model:\n  default: foo\n"
-            "hooks:\n"
-            "  pre_llm_call:\n"
-            "    - command: /home/user/my_custom_hook.sh\n"
-            "  tool_call:\n"
-            "    - command: /home/user/tool_audit.sh\n"
-        )
-        p.install_hard()
-        text = p.settings_path.read_text()
-        # User's commands preserved.
-        assert "/home/user/my_custom_hook.sh" in text
-        assert "/home/user/tool_audit.sh" in text
-        # Our commands now present.
-        assert str(p.hook_path) in text
-        assert p.nudge_hook_path is not None
-        assert str(p.nudge_hook_path) in text
-        # tool_call key still there.
-        assert "tool_call:" in text
-
-        s = p.status()
-        assert s.installed
-        assert s.nudge_installed
-
-        # Idempotent: re-running install is a no-op.
-        before = p.settings_path.read_text()
-        p.install_hard()
-        after = p.settings_path.read_text()
-        assert before == after
-
-        p.uninstall()
-        cleaned = p.settings_path.read_text()
-        # User's entries survive.
-        assert "/home/user/my_custom_hook.sh" in cleaned
-        assert "/home/user/tool_audit.sh" in cleaned
-        # Ours are gone.
-        assert str(p.hook_path) not in cleaned
-        assert str(p.nudge_hook_path) not in cleaned
-        # And the user's tool_call key is preserved.
-        assert "tool_call:" in cleaned
-
-
-def test_hermes_install_preserves_in_block_comments():
-    """A hand-curated hooks block with comments around the user's
-    own entries: install merges our entries WITHOUT touching the
-    user's comments. This is the load-bearing reason hermes uses
-    surgical text edits instead of load-mutate-dump — ruamel's
-    serialization rewrap would silently shift comment positions
-    and (worse) corrupt double-quoted scalars at wrap boundaries.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = HermesProvider()
-        p.hooks_dir = td / "agent-hooks"
-        p.settings_path = td / "config.yaml"
-        p.journal_path = td / "kaomoji-journal.jsonl"
-        original = (
-            "model:\n  default: foo\n"
-            "# user-curated hooks below\n"
-            "hooks:\n"
-            "  # primary audit hook fires on every tool call\n"
-            "  tool_call:\n"
-            "    - command: /home/user/audit.sh  # inline note\n"
-            "  # extra inline comment between events\n"
-            "  pre_llm_call:\n"
-            "    - command: /home/user/nudge.sh\n"
-            "# post-block trailing comment\n"
-            "hooks_auto_accept: false\n"
-        )
-        p.settings_path.write_text(original)
-        p.install_hard()
-        text = p.settings_path.read_text()
-
-        # Every user comment survives byte-for-byte.
-        for comment in (
-            "# user-curated hooks below",
-            "# primary audit hook fires on every tool call",
-            "# inline note",
-            "# extra inline comment between events",
-            "# post-block trailing comment",
-        ):
-            assert comment in text, f"lost comment: {comment}"
-        # User commands preserved.
-        assert "/home/user/audit.sh" in text
-        assert "/home/user/nudge.sh" in text
-        # Our commands present.
-        assert str(p.hook_path) in text
-        assert p.nudge_hook_path is not None
-        assert str(p.nudge_hook_path) in text
-
-        s = p.status()
-        assert s.installed
-        assert s.nudge_installed
-
-
-def test_hermes_install_refuses_corrupt_yaml():
-    """Unparseable YAML triggers SettingsCorruptError. The hook
-    files don't exist on disk at the point of refusal because
-    HookInstaller.install does the registration last; the test
-    confirms the file isn't mutated either."""
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-    from llmoji.providers.base import SettingsCorruptError
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = HermesProvider()
-        p.hooks_dir = td / "agent-hooks"
-        p.settings_path = td / "config.yaml"
-        p.journal_path = td / "kaomoji-journal.jsonl"
-        original = "key: [unclosed flow seq\n"
-        p.settings_path.write_text(original)
-        try:
-            p.install_hard()
-        except SettingsCorruptError as exc:
-            assert "unparseable YAML" in str(exc)
-        else:
-            raise AssertionError("corrupt YAML didn't trigger SettingsCorruptError")
-        # File contents preserved on refusal.
-        assert p.settings_path.read_text() == original
-
-
-def test_hermes_install_refuses_non_mapping_top_level():
-    """A YAML doc whose top-level is a list / scalar isn't a config
-    we can edit. Refuse loudly, leave the file alone."""
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-    from llmoji.providers.base import SettingsCorruptError
-
-    seeds = [
-        "- a\n- b\n",          # top-level sequence
-        "just a string\n",     # top-level scalar
-    ]
-    for seed in seeds:
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            p = HermesProvider()
-            p.hooks_dir = td / "agent-hooks"
-            p.settings_path = td / "config.yaml"
-            p.journal_path = td / "kaomoji-journal.jsonl"
-            p.settings_path.write_text(seed)
-            try:
-                p.install_hard()
-            except SettingsCorruptError as exc:
-                assert "not a mapping" in str(exc)
-            else:
-                raise AssertionError(
-                    f"non-mapping top-level didn't refuse: {seed!r}"
-                )
-            assert p.settings_path.read_text() == seed
-
-
-def test_hermes_install_refuses_non_mapping_hooks_value():
-    """``hooks:`` set to a populated sequence or scalar (not the
-    placeholder ``[]`` / ``{}`` / null shapes, which we replace)
-    isn't safe to merge into — the contract is
-    ``hooks: {event: [...]}``, mapping at the top level. Refuse."""
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import HermesProvider
-    from llmoji.providers.base import SettingsCorruptError
-
-    seeds = [
-        # Populated sequence under hooks.
-        "hooks:\n  - some_string\n",
-        # Scalar.
-        "hooks: enabled\n",
-    ]
-    for seed in seeds:
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            p = HermesProvider()
-            p.hooks_dir = td / "agent-hooks"
-            p.settings_path = td / "config.yaml"
-            p.journal_path = td / "kaomoji-journal.jsonl"
-            p.settings_path.write_text(seed)
-            try:
-                p.install_hard()
-            except SettingsCorruptError as exc:
-                assert "hooks" in str(exc)
-            else:
-                raise AssertionError(f"non-mapping hooks didn't refuse: {seed!r}")
-            assert p.settings_path.read_text() == seed
-
-
-def test_plugin_install_uninstall_roundtrip():
-    """Plugin providers (opencode, openclaw) install + uninstall
-    cleanly without touching the journal. Idempotent re-install is a
-    no-op (same contract as the bash providers).
-
-    For openclaw, install also flips
-    ``plugins.entries.llmoji-kaomoji.hooks.allowConversationAccess``
-    in ``~/.openclaw/config.json``; uninstall drops the entry. The
-    test runs against a redirected ``settings_path`` / ``plugin_dir``
-    / ``journal_path`` so it doesn't touch the user's real harness
-    config.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import OpenclawProvider, OpencodeProvider
-
-    # ---- opencode: file presence == registered, no settings edit ----
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = OpencodeProvider()
-        p.plugin_dir = td / "opencode" / "plugins"
-        p.journal_path = td / "journals" / "opencode.jsonl"
-
-        p.install_hard()
-        plugin_file = p.plugin_dir / "llmoji.ts"
-        assert plugin_file.exists()
-        # Rendered TS contains the version stamp + the spliced taxonomy.
-        rendered = plugin_file.read_text()
-        assert "__LLMOJI_VERSION__" not in rendered
-        assert "isKaomojiCandidate" in rendered
-
-        s = p.status()
-        assert s.installed
-        assert s.main_installed
-        assert s.main_hook_current
-        # No nudge file lives on disk for plugin providers.
-        assert s.nudge_hook_path is None
-        assert not s.nudge_installed
-
-        # Idempotent re-install — same content, same path.
-        before = plugin_file.read_text()
-        p.install_hard()
-        assert plugin_file.read_text() == before
-
-        p.uninstall()
-        assert not plugin_file.exists()
-        assert not p.status().installed
-
-    # ---- openclaw: bundle install + config flag flip ----
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = OpenclawProvider()
-        # OpenClaw stores ``plugins/<id>/`` under its home, so
-        # plugin_dir's parent.parent is the openclaw home.
-        p.plugin_dir = td / "openclaw" / "plugins" / "llmoji-kaomoji"
-        p.settings_path = td / "openclaw" / "config.json"
-        p.journal_path = td / "journals" / "openclaw.jsonl"
-        p.settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-        p.install_hard()
-        index_ts = p.plugin_dir / "index.ts"
-        plugin_json = p.plugin_dir / "openclaw.plugin.json"
-        assert index_ts.exists()
-        assert plugin_json.exists()
-        # plugin.json carries the version stamp.
-        manifest = json.loads(plugin_json.read_text())
-        assert manifest["id"] == "llmoji-kaomoji"
-        assert manifest["version"]  # not literal __LLMOJI_VERSION__
-        assert "__LLMOJI_VERSION__" not in plugin_json.read_text()
-
-        # Conversation-access flag flipped.
-        cfg = json.loads(p.settings_path.read_text())
-        flag = (
-            cfg.get("plugins", {})
-            .get("entries", {})
-            .get("llmoji-kaomoji", {})
-            .get("hooks", {})
-            .get("allowConversationAccess")
-        )
-        assert flag is True
-
-        s = p.status()
-        assert s.installed
-        assert s.main_installed
-        assert s.settings_parse_error is None
-
-        # Idempotent install — file content + config flag stay byte-stable.
-        before_idx = index_ts.read_text()
-        before_cfg = p.settings_path.read_text()
-        p.install_hard()
-        assert index_ts.read_text() == before_idx
-        assert p.settings_path.read_text() == before_cfg
-
-        p.uninstall()
-        assert not index_ts.exists()
-        assert not plugin_json.exists()
-        # Entry dropped from the config.
-        cfg_after = json.loads(p.settings_path.read_text())
-        assert "llmoji-kaomoji" not in cfg_after.get(
-            "plugins", {}
-        ).get("entries", {})
-
-
-def test_openclaw_refuses_corrupt_config():
-    """OpenclawProvider.install must refuse to mutate a corrupt
-    ``~/.openclaw/config.json``. Same contract as the bash JSON
-    providers — silent overwrite of a hand-broken config is the
-    regression we never want to ship.
-    """
-    from pathlib import Path
-    import tempfile
-
-    from llmoji.providers import OpenclawProvider
-    from llmoji.providers.base import SettingsCorruptError
-
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        p = OpenclawProvider()
-        p.plugin_dir = td / "openclaw" / "plugins" / "llmoji-kaomoji"
-        p.settings_path = td / "openclaw" / "config.json"
-        p.journal_path = td / "journals" / "openclaw.jsonl"
-        p.settings_path.parent.mkdir(parents=True, exist_ok=True)
-        p.settings_path.write_text("{ not json")
-        try:
-            p.install_hard()
-        except SettingsCorruptError:
-            pass
-        else:
-            raise AssertionError("openclaw didn't refuse corrupt config")
-        # Corrupt file preserved.
-        assert p.settings_path.read_text() == "{ not json"
-
-
-def test_plugin_taxonomy_block_matches():
-    """The two TS-plugin providers (opencode, openclaw) re-implement
-    the kaomoji validator and leading-bracket-span extractor in
-    TypeScript because the taxonomy is part of the v1.0 frozen public
-    surface and TS-plugin hosts can't import Python.
-
-    The shared block is canonical at
-    ``llmoji/_plugins/_kaomoji_taxonomy.ts.partial`` and is spliced
-    into each plugin's ``// BEGIN SHARED TAXONOMY`` /
-    ``// END SHARED TAXONOMY`` markers at install render time
-    (:func:`llmoji.providers.base.render_plugin_template`). This test
-    asserts the rendered output round-trips bit-identically against
-    the partial so a stale hand-edit in either template is caught at
-    CI rather than landing as a quietly-divergent TS port.
-
-    Pre-1.3 the partial lived under ``examples/`` and the test
-    compared two hand-curated plugin files; the move to renderable
-    templates means the validation is now "rendered output contains
-    the partial verbatim" rather than "two example files agree".
-    """
-    import importlib.resources
-
-    from llmoji.providers import OpenclawProvider, OpencodeProvider
-
-    partial = importlib.resources.files("llmoji._plugins").joinpath(
-        "_kaomoji_taxonomy.ts.partial"
-    ).read_text()
-
-    BEGIN = "// BEGIN SHARED TAXONOMY"
-    END = "// END SHARED TAXONOMY"
-
-    # opencode (single .ts file) + openclaw (multiple files; only the
-    # index.ts carries the taxonomy block — the .plugin.json doesn't).
-    opencode = OpencodeProvider()
-    openclaw = OpenclawProvider()
-    rendered_opencode = opencode.render_plugin_file("opencode.ts.tmpl")
-    rendered_openclaw_idx = openclaw.render_plugin_file(
-        "openclaw_index.ts.tmpl"
-    )
-
-    for label, text in (
-        ("opencode", rendered_opencode),
-        ("openclaw index.ts", rendered_openclaw_idx),
-    ):
-        assert BEGIN in text, f"{label} missing BEGIN SHARED TAXONOMY marker"
-        assert END in text, f"{label} missing END SHARED TAXONOMY marker"
-        start_idx = text.index(BEGIN)
-        body_start = text.index("\n", start_idx) + 1
-        end_idx = text.index(END)
-        block = text[body_start:end_idx]
-        # Trim a single trailing newline on each side so we tolerate
-        # the conventional "block ends with a newline" shape.
-        assert block.rstrip("\n") == partial.rstrip("\n"), (
-            f"{label} taxonomy block drifted from canonical "
-            f"llmoji/_plugins/_kaomoji_taxonomy.ts.partial — the splice "
-            f"is automatic at render time, so a mismatch here means "
-            f"the BEGIN/END markers in the template were edited"
-        )
-
-
+@pytest.mark.parametrize(
+    "module",
+    [
+        "llmoji.backfill",
+        "llmoji.providers.hermes",
+        "llmoji.providers.opencode",
+        "llmoji.providers.openclaw",
+        "llmoji.sources.gemini_export",
+        "llmoji.sources.openhands_export",
+        "llmoji.sources.claude_export_alt",
+        "llmoji._hooks",
+        "llmoji._plugins",
+    ],
+)
+def test_retired_modules_are_gone(module: str):
+    assert not _survives(module), f"{module} was retired in 3.0 but imports"

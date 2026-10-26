@@ -10,15 +10,18 @@ expected :class:`~llmoji.scrape.ScrapeRow` stream. Covers:
   * ``content_type == "multimodal_text"`` parts (string + dict mix)
   * Unix-timestamp → ISO-8601 conversion
   * model-slug pickup from ``message.metadata``
-  * the strip-leading-kaomoji journal-row contract
+  * the strip-leading-kaomoji journal-row contract (the face and body
+    come from ``taxonomy.split_leading_kaomoji``; the user prompt is
+    ``.strip()``ped)
   * union-by-id + keep-fuller-copy across multiple export dirs
   * defensive returns on missing ``mapping`` / ``current_node`` /
     bad outer JSON shapes
 
 The reader's contract: one row per kaomoji-bearing assistant message
-in each conversation's active branch, with the kaomoji prefix
-stripped from ``assistant_text`` and the latest preceding user
-message captured into ``surrounding_user``.
+in each conversation's active branch, labelled ``source ==
+"chatgpt_export"``, with the kaomoji prefix stripped from
+``assistant_text`` and the latest preceding user message captured
+(stripped) into ``surrounding_user``.
 """
 
 from __future__ import annotations
@@ -112,7 +115,7 @@ def test_yields_kaomoji_led_assistant_with_user_above(tmp_path: Path) -> None:
     rows = list(iter_chatgpt_export([tmp_path]))
     assert len(rows) == 1
     r = rows[0]
-    assert r.source == "chatgpt-export"
+    assert r.source == "chatgpt_export"
     assert r.first_word == "(◕‿◕)"
     # Journal-row contract: assistant_text MUST NOT carry the kaomoji.
     assert r.assistant_text == "feeling cheery, thanks for asking"
@@ -144,6 +147,30 @@ def test_strip_handles_whitespace_and_indented_body(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0].first_word == "(｡◕‿◕｡)"
     assert rows[0].assistant_text == "leading whitespace and a margin"
+
+
+def test_face_splits_from_trailing_markdown(tmp_path: Path) -> None:
+    """The face ends at the first markdown token, which opens the body
+    along with everything after it (paragraph breaks included)."""
+    nodes = [
+        _node("u1", None, "user", "status?"),
+        _node("a1", "u1", "assistant", "(•ᴗ•) **Done**\n\n- one\n- two"),
+    ]
+    _write(tmp_path, [_conv("c1", nodes)])
+    rows = list(iter_chatgpt_export([tmp_path]))
+    assert len(rows) == 1
+    assert rows[0].first_word == "(•ᴗ•)"
+    assert rows[0].assistant_text == "**Done**\n\n- one\n- two"
+
+
+def test_surrounding_user_is_stripped(tmp_path: Path) -> None:
+    nodes = [
+        _node("u1", None, "user", "  \n padded prompt \n\n"),
+        _node("a1", "u1", "assistant", "(◕‿◕) ok"),
+    ]
+    _write(tmp_path, [_conv("c1", nodes)])
+    rows = list(iter_chatgpt_export([tmp_path]))
+    assert [r.surrounding_user for r in rows] == ["padded prompt"]
 
 
 # ---------------------------------------------------------------------------
