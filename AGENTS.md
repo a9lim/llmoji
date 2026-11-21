@@ -284,9 +284,10 @@ llmoji-study are CC-BY-SA-4.0.
 - `~/Work/meta/bootstrap/lib.sh` (`kaomoji_hooks`) reads `llmoji status
   --provider P --json` for `providers[0].healthy` and runs `llmoji
   install P` when it's false.
-- `interpretability-experiments/llmoji-experiment` imports
-  `canonicalize_kaomoji`, `extract`, `is_kaomoji_candidate`,
-  `iter_journal`, `iter_claude_export` and the lexicon names.
+- [`llmoji-experiment`](https://github.com/a9lim/llmoji-experiment)
+  (archived 2026-11-20, read-only) imported `canonicalize_kaomoji`,
+  `extract`, `is_kaomoji_candidate`, `iter_journal`, `iter_claude_export`
+  and the lexicon names; nothing live depends on them for it now.
 
 ## Conventions
 
